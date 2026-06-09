@@ -1,0 +1,187 @@
+/* ============================================================
+   量化终端 · 设计 tokens
+   深墨底 + 金琥珀品牌色 + 等宽数字 + A股语义色（红涨绿跌）
+   ============================================================ */
+:root {
+  --bg-0: #080a0e;
+  --bg-1: #0b0e13;
+  --bg-2: #11151c;
+  --bg-3: #171c25;
+  --bg-hover: #1c222c;
+  --border: #232b36;
+  --border-soft: #1a202a;
+
+  --text-0: #e8edf4;
+  --text-1: #9aa6b4;
+  --text-2: #5f6b78;
+
+  --brand: #f0b429;
+  --brand-2: #ffcd4d;
+  --brand-soft: rgba(240, 180, 41, 0.12);
+  --brand-glow: rgba(240, 180, 41, 0.28);
+
+  --up: #f6465d; /* 涨 / 红 */
+  --down: #1fc77f; /* 跌 / 绿 */
+
+  --radius: 10px;
+  --radius-sm: 7px;
+  --shadow: 0 8px 30px rgba(0, 0, 0, 0.42);
+
+  --font-display: 'Sora', -apple-system, BlinkMacSystemFont, 'PingFang SC',
+    'Microsoft YaHei', sans-serif;
+  --font-body: 'Sora', -apple-system, BlinkMacSystemFont, 'PingFang SC',
+    'Microsoft YaHei', sans-serif;
+  --font-mono: 'JetBrains Mono', 'SFMono-Regular', Consolas, Menlo, monospace;
+}
+
+/* ---- Element Plus 深色变量覆盖 ---- */
+html.dark {
+  --el-color-primary: var(--brand);
+  --el-color-primary-light-3: #c8941f;
+  --el-color-primary-light-5: #8f6a18;
+  --el-color-primary-light-7: #4a3a13;
+  --el-color-primary-light-8: #322910;
+  --el-color-primary-light-9: #221d0e;
+  --el-color-primary-dark-2: var(--brand-2);
+
+  --el-bg-color: var(--bg-2);
+  --el-bg-color-page: var(--bg-1);
+  --el-bg-color-overlay: var(--bg-3);
+  --el-fill-color-blank: var(--bg-2);
+  --el-fill-color-light: var(--bg-3);
+  --el-fill-color: var(--bg-3);
+
+  --el-border-color: var(--border);
+  --el-border-color-light: var(--border);
+  --el-border-color-lighter: var(--border-soft);
+  --el-border-color-extra-light: var(--border-soft);
+
+  --el-text-color-primary: var(--text-0);
+  --el-text-color-regular: var(--text-1);
+  --el-text-color-secondary: var(--text-2);
+  --el-text-color-placeholder: var(--text-2);
+
+  --el-border-radius-base: 8px;
+  --el-font-family: var(--font-body);
+}
+
+* {
+  box-sizing: border-box;
+}
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+}
+body {
+  font-family: var(--font-body);
+  color: var(--text-0);
+  background-color: var(--bg-1);
+  /* 微妙的网格 + 顶部光晕，营造终端氛围 */
+  background-image:
+    radial-gradient(900px 420px at 78% -8%, rgba(240, 180, 41, 0.07), transparent 60%),
+    linear-gradient(var(--border-soft) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border-soft) 1px, transparent 1px);
+  background-size: 100% 100%, 44px 44px, 44px 44px;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 数字、代码统一等宽，价格更易扫读 */
+.mono,
+.num {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+.mono {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 页面容器 */
+.page {
+  padding: 22px 26px;
+}
+.page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 20px;
+}
+.page-title {
+  font-family: var(--font-display);
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.page-title::before {
+  content: '';
+  width: 4px;
+  height: 18px;
+  border-radius: 2px;
+  background: linear-gradient(var(--brand-2), var(--brand));
+  box-shadow: 0 0 10px var(--brand-glow);
+}
+.page-sub {
+  color: var(--text-2);
+  font-size: 12.5px;
+  margin-top: -12px;
+  margin-bottom: 18px;
+}
+
+.up {
+  color: var(--up) !important;
+}
+.down {
+  color: var(--down) !important;
+}
+
+/* 卡片细节 */
+.el-card {
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius) !important;
+  background: var(--bg-2) !important;
+}
+.el-card__header {
+  border-bottom: 1px solid var(--border-soft) !important;
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 14px;
+}
+
+/* 表格更紧凑、表头大写小字 */
+.el-table th .cell {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--text-1) !important;
+}
+
+/* 按钮：主按钮文字用深色压在金色上 */
+.el-button--primary {
+  --el-button-text-color: #1a1407;
+  --el-button-hover-text-color: #1a1407;
+  font-weight: 600;
+}
+
+/* 滚动条 */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: #2a323d;
+  border-radius: 6px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #38424f;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}

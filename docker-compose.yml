@@ -1,0 +1,17 @@
+services:
+  stock-agent:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: stock-agent:latest
+    container_name: stock-agent
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    env_file:
+      - .env
+    environment:
+      # 容器内数据库路径，对应下方挂载卷
+      DATABASE_PATH: /app/data/stock-agent.sqlite
+    volumes:
+      - ./data:/app/data

@@ -1,0 +1,18 @@
+{
+  "name": "stock-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "dev": "pnpm --parallel --filter ./backend --filter ./frontend dev",
+    "dev:backend": "pnpm --filter ./backend dev",
+    "dev:frontend": "pnpm --filter ./frontend dev",
+    "build": "pnpm --filter ./frontend build",
+    "typecheck": "pnpm --filter ./backend typecheck && pnpm --filter ./frontend typecheck",
+    "db:push": "pnpm --filter ./backend db:push"
+  },
+  "packageManager": "pnpm@8.15.4+sha512.0bd3a9be9eb0e9a692676deec00a303ba218ba279d99241475616b398dbaeedd11146f92c2843458f557b1d127e09d4c171e105bdcd6b61002b39685a8016b9e"
+}
