@@ -38,6 +38,11 @@ import type {
   RetentionConfig,
   SafetyState,
   SafetyUpdate,
+  DisciplineConfig,
+  DisciplineEvent,
+  DisciplineOverride,
+  DisciplineOverrideInput,
+  DisciplineReport,
   ScheduleOverviewItem,
   ResearchAiAnalysis,
   ResearchAnnouncementItem,
@@ -169,6 +174,22 @@ export const api = {
 
   // 真实持仓
   getRealPositions: () => unwrap<RealPortfolio>(http.get('/positions/real', { timeout: 20000 })),
+
+  // 真实持仓纪律（确定性体检 + 逐票覆盖 + 事件流）
+  discipline: {
+    check: () => unwrap<DisciplineReport>(http.get('/positions/discipline', { timeout: 25000 })),
+    getConfig: () => unwrap<DisciplineConfig>(http.get('/positions/discipline/config')),
+    setConfig: (patch: Partial<DisciplineConfig>) =>
+      unwrap<DisciplineConfig>(http.put('/positions/discipline/config', patch)),
+    listOverrides: () =>
+      unwrap<DisciplineOverride[]>(http.get('/positions/discipline/overrides')),
+    setOverride: (code: string, patch: DisciplineOverrideInput) =>
+      unwrap<DisciplineOverride>(http.put(`/positions/discipline/overrides/${code}`, patch)),
+    removeOverride: (code: string) =>
+      unwrap<void>(http.delete(`/positions/discipline/overrides/${code}`)),
+    events: (limit?: number) =>
+      unwrap<DisciplineEvent[]>(http.get('/positions/discipline/events', { params: { limit } })),
+  },
 
   // 公共 AI 分析历史（按 kind + 可选 refKey 作用域；流式发起走 WS /ws/analyze）
   // all=true 时忽略 refKey，返回该 kind 全部历史（跨标的全局视图）

@@ -2231,6 +2231,127 @@ export interface SafetyUpdate {
   allowManualForceTrade?: boolean;
 }
 
+// ===== 真实持仓纪律（确定性体检，只读不下单）=====
+
+/** 纪律命中类型 */
+export type DisciplineKind =
+  | 'stop_loss'
+  | 'take_profit'
+  | 'overweight'
+  | 'over_hold'
+  | 'near_stop';
+
+/** 单票纪律主状态：healthy 或某一命中类型 */
+export type DisciplineStatus = 'healthy' | DisciplineKind;
+
+/** 账户级默认纪律阈值 */
+export interface DisciplineConfig {
+  /** 成本止损线（%，正数，如 8=跌破成本 8% 触发） */
+  stopLossPct: number;
+  /** 止盈线（%） */
+  takeProfitPct: number;
+  /** 最长持有交易日；null 不限 */
+  maxHoldDays: number | null;
+  /** 单票最大仓位占比（%） */
+  singleMaxWeightPct: number;
+  /** 总持仓上限占比（%，留现金缓冲） */
+  totalMaxPositionPct: number;
+}
+
+/** 逐票纪律覆盖（留空字段回退账户默认） */
+export interface DisciplineOverride {
+  code: string;
+  name: string | null;
+  stopLossPct: number | null;
+  takeProfitPct: number | null;
+  maxHoldDays: number | null;
+  singleMaxWeightPct: number | null;
+  note: string | null;
+  updatedAt: string;
+}
+
+/** 逐票纪律覆盖写入 */
+export interface DisciplineOverrideInput {
+  name?: string | null;
+  stopLossPct?: number | null;
+  takeProfitPct?: number | null;
+  maxHoldDays?: number | null;
+  singleMaxWeightPct?: number | null;
+  note?: string | null;
+}
+
+/** 单条纪律命中点 */
+export interface DisciplineFlag {
+  kind: DisciplineKind;
+  severity: 'high' | 'medium' | 'low';
+  detail: string;
+}
+
+/** 单票纪律体检结果 */
+export interface DisciplinePositionItem {
+  code: string;
+  name: string;
+  price: number;
+  avgCost: number;
+  /** 持有盈亏率（小数） */
+  holdRate: number;
+  /** 仓位占比（小数） */
+  positionRate: number;
+  holdDays: number;
+  /** 生效纪律（含来源） */
+  rule: {
+    stopLossPct: number;
+    takeProfitPct: number;
+    maxHoldDays: number | null;
+    singleMaxWeightPct: number;
+    source: 'default' | 'override';
+  };
+  status: DisciplineStatus;
+  flags: DisciplineFlag[];
+  /** 直白可执行建议（中文） */
+  advice: string;
+}
+
+/** 账户级纪律检查 */
+export interface DisciplineAccountCheck {
+  /** 总持仓占比（小数） */
+  totalPositionRate: number;
+  totalMaxPositionPct: number;
+  overTotal: boolean;
+  /** 现金占比（小数） */
+  cashRate: number;
+  /** 最大单一持仓 */
+  topConcentration: { code: string; name: string; rate: number } | null;
+  warnings: string[];
+}
+
+/** 真实持仓纪律体检报告 */
+export interface DisciplineReport {
+  asOf: string;
+  config: DisciplineConfig;
+  items: DisciplinePositionItem[];
+  account: DisciplineAccountCheck;
+  counts: {
+    stopLoss: number;
+    takeProfit: number;
+    overweight: number;
+    overHold: number;
+    healthy: number;
+  };
+}
+
+/** 纪律事件（落库 + 推送去重） */
+export interface DisciplineEvent {
+  id: string;
+  code: string;
+  name: string;
+  kind: DisciplineKind;
+  severity: 'high' | 'medium' | 'low';
+  detail: string;
+  holdRate: number | null;
+  createdAt: string;
+}
+
 // ===== 运维（Ops）·SQLite 体积治理 =====
 
 /** 单张表的运维统计 */
@@ -2457,4 +2578,102 @@ export interface ScreenRun {
 /** 选股运行详情：元信息 + 候选清单 */
 export interface ScreenRunDetail extends ScreenRun {
   picks: ScreenPick[];
+}
+
+// ===== 中线主线能力（midline 模块）类型 =====
+
+/** 趋势状态：多头 / 震荡 / 空头（确定性均线口径判定，无需量化背景） */
+export type TrendState = 'bull' | 'range' | 'bear';
+
+/** 行业强弱雷达单项（周线确定性口径快照） */
+export interface IndustryStrength {
+  /** 东财行业板块代码 BKxxxx */
+  boardCode: string;
+  boardName: string;
+  /** 趋势状态 */
+  trend: TrendState;
+  /** 强度分 0-100（越高越强） */
+  strength: number;
+  /** 近 N 周相对涨幅 %（缺失为 null） */
+  rs: number | null;
+  /** 近 N 周相对涨幅在所有行业中的分位 0-100（缺失为 null） */
+  rsPercentile: number | null;
+  /** 周线收盘 */
+  close: number | null;
+  /** 20 周均线 */
+  ma20: number | null;
+  /** 60 周均线 */
+  ma60: number | null;
+  /** 均线口径描述（如 收>MA20>MA60） */
+  maState: string;
+}
+
+/** 行业强弱雷达结果（含口径说明） */
+export interface MidlineRadar {
+  /** 快照时间 ISO（最近一次重算） */
+  asOf: string | null;
+  /** RS 统计窗口周数 */
+  rsWeeks: number;
+  /** 按强度降序的行业列表 */
+  industries: IndustryStrength[];
+}
+
+/** 中线候选（强势行业派生的代表标的，ETF 或行业龙头） */
+export interface MidlineCandidate {
+  code: string;
+  name: string;
+  kind: 'etf' | 'stock';
+  /** 所属强势行业（板块名） */
+  industry: string;
+  /** 入选理由（确定性口径文字） */
+  reason: string;
+  /** 行业趋势状态 */
+  trendState: TrendState;
+}
+
+/** 中线候选池结果 */
+export interface MidlineCandidatesResult {
+  asOf: string | null;
+  candidates: MidlineCandidate[];
+}
+
+/** 单只持仓趋势（周/日线确定性口径，仅研判不下单、不调模型） */
+export interface PositionTrend {
+  code: string;
+  name: string;
+  /** 现价（缺失为 null） */
+  price: number | null;
+  /** 持有盈亏率（小数，来自真实持仓） */
+  holdRate: number;
+  /** 日线趋势状态 */
+  dayTrend: TrendState;
+  /** 周线趋势状态 */
+  weekTrend: TrendState;
+  /** 日线均线口径描述（收盘 vs MA20/MA60/MA250） */
+  dayMaState: string;
+  /** 年线（MA250）偏离度 %（中线位置参考，缺失为 null） */
+  maDeviation: number | null;
+  /** 确定性标注：hold 持有 / watch 警惕破位 */
+  advice: 'hold' | 'watch';
+  /** 标注要点（中文逐条） */
+  notes: string[];
+}
+
+/** 持仓趋势结果 */
+export interface PositionTrendResult {
+  asOf: string;
+  /** 持仓数据时间（真实持仓 sourceDate；未配置/失败为 null） */
+  sourceDate: string | null;
+  positions: PositionTrend[];
+  /** 持仓不可用时的提示（如同花顺未配置） */
+  warning: string | null;
+}
+
+/** 中线模块手动重算结果 */
+export interface MidlineRefreshResult {
+  asOf: string;
+  /** 写入的行业强弱条数 */
+  industryCount: number;
+  /** 写入的候选条数 */
+  candidateCount: number;
 }

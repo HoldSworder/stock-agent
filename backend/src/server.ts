@@ -119,6 +119,7 @@ import { registerDecisionModule } from './decision';
 import { registerScreenerModule } from './screener';
 import { registerSafetyModule } from './safety';
 import { SafetyError } from './safety/guard';
+import { registerPositionsModule } from './positions';
 import { buildDeepReviewPrompt } from './review/service';
 import { catchUpModuleMissedRuns } from './scheduling/moduleScheduler';
 
@@ -1049,6 +1050,9 @@ async function main() {
 
   // 安全控制台（交易/模拟总闸：kill switch + 自动开关，须早于交易类模块注册）
   registerSafetyModule(app);
+
+  // 真实持仓纪律模块（确定性体检 + 纪律事件 + 定时，独立，删除此行整模块下线）
+  registerPositionsModule(app);
 
   // 实时盯盘模块（独立，可删除以下两行整模块下线）
   registerWatchModule(app);

@@ -6,11 +6,41 @@ import { Refresh, MagicStick } from '@element-plus/icons-vue';
 import { api } from '@/api';
 import AiAnalysisDialog from '@/components/AiAnalysisDialog.vue';
 import StockLink from '@/components/StockLink.vue';
-import type { RealPortfolio } from '@stock-agent/shared';
+import type { DisciplineReport, DisciplineStatus, RealPortfolio } from '@stock-agent/shared';
 
 const pf = ref<RealPortfolio | null>(null);
 const loading = ref(false);
 const error = ref('');
+// 纪律体检（确定性硬规则，只读不下单）
+const discipline = ref<DisciplineReport | null>(null);
+const discLoading = ref(false);
+
+// 纪律状态 → 标签文案 + ElTag 类型
+const DISC_LABEL: Record<DisciplineStatus, string> = {
+  healthy: '健康',
+  stop_loss: '已破止损',
+  near_stop: '接近止损',
+  take_profit: '达止盈',
+  over_hold: '超期',
+  overweight: '超配',
+};
+const discTagType = (s: DisciplineStatus): 'success' | 'danger' | 'warning' | 'info' => {
+  if (s === 'healthy') return 'success';
+  if (s === 'stop_loss') return 'danger';
+  if (s === 'take_profit') return 'warning';
+  return 'info';
+};
+
+async function loadDiscipline() {
+  discLoading.value = true;
+  try {
+    discipline.value = await api.discipline.check();
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : String(e));
+  } finally {
+    discLoading.value = false;
+  }
+}
 // 实时持仓 AI 分析弹窗（公共组件，流式轨迹 + 历史）
 const analysisOpen = ref(false);
 // 当日清仓折叠面板：默认收起（v-model 为空数组）
@@ -72,6 +102,7 @@ onMounted(load);
     <div class="page-head">
       <div class="page-title">真实持仓</div>
       <div class="head-actions">
+        <el-button :loading="discLoading" @click="loadDiscipline">纪律体检</el-button>
         <el-button :icon="MagicStick" type="primary" @click="analysisOpen = true">
           实时持仓分析
         </el-button>
@@ -112,6 +143,43 @@ onMounted(load);
               <div class="card-label">累计持有盈亏</div>
               <div class="card-value num" :class="dir(stockStats.holdProfit)">
                 {{ signed(stockStats.holdProfit) }}
+              </div>
+            </div>
+          </div>
+
+          <div v-if="discipline" class="disc-panel">
+            <div class="disc-head">
+              <span class="disc-title">纪律体检</span>
+              <span class="disc-sub">
+                确定性硬规则 · 只读不下单 · 止损线 -{{ discipline.config.stopLossPct }}% / 止盈
+                +{{ discipline.config.takeProfitPct }}% / 单票上限
+                {{ discipline.config.singleMaxWeightPct }}%
+              </span>
+            </div>
+            <div class="disc-account" :class="{ warn: discipline.account.warnings.length }">
+              <span>
+                总仓 {{ (discipline.account.totalPositionRate * 100).toFixed(1) }}% · 现金
+                {{ (discipline.account.cashRate * 100).toFixed(1) }}%
+              </span>
+              <template v-if="discipline.account.warnings.length">
+                <span v-for="w in discipline.account.warnings" :key="w" class="disc-warn">
+                  ⚠ {{ w }}
+                </span>
+              </template>
+              <span v-else class="disc-ok">账户层纪律正常</span>
+            </div>
+            <div class="disc-items">
+              <div
+                v-for="it in discipline.items"
+                :key="it.code"
+                class="disc-item"
+                :class="{ alert: it.status !== 'healthy' }"
+              >
+                <el-tag :type="discTagType(it.status)" size="small" effect="dark">
+                  {{ DISC_LABEL[it.status] }}
+                </el-tag>
+                <StockLink :code="it.code" :name="it.name" />
+                <span class="disc-advice">{{ it.advice }}</span>
               </div>
             </div>
           </div>
@@ -301,5 +369,60 @@ onMounted(load);
 }
 .closed {
   margin-top: 16px;
+}
+.disc-panel {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+.disc-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.disc-title {
+  font-weight: 600;
+}
+.disc-sub {
+  font-size: 12px;
+  color: var(--text-2);
+}
+.disc-account {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px dashed var(--border);
+}
+.disc-account.warn .disc-warn {
+  color: var(--danger, #f56c6c);
+}
+.disc-ok {
+  color: var(--up, #67c23a);
+}
+.disc-items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.disc-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.disc-item.alert {
+  font-weight: 500;
+}
+.disc-advice {
+  color: var(--text-2);
+  font-size: 12.5px;
 }
 </style>
