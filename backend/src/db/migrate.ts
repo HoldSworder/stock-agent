@@ -407,32 +407,6 @@ CREATE TABLE IF NOT EXISTS discipline_events (
 );
 CREATE INDEX IF NOT EXISTS idx_discipline_events_created ON discipline_events(created_at);
 CREATE INDEX IF NOT EXISTS idx_discipline_events_dedup ON discipline_events(code, kind, event_date);
-
-CREATE TABLE IF NOT EXISTS industry_strength (
-  id TEXT PRIMARY KEY,
-  date TEXT NOT NULL,
-  board_code TEXT NOT NULL,
-  board_name TEXT NOT NULL,
-  trend TEXT NOT NULL,
-  strength REAL NOT NULL,
-  rs REAL,
-  ma_state TEXT,
-  created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_industry_strength_date ON industry_strength(date);
-
-CREATE TABLE IF NOT EXISTS midline_candidates (
-  id TEXT PRIMARY KEY,
-  date TEXT NOT NULL,
-  code TEXT NOT NULL,
-  name TEXT NOT NULL,
-  kind TEXT NOT NULL,
-  industry TEXT NOT NULL,
-  reason TEXT NOT NULL,
-  trend_state TEXT NOT NULL,
-  created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_midline_candidates_date ON midline_candidates(date);
 `;
 
 export function ensureSchema(): void {

@@ -616,61 +616,6 @@ export const jobLocks = sqliteTable('job_locks', {
 });
 
 /**
- * 中线行业强弱快照（midline 模块）：每个交易日重算一批，按 date 归属。
- * 周线确定性口径——多头排列 + 近 N 周相对涨幅 RS，输出强度分与趋势状态。
- */
-export const industryStrength = sqliteTable(
-  'industry_strength',
-  {
-    id: text('id').primaryKey(),
-    /** 快照日 YYYY-MM-DD（Asia/Shanghai） */
-    date: text('date').notNull(),
-    /** 东财行业板块代码 BKxxxx */
-    boardCode: text('board_code').notNull(),
-    boardName: text('board_name').notNull(),
-    /** 趋势状态：bull 多头 / range 震荡 / bear 空头 */
-    trend: text('trend').notNull(),
-    /** 强度分 0-100（越高越强） */
-    strength: real('strength').notNull(),
-    /** 近 N 周相对涨幅 % */
-    rs: real('rs'),
-    /** 均线口径描述（如 收>MA20>MA60） */
-    maState: text('ma_state'),
-    createdAt: text('created_at').notNull(),
-  },
-  (t) => ({
-    byDate: index('idx_industry_strength_date').on(t.date),
-  }),
-);
-
-/**
- * 中线候选池（midline 模块）：从强势行业派生的代表标的（ETF / 行业龙头），
- * 确定性筛选，不下单、不靠模型臆测。
- */
-export const midlineCandidates = sqliteTable(
-  'midline_candidates',
-  {
-    id: text('id').primaryKey(),
-    /** 候选日 YYYY-MM-DD（Asia/Shanghai） */
-    date: text('date').notNull(),
-    code: text('code').notNull(),
-    name: text('name').notNull(),
-    /** 标的类型：etf 基金 / stock 个股 */
-    kind: text('kind').notNull(),
-    /** 所属强势行业（板块名） */
-    industry: text('industry').notNull(),
-    /** 入选理由（确定性口径文字） */
-    reason: text('reason').notNull(),
-    /** 行业趋势状态：bull / range / bear */
-    trendState: text('trend_state').notNull(),
-    createdAt: text('created_at').notNull(),
-  },
-  (t) => ({
-    byDate: index('idx_midline_candidates_date').on(t.date),
-  }),
-);
-
-/**
  * 真实持仓「逐票纪律覆盖」：账户级默认纪律见 settings(position_discipline_config)，
  * 此表仅存被用户单独定制的标的（留空字段回退账户默认）。account 当前固定 'real'。
  */
