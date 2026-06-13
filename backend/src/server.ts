@@ -123,6 +123,7 @@ import { SafetyError } from './safety/guard';
 import { registerPositionsModule } from './positions';
 import { registerThemesModule } from './themes';
 import { registerRadarModule } from './radar';
+import { registerCockpitModule } from './cockpit';
 import { buildDeepReviewPrompt } from './review/service';
 import { catchUpModuleMissedRuns } from './scheduling/moduleScheduler';
 
@@ -1070,6 +1071,9 @@ async function main() {
 
   // 战法前向验证（收盘样本采集 + 前向统计 + 自动模拟总闸，自动买入默认关闭，删除此行整模块下线）
   registerStrategyForward(app);
+
+  // 驾驶舱（一屏概览 + 跨模块事件时间线，纯只读聚合，删除此行整模块下线）
+  registerCockpitModule(app);
 
   // 实时盯盘模块（独立，可删除以下两行整模块下线）
   registerWatchModule(app);

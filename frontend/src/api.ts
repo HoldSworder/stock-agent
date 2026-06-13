@@ -39,6 +39,8 @@ import type {
   PromptInfo,
   RealPortfolio,
   RetentionConfig,
+  CockpitEvent,
+  CockpitOverview,
   SafetyState,
   SafetyUpdate,
   DisciplineConfig,
@@ -491,6 +493,13 @@ export const api = {
     update: (patch: SafetyUpdate) => unwrap<SafetyState>(http.put('/safety/state', patch)),
     kill: (reason?: string) => unwrap<SafetyState>(http.post('/safety/kill', { reason })),
     resume: () => unwrap<SafetyState>(http.post('/safety/resume')),
+  },
+
+  // 驾驶舱（一屏概览 + 跨模块事件时间线，纯只读聚合）
+  cockpit: {
+    overview: () => unwrap<CockpitOverview>(http.get('/cockpit/overview', { timeout: 20000 })),
+    timeline: (limit = 40) =>
+      unwrap<CockpitEvent[]>(http.get('/cockpit/timeline', { params: { limit } })),
   },
 
   // 运维（SQLite 体积治理：统计 / 保留策略 / 清理 / VACUUM）

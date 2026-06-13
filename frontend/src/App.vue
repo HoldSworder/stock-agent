@@ -18,6 +18,7 @@ import {
   Cpu,
   Delete,
   Compass,
+  Odometer,
 } from '@element-plus/icons-vue';
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
@@ -37,10 +38,15 @@ onUnmounted(() => agents.disconnect());
 // 侧边栏按「投资工作流生命周期」分组：行情(输入) → 研判(发现+决策) → 交易(计划+执行) → 复盘(复盘+验证) → 系统(基础设施)
 const groups = [
   {
+    label: '总览',
+    desc: 'COCKPIT',
+    items: [{ to: '/', title: '驾驶舱', desc: 'Cockpit', icon: Odometer }],
+  },
+  {
     label: '行情',
     desc: 'MARKET',
     items: [
-      { to: '/', title: '大盘', desc: 'Market', icon: Histogram },
+      { to: '/market', title: '大盘', desc: 'Market', icon: Histogram },
       { to: '/etf', title: 'ETF', desc: 'ETF', icon: PieChart },
       { to: '/intel', title: '热点雷达', desc: 'Intel', icon: TrendCharts },
       { to: '/themes', title: '市场主线', desc: 'Themes', icon: Connection },

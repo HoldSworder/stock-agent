@@ -2792,3 +2792,37 @@ export interface ThemesRefreshResult {
   /** 当前活跃主线总数 */
   activeTotal: number;
 }
+
+// ===== 驾驶舱（紧凑概览 + 急停 + 事件时间线）=====
+
+/** 事件来源域 */
+export type CockpitEventKind = 'discipline' | 'trade' | 'watch' | 'decision';
+
+/** 统一事件时间线条目（跨模块聚合，确定性只读） */
+export interface CockpitEvent {
+  /** 复合唯一 id：`${kind}:${原始id}` */
+  id: string;
+  /** 发生时刻 ISO */
+  at: string;
+  kind: CockpitEventKind;
+  /** 严重度：info 常规 / warn 关注 / high 高优先 */
+  severity: 'info' | 'warn' | 'high';
+  /** 一行标题 */
+  title: string;
+  /** 详情 */
+  detail: string;
+  code?: string | null;
+  name?: string | null;
+}
+
+/** 驾驶舱一屏概览：安全状态 + 当日计划兑现 + 强势主线 + 事件时间线 */
+export interface CockpitOverview {
+  asOf: string;
+  safety: SafetyState;
+  /** 当日计划兑现（无当日计划时为 null） */
+  plan: PlanFulfillment | null;
+  /** 强度最高的若干活跃主线 */
+  themes: MarketTheme[];
+  /** 合并后的最近事件时间线（按时间倒序） */
+  events: CockpitEvent[];
+}
