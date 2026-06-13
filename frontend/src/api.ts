@@ -20,6 +20,7 @@ import type {
   DecisionAgentUpdate,
   DecisionEngineConfig,
   DecisionEngineOverview,
+  DecisionVerdictCache,
   EtfPoolItem,
   EtfOverview,
   EtfSignalsResult,
@@ -491,6 +492,13 @@ export const api = {
       unwrap<DecisionAgentInfo>(http.put(`/decision/agents/${key}`, patch)),
     setEngine: (patch: Partial<DecisionEngineConfig>) =>
       unwrap<DecisionEngineConfig>(http.put('/decision/config', patch)),
+    verdicts: (codes?: string[]) =>
+      unwrap<DecisionVerdictCache[]>(
+        http.get('/decision/verdicts', {
+          params: codes && codes.length ? { codes: codes.join(',') } : undefined,
+          timeout: 20000,
+        }),
+      ),
   },
 
   // 今日计划（作战室）

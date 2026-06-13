@@ -1,4 +1,12 @@
-import { sqliteTable, text, integer, real, index, primaryKey } from 'drizzle-orm/sqlite-core';
+import {
+  sqliteTable,
+  text,
+  integer,
+  real,
+  index,
+  uniqueIndex,
+  primaryKey,
+} from 'drizzle-orm/sqlite-core';
 
 /** 通用 kv 设置表，运行时覆盖 .env 默认值 */
 export const settings = sqliteTable('settings', {
@@ -665,6 +673,43 @@ export const marketThemes = sqliteTable(
     createdAt: text('created_at').notNull(),
   },
   (t) => ({ byStatus: index('idx_market_themes_status').on(t.status) }),
+);
+
+/**
+ * 决策裁决缓存：结构化存放一次多智能体辩论的最终裁决，按 (code,scenario,horizon) 唯一。
+ * 交易判断只认本表（带 dataAsOf/expiresAt/inputHash/invalidators 校验），过期或场景/输入不一致必须重跑；
+ * 严禁再用 ai_analyses 的 markdown latest 当交易缓存（markdown 仅供人读历史）。
+ */
+export const decisionVerdicts = sqliteTable(
+  'decision_verdicts',
+  {
+    id: text('id').primaryKey(),
+    code: text('code').notNull(),
+    name: text('name').notNull().default(''),
+    /** 决策场景：manual / plan / sellcheck / watch */
+    scenario: text('scenario').notNull().default('manual'),
+    /** 持有视角：short 短线 / mid 中线 */
+    horizon: text('horizon').notNull().default('short'),
+    /** 冗余裁决动作，便于快速查询/展示 */
+    action: text('action').notNull().default('hold'),
+    confidence: integer('confidence').notNull().default(0),
+    /** 数据基准时刻（ISO） */
+    dataAsOf: text('data_as_of').notNull(),
+    /** 过期时刻（ISO），超过即视为失效须重跑 */
+    expiresAt: text('expires_at').notNull(),
+    /** 输入指纹（code+场景+context+引擎配置），不一致即重跑 */
+    inputHash: text('input_hash').notNull().default(''),
+    /** 完整 DecisionResult 的 JSON 快照 */
+    verdictJson: text('verdict_json').notNull().default('{}'),
+    /** 失效条件清单 JSON（string[]，人读 + 价格越界判定锚点） */
+    invalidators: text('invalidators').notNull().default('[]'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => ({
+    byKey: uniqueIndex('idx_decision_verdicts_key').on(t.code, t.scenario, t.horizon),
+    byExpiry: index('idx_decision_verdicts_expiry').on(t.expiresAt),
+  }),
 );
 
 /** 真实持仓纪律事件流（确定性体检命中止损/止盈/超配/超期等时落库，供历史与智能推送去重） */

@@ -1,7 +1,9 @@
 import type {
   DecisionAction,
+  DecisionHorizon,
   DecisionResult,
   DecisionRiskDebate,
+  DecisionScenario,
   DecisionTraderPlan,
   StreamEvent,
 } from '@stock-agent/shared';
@@ -33,6 +35,7 @@ import {
   resolveModels,
 } from './agentConfig';
 import { listLessons, recordDecision } from './memory';
+import { computeInputHash, getValidVerdict, putVerdict } from './verdictCache';
 
 // 多智能体辩论决策引擎（原生编排，非单 agent）：
 // 数据预取（并行降级）→ 分析师层（并行 oneshot, 轻模型）→ 多空辩论 + 研究总监裁决
@@ -57,6 +60,23 @@ export interface RunDecisionOptions {
   signal?: AbortSignal;
   /** 计量用途分类（缺省 decision） */
   purpose?: string;
+  /** 决策场景（缺省由 purpose 推导），用于裁决缓存分桶 */
+  scenario?: DecisionScenario;
+  /** 持有视角（缺省 short），用于裁决缓存分桶与默认时效 */
+  horizon?: DecisionHorizon;
+}
+
+/** 由计量用途推导决策场景（缓存分桶用） */
+function scenarioFromPurpose(purpose?: string): DecisionScenario {
+  if (purpose === 'plan-debate') return 'plan';
+  if (purpose === 'sellcheck') return 'sellcheck';
+  if (purpose === 'watch') return 'watch';
+  return 'manual';
+}
+
+/** 引擎配置签名：模型/轮数/风控变化即令裁决缓存失效 */
+function configSignature(cfg: DecisionConfig): string {
+  return [cfg.quickModel, cfg.deepModel, cfg.rounds, cfg.riskRounds, cfg.riskEnabled ? 1 : 0].join(':');
 }
 
 /** 决策可调参数（经 agentConfig 收口的 settings KV 运行时可配，中枢·智能体页可视化） */
@@ -1244,10 +1264,56 @@ export async function runDecision(input: DecisionInput, opts: RunDecisionOptions
   }
   recordDecision(result, entryPrice);
 
+  // 结构化裁决缓存：交易判断的唯一权威缓存（带过期/场景/输入指纹/失效条件），覆盖该场景最新裁决。
+  const scenario = opts.scenario ?? scenarioFromPurpose(opts.purpose);
+  const horizon = opts.horizon ?? 'short';
+  putVerdict({
+    result,
+    scenario,
+    horizon,
+    inputHash: computeInputHash({
+      code,
+      scenario,
+      horizon,
+      context: input.context,
+      configSig: configSignature(cfg),
+    }),
+  });
+
   // 末尾合成 token 事件：把最终叙述推给前端实时态展示
   opts.onEvent?.({ type: 'token', text: `\n\n${result.narrative}` });
   await sleep(0);
   return result;
+}
+
+/**
+ * 缓存优先的决策：命中未失效的结构化裁决缓存则直接返回（不重跑多智能体辩论），
+ * 否则跑 runDecision 并落缓存。交易判断应走此入口，禁止读 ai_analyses markdown latest 当缓存。
+ * 传入 price 时会按缓存裁决的止损/目标价做价格越界失效校验。
+ */
+export async function runDecisionCached(
+  input: DecisionInput,
+  opts: RunDecisionOptions & { price?: number | null } = {},
+): Promise<{ result: DecisionResult; cached: boolean }> {
+  const scenario = opts.scenario ?? scenarioFromPurpose(opts.purpose);
+  const horizon = opts.horizon ?? 'short';
+  const inputHash = computeInputHash({
+    code: input.code,
+    scenario,
+    horizon,
+    context: input.context,
+    configSig: configSignature(readConfig()),
+  });
+  const hit = getValidVerdict(input.code, scenario, horizon, { inputHash, price: opts.price });
+  if (hit) {
+    opts.onEvent?.({
+      type: 'token',
+      text: `（命中决策缓存，dataAsOf ${hit.dataAsOf}，未失效，直接复用）\n\n${hit.result.narrative}`,
+    });
+    return { result: hit.result, cached: true };
+  }
+  const result = await runDecision(input, { ...opts, scenario, horizon });
+  return { result, cached: false };
 }
 
 /**

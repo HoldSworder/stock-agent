@@ -17,6 +17,7 @@ import {
 import { debateRealPositions } from './sellcheck';
 import { runDecision } from './service';
 import { reviewPending } from './reflection';
+import { listVerdicts } from './verdictCache';
 
 // 挂载多智能体辩论决策模块：WS /ws/decision（流式编排）+ 复用公共 ai_analyses 历史
 // + decision.reflection 反思定时（收盘后复盘到期 pending 决策算 Alpha）。
@@ -128,6 +129,14 @@ export function registerDecisionModule(app: FastifyInstance): void {
   // 引擎全局参数（轮数/风控/模型/定向取数）部分更新。回传最新配置
   app.put<{ Body: Partial<DecisionEngineConfig> }>('/api/decision/config', (req) => {
     return { ok: true, data: setEngineConfig(req.body ?? {}) };
+  });
+
+  // 结构化裁决缓存总览（含失效项，fresh 标注是否仍有效）。可选 ?codes=600000,300001 过滤
+  app.get<{ Querystring: { codes?: string } }>('/api/decision/verdicts', (req) => {
+    const codes = req.query?.codes
+      ? req.query.codes.split(',').map((s) => s.trim()).filter(Boolean)
+      : undefined;
+    return { ok: true, data: listVerdicts(codes) };
   });
 
   // 真实持仓「卖点检查」程序化定时（多 agent 辩论 + 推送）：取代 cronTasks.ts 自由 prompt 版

@@ -422,6 +422,25 @@ CREATE TABLE IF NOT EXISTS market_themes (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_market_themes_status ON market_themes(status);
+
+CREATE TABLE IF NOT EXISTS decision_verdicts (
+  id TEXT PRIMARY KEY,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL DEFAULT '',
+  scenario TEXT NOT NULL DEFAULT 'manual',
+  horizon TEXT NOT NULL DEFAULT 'short',
+  action TEXT NOT NULL DEFAULT 'hold',
+  confidence INTEGER NOT NULL DEFAULT 0,
+  data_as_of TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  input_hash TEXT NOT NULL DEFAULT '',
+  verdict_json TEXT NOT NULL DEFAULT '{}',
+  invalidators TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_verdicts_key ON decision_verdicts(code, scenario, horizon);
+CREATE INDEX IF NOT EXISTS idx_decision_verdicts_expiry ON decision_verdicts(expires_at);
 `;
 
 export function ensureSchema(): void {

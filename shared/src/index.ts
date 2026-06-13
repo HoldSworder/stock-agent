@@ -718,6 +718,40 @@ export interface DecisionResult {
   narrative: string;
 }
 
+/** 决策场景：不同调用来源走独立缓存，避免串用 */
+export type DecisionScenario = 'manual' | 'plan' | 'sellcheck' | 'watch';
+
+/** 持有视角：短线 / 中线 */
+export type DecisionHorizon = 'short' | 'mid';
+
+/**
+ * 决策裁决缓存条目（结构化、可校验）。交易判断只认本结构，
+ * 过期(expiresAt)、场景/视角不一致、或 invalidators 命中即视为失效须重跑；
+ * 不再用 ai_analyses markdown latest 当交易缓存。
+ */
+export interface DecisionVerdictCache {
+  code: string;
+  name: string;
+  scenario: DecisionScenario;
+  horizon: DecisionHorizon;
+  action: DecisionAction;
+  confidence: number;
+  /** 数据基准时刻 ISO */
+  dataAsOf: string;
+  /** 过期时刻 ISO */
+  expiresAt: string;
+  /** 输入指纹（场景+context+引擎配置） */
+  inputHash: string;
+  /** 失效条件清单（人读 + 价格越界判定锚点，如「现价跌破止损 X / 升破目标 Y」） */
+  invalidators: string[];
+  /** 完整决策结果快照 */
+  result: DecisionResult;
+  /** 是否仍然有效（读取时按当前时刻/可选现价判定） */
+  fresh: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 /** 决策交易记忆条目（反思闭环：记录入场快照 + 复盘后的 Alpha 与教训） */
 export interface DecisionMemoryItem {
   id: string;
