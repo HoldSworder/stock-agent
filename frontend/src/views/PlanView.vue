@@ -145,6 +145,25 @@ const plan = computed(() => detail.value?.plan ?? null);
 const items = computed(() => detail.value?.items ?? []);
 const isLive = computed(() => !viewingDate.value);
 
+// 计划兑现度：纯前端统计当前已加载标的（今日/历史通用），与后端 computePlanFulfillment 口径一致
+const fulfillment = computed(() => {
+  const list = items.value;
+  if (!list.length) return null;
+  const hasTrigger = (i: DailyPlanItem) =>
+    !!(i.buyTrigger || i.sellTrigger || i.stopLoss || i.takeProfit);
+  const withTrigger = list.filter(hasTrigger);
+  const hit = withTrigger.filter((i) => i.status === 'triggered' || i.status === 'done').length;
+  return {
+    total: list.length,
+    withTrigger: withTrigger.length,
+    triggered: list.filter((i) => i.status === 'triggered' || i.status === 'done').length,
+    done: list.filter((i) => i.status === 'done').length,
+    invalid: list.filter((i) => i.status === 'invalid').length,
+    pending: list.filter((i) => i.status === 'pending').length,
+    hitRate: withTrigger.length ? Math.round((hit / withTrigger.length) * 100) : null,
+  };
+});
+
 function itemPriority(a: DailyPlanItem, b: DailyPlanItem) {
   return b.priority - a.priority;
 }
@@ -326,6 +345,28 @@ onMounted(load);
           <div class="stance-summary">{{ plan.marketStance.summary }}</div>
         </div>
         <div v-else class="muted">未提供大盘研判</div>
+      </div>
+
+      <!-- 计划兑现度（纯统计） -->
+      <div v-if="fulfillment" class="section">
+        <div class="section-title">
+          计划兑现度
+          <span class="tag-hist">按触发价命中统计·不经 AI 估算</span>
+        </div>
+        <div class="fulfill">
+          <div class="fulfill-rate">
+            <span class="fulfill-num">{{ fulfillment.hitRate ?? '—' }}</span>
+            <span v-if="fulfillment.hitRate != null" class="fulfill-pct">%</span>
+            <span class="fulfill-cap">兑现率</span>
+          </div>
+          <div class="fulfill-stats">
+            <span>命中 {{ fulfillment.triggered }}/{{ fulfillment.withTrigger }}</span>
+            <span>已完成 {{ fulfillment.done }}</span>
+            <span class="warn">已失效 {{ fulfillment.invalid }}</span>
+            <span class="muted">待触发 {{ fulfillment.pending }}</span>
+            <span class="muted">标的 {{ fulfillment.total }}</span>
+          </div>
+        </div>
       </div>
 
       <!-- 外围 / 重点板块 -->
@@ -702,6 +743,43 @@ onMounted(load);
   margin-left: 8px;
   font-size: 12px;
   font-weight: 400;
+  color: var(--el-text-color-secondary);
+}
+.fulfill {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  flex-wrap: wrap;
+}
+.fulfill-rate {
+  display: flex;
+  align-items: baseline;
+  gap: 2px;
+}
+.fulfill-num {
+  font-size: 32px;
+  font-weight: 700;
+  color: var(--el-color-primary);
+}
+.fulfill-pct {
+  font-size: 16px;
+  color: var(--el-color-primary);
+}
+.fulfill-cap {
+  margin-left: 6px;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.fulfill-stats {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+.fulfill-stats .warn {
+  color: var(--el-color-warning);
+}
+.fulfill-stats .muted {
   color: var(--el-text-color-secondary);
 }
 .event-text {

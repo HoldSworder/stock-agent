@@ -62,6 +62,9 @@ export function registerPlanModule(app: FastifyInstance): void {
   // 今日计划详情（无则 data=null）
   app.get('/api/plan/today', () => ({ ok: true, data: svc.getTodayDetail() }));
 
+  // 今日计划兑现度（纯代码统计，无则 data=null）
+  app.get('/api/plan/fulfillment', () => ({ ok: true, data: svc.computePlanFulfillment() }));
+
   // 历史计划摘要列表（静态路由须在 /:date 参数路由之前注册，避免被参数路由误匹配）
   app.get<{ Querystring: { limit?: string } }>('/api/plan/list', (req) => {
     const limit = req.query?.limit

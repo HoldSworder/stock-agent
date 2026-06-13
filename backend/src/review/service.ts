@@ -1,4 +1,4 @@
-import type { MarketReviewResult } from '@stock-agent/shared';
+import type { MarketReviewResult, PlanFulfillment } from '@stock-agent/shared';
 import { buildOverview } from '../market/overview';
 import { getQuotes } from '../market/eastmoney';
 import { fetchRealPositions } from '../realPositions';
@@ -31,6 +31,43 @@ async function mxSafe(
 
 /** 复盘运行的统一任务名（前端 listReviews 历史按此过滤，定时与手动共用） */
 export const DEEP_REVIEW_TASK_NAME = '一键复盘';
+
+/**
+ * 把结构化深度复盘 + 计划兑现度统计压成一条简明 Telegram 摘要（确定性组装，不再让模型决定推送内容）。
+ * 原 market.review（15:05 大盘点评直推 TG）已并入收盘深度复盘，由此 digest 承接其推送职责。
+ * 解析失败时降级为纯兑现度提示，保证至少推出可用信息。
+ */
+export function buildReviewDigest(jsonText: string, fulfillment: PlanFulfillment | null): string {
+  const lines: string[] = [];
+  try {
+    const r = JSON.parse(jsonText) as Partial<MarketReviewResult>;
+    if (r.comprehensiveStance) {
+      const s = r.comprehensiveStance;
+      lines.push(`方向：${s.bias ?? '—'}　${(s.summary ?? '').slice(0, 80)}`);
+    } else if (r.marketTrend) {
+      lines.push(`大盘：${r.marketTrend.slice(0, 80)}`);
+    }
+    const themes = (r.mainThemes ?? [])
+      .slice(0, 3)
+      .map((t) => `${t.name}${t.strength ? `(${t.strength})` : ''}`)
+      .filter(Boolean);
+    if (themes.length) lines.push(`主线：${themes.join('、')}`);
+    const risks = (r.risks ?? []).slice(0, 2).map((x) => x.title).filter(Boolean);
+    if (risks.length) lines.push(`风险：${risks.join('；')}`);
+    const focus = (r.tomorrowPlan?.focus ?? []).slice(0, 3).filter(Boolean);
+    if (focus.length) lines.push(`明日：${focus.join('、')}`);
+  } catch {
+    lines.push('深度复盘已生成（结构化结果见 WebUI）。');
+  }
+  if (fulfillment && fulfillment.total > 0) {
+    const rate = fulfillment.hitRate != null ? `${Math.round(fulfillment.hitRate * 100)}%` : '—';
+    lines.push(
+      `计划兑现：命中 ${fulfillment.triggered}/${fulfillment.withTrigger}（${rate}）` +
+        ` 失效${fulfillment.invalid} 待触发${fulfillment.pending}`,
+    );
+  }
+  return `📊 收盘复盘摘要\n${lines.join('\n')}`;
+}
 
 /** 组装深度复盘 prompt（含盘面/持仓/自选/上次复盘上下文，best-effort 降级） */
 export async function buildDeepReviewPrompt(): Promise<string> {

@@ -10,6 +10,7 @@ import type {
   DailyPlanDetail,
   DailyPlanEvent,
   DailyPlanSummary,
+  PlanFulfillment,
   DataSourceConfigUpdate,
   DataSourceHealth,
   DataSourceInfo,
@@ -495,6 +496,8 @@ export const api = {
   // 今日计划（作战室）
   plan: {
     today: () => unwrap<DailyPlanDetail | null>(http.get('/plan/today', { timeout: 20000 })),
+    fulfillment: () =>
+      unwrap<PlanFulfillment | null>(http.get('/plan/fulfillment', { timeout: 20000 })),
     history: (limit = 60) =>
       unwrap<DailyPlanSummary[]>(http.get('/plan/list', { params: { limit }, timeout: 20000 })),
     get: (date: string) =>

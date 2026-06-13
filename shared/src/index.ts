@@ -2047,6 +2047,26 @@ export interface DailyPlanDetail {
   events: DailyPlanEvent[];
 }
 
+/** 计划兑现度（纯代码统计，不经 AI 估算） */
+export interface PlanFulfillment {
+  /** 计划日 YYYY-MM-DD */
+  planDate: string;
+  /** 标的总数 */
+  total: number;
+  /** 设了任一触发价（买/卖/损/盈）的标的数，作为兑现率分母 */
+  withTrigger: number;
+  /** 已触发（status=triggered 或 done）总数 */
+  triggered: number;
+  /** 已完成 */
+  done: number;
+  /** 已失效 */
+  invalid: number;
+  /** 待触发 */
+  pending: number;
+  /** 兑现率 = 设触发价且已触发/完成 ÷ withTrigger；withTrigger=0 时为 null */
+  hitRate: number | null;
+}
+
 /** 计划历史列表项（轻量摘要，供历史抽屉渲染） */
 export interface DailyPlanSummary {
   planDate: string;

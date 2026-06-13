@@ -5,6 +5,7 @@ import type {
   MarketStance,
   PlanAssetType,
   PlanFocusSector,
+  PlanFulfillment,
   PlanItemStatus,
   PlanTrigger,
 } from '@stock-agent/shared';
@@ -241,6 +242,38 @@ export function recordWatchTrigger(
     payload: { code, signalType, note },
     runId,
   });
+}
+
+/** 是否设了任一触发价（买/卖/损/盈），作为兑现率分母判定 */
+function hasTrigger(it: DailyPlanItem): boolean {
+  return !!(it.buyTrigger || it.sellTrigger || it.stopLoss || it.takeProfit);
+}
+
+/**
+ * 计划兑现度统计：纯代码按标的状态/触发价计数，不经 AI 估算。
+ * 收盘复盘与作战室共用此为唯一权威口径，避免模型臆测命中率。
+ */
+export function computePlanFulfillment(detail?: DailyPlanDetail | null): PlanFulfillment | null {
+  const d = detail ?? getTodayDetail();
+  if (!d) return null;
+  const items = d.items;
+  const withTriggerItems = items.filter(hasTrigger);
+  const triggeredWithTrigger = withTriggerItems.filter(
+    (i) => i.status === 'triggered' || i.status === 'done',
+  ).length;
+  return {
+    planDate: d.plan.planDate,
+    total: items.length,
+    withTrigger: withTriggerItems.length,
+    triggered: items.filter((i) => i.status === 'triggered' || i.status === 'done').length,
+    done: items.filter((i) => i.status === 'done').length,
+    invalid: items.filter((i) => i.status === 'invalid').length,
+    pending: items.filter((i) => i.status === 'pending').length,
+    hitRate:
+      withTriggerItems.length > 0
+        ? Math.round((triggeredWithTrigger / withTriggerItems.length) * 100) / 100
+        : null,
+  };
 }
 
 /** 收盘归档：回填复盘总结并置 closed */
