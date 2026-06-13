@@ -13,6 +13,7 @@ import {
 } from '../strategy/sim';
 import { syncMiaoxiangStrategy } from '../strategy/miaoxiangSync';
 import { dimensionLabel, proposeSkillUpdate } from '../strategy/skill';
+import { assertTradeAllowed } from '../safety/guard';
 import * as trendradar from '../trendradar/service';
 import * as research from '../research/service';
 import { runDecision } from '../decision/service';
@@ -359,6 +360,17 @@ export const tools: ToolDef[] = [
       const stockCode = asString(args.stockCode);
       const reason = args.reason ? asString(args.reason) : null;
       const thesis = args.thesis ? asString(args.thesis) : null;
+      // 安全守卫：妙想外部模拟盘下单视为自动来源（agent 发起），须开启「自动外部模拟」开关，
+      // 且受 kill switch / 交易日 / 时段约束。被拒时返回原因文本供模型据实回复，不抛出。
+      try {
+        assertTradeAllowed({
+          operation: side === 'buy' ? 'external_sim_buy' : 'external_sim_sell',
+          source: 'agent',
+          forceTrade: ctx.forceTrade ?? false,
+        });
+      } catch (e) {
+        return `下单被安全守卫拒绝：${e instanceof Error ? e.message : String(e)}`;
+      }
       const result = preview(
         await miaoxiang.trade({
           type: side,

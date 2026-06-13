@@ -3,6 +3,10 @@ import { shouldSkipForHoliday, shanghaiDateStr, shanghaiTimeStr } from '../marke
 import { getMeta, setMeta } from '../settings';
 import { sendTelegram } from '../notify/telegram';
 import { nowIso } from '../util';
+import { withJobLock } from './locks';
+
+/** 本进程锁持有者标识（区分 dev 双开 / 多进程） */
+const LOCK_OWNER = `module-${process.pid}`;
 
 // 共享轻量模块调度器：croner 薄封装 + 节假日 gate + lastSuccessAt 记录 + missed-run 提示。
 // 与中央 scheduler.ts（scheduled_tasks/任务页）解耦——各模块在此注册「模块内定时」，
@@ -43,7 +47,16 @@ async function execJob(def: ModuleJob, trigger: 'cron' | 'manual'): Promise<void
     return;
   }
   try {
-    await def.run();
+    // 互斥锁：同模块定时被多入口/多进程并发触发时仅一个执行，其余跳过（ttl 过期可抢占防死锁）
+    const ran = await withJobLock(
+      `module:${def.id}`,
+      { owner: LOCK_OWNER, ttlSec: 1800 },
+      async () => {
+        await def.run();
+        return true;
+      },
+    );
+    if (ran === null) return; // 未抢到锁：同 job 正在运行，本次跳过，不记水位线
     setMeta(lastSuccessKey(def.id), nowIso());
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

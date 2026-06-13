@@ -361,6 +361,23 @@ CREATE TABLE IF NOT EXISTS screen_picks (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_screen_picks_run ON screen_picks(run_id);
+
+CREATE TABLE IF NOT EXISTS safety_controls (
+  id TEXT PRIMARY KEY,
+  kill_switch INTEGER NOT NULL DEFAULT 0,
+  kill_reason TEXT,
+  auto_local_sim_enabled INTEGER NOT NULL DEFAULT 0,
+  auto_external_sim_enabled INTEGER NOT NULL DEFAULT 0,
+  allow_manual_force_trade INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS job_locks (
+  lock_key TEXT PRIMARY KEY,
+  owner TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
 `;
 
 export function ensureSchema(): void {

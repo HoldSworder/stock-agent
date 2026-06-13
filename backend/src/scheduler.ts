@@ -6,8 +6,12 @@ import { shouldSkipForHoliday, shanghaiDateStr, shanghaiTimeStr } from './market
 import { getLastRunStartedAt } from './repo';
 import { getMeta, setMeta } from './settings';
 import { sendTelegram } from './notify/telegram';
+import { withJobLock } from './scheduling/locks';
 
 const jobs = new Map<string, Cron>();
+
+/** 本进程锁持有者标识（区分 dev 双开 / 多进程） */
+const LOCK_OWNER = `central-${process.pid}`;
 
 // missed-run 检查的幂等水位线（持久化），防止 dev watch 反复重启重复告警同一错过的任务
 const CATCHUP_META_KEY = 'last_catchup_check_at';
@@ -25,8 +29,13 @@ function scheduleOne(task: ScheduledTask): void {
           console.log(`[scheduler] 任务 ${task.name} 命中法定节假日，跳过本次触发`);
           return;
         }
+        // 互斥锁：防止同任务被多入口/多进程并发重复执行（ttl 略大于任务超时，过期可抢占防死锁）
         // 事件流与生命周期已由 runAgent / createRun·finishRun 统一广播，无需再传 broadcast
-        void runTask(toRunnable(task), 'cron');
+        void withJobLock(
+          `central:${task.id}`,
+          { owner: LOCK_OWNER, ttlSec: (task.timeoutSec ?? 600) + 60 },
+          () => runTask(toRunnable(task), 'cron'),
+        );
       },
     );
     jobs.set(task.id, job);

@@ -38,6 +38,26 @@ export function registerSchedulesModule(app: FastifyInstance): void {
       modelConfig: null,
       timeoutSec: null,
     }));
-    return { ok: true, data: [...central, ...modules] };
+    const items = [...central, ...modules];
+
+    // 疑似重复检测（只读提示）：把「已启用 + 同一 cron 表达式」的项聚成一组，组内 >1 即标记
+    // time_conflict，便于发现中央任务与模块定时在同一时刻重复研判/推送，由用户决定停用哪一个。
+    const byCron = new Map<string, ScheduleOverviewItem[]>();
+    for (const it of items) {
+      it.duplicateGroup = null;
+      it.risk = 'none';
+      if (!it.enabled || !it.cronExpr) continue;
+      const arr = byCron.get(it.cronExpr) ?? [];
+      arr.push(it);
+      byCron.set(it.cronExpr, arr);
+    }
+    for (const [cronExpr, group] of byCron) {
+      if (group.length < 2) continue;
+      for (const it of group) {
+        it.duplicateGroup = `time:${cronExpr}`;
+        it.risk = 'time_conflict';
+      }
+    }
+    return { ok: true, data: items };
   });
 }

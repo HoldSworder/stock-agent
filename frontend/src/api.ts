@@ -36,6 +36,8 @@ import type {
   PromptInfo,
   RealPortfolio,
   RetentionConfig,
+  SafetyState,
+  SafetyUpdate,
   ScheduleOverviewItem,
   ResearchAiAnalysis,
   ResearchAnnouncementItem,
@@ -424,6 +426,14 @@ export const api = {
   // 调度总览（聚合中央任务 + 模块定时的只读视图）
   schedules: {
     list: () => unwrap<ScheduleOverviewItem[]>(http.get('/schedules', { timeout: 20000 })),
+  },
+
+  // 安全控制台（交易/模拟总闸：kill switch + 自动开关）
+  safety: {
+    state: () => unwrap<SafetyState>(http.get('/safety/state', { timeout: 20000 })),
+    update: (patch: SafetyUpdate) => unwrap<SafetyState>(http.put('/safety/state', patch)),
+    kill: (reason?: string) => unwrap<SafetyState>(http.post('/safety/kill', { reason })),
+    resume: () => unwrap<SafetyState>(http.post('/safety/resume')),
   },
 
   // 运维（SQLite 体积治理：统计 / 保留策略 / 清理 / VACUUM）

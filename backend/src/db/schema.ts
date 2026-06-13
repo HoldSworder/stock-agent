@@ -581,3 +581,36 @@ export const simTrades = sqliteTable(
     byStrategyDate: index('idx_simtrade_strategy_date').on(t.strategyId, t.tradeDate),
   }),
 );
+
+/**
+ * 全局安全控制（单行，id 固定 'global'）：交易/模拟动作的总闸。
+ * kill switch 一票否决所有交易；自动模拟默认关闭，须显式开启 agent/cron 才能落单。
+ */
+export const safetyControls = sqliteTable('safety_controls', {
+  id: text('id').primaryKey(),
+  /** 总急停：开启后拒绝一切交易/模拟动作（含手动） */
+  killSwitch: integer('kill_switch', { mode: 'boolean' }).notNull().default(false),
+  killReason: text('kill_reason'),
+  /** 自动本地模拟交易开关（cron/agent/watch 触发的 sim_trade），默认关闭 */
+  autoLocalSimEnabled: integer('auto_local_sim_enabled', { mode: 'boolean' })
+    .notNull()
+    .default(false),
+  /** 自动外部模拟交易开关（cron/agent 触发的 mx_trade 妙想模拟盘），默认关闭 */
+  autoExternalSimEnabled: integer('auto_external_sim_enabled', { mode: 'boolean' })
+    .notNull()
+    .default(false),
+  /** 是否允许手动强制成交（跳过交易日/时段校验），默认允许 */
+  allowManualForceTrade: integer('allow_manual_force_trade', { mode: 'boolean' })
+    .notNull()
+    .default(true),
+  updatedAt: text('updated_at').notNull(),
+});
+
+/** 作业互斥锁（防止同 key 任务被中央/模块/手动多入口并发重复执行） */
+export const jobLocks = sqliteTable('job_locks', {
+  lockKey: text('lock_key').primaryKey(),
+  owner: text('owner').notNull(),
+  /** 过期时间（ISO），到期视为可抢占，避免死锁 */
+  expiresAt: text('expires_at').notNull(),
+  createdAt: text('created_at').notNull(),
+});

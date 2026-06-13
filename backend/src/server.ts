@@ -117,6 +117,8 @@ import { registerReviewModule } from './review';
 import { registerAnalyzeModule } from './analyze';
 import { registerDecisionModule } from './decision';
 import { registerScreenerModule } from './screener';
+import { registerSafetyModule } from './safety';
+import { SafetyError } from './safety/guard';
 import { buildDeepReviewPrompt } from './review/service';
 import { catchUpModuleMissedRuns } from './scheduling/moduleScheduler';
 
@@ -386,7 +388,8 @@ async function main() {
   // 规则校验失败（StrategyError）回 400，其余异常回 502
   const strategyErr = (reply: import('fastify').FastifyReply, e: unknown) => {
     const msg = e instanceof Error ? e.message : String(e);
-    return reply.code(e instanceof StrategyError ? 400 : 502).send({ ok: false, error: msg });
+    const userErr = e instanceof StrategyError || e instanceof SafetyError;
+    return reply.code(userErr ? 400 : 502).send({ ok: false, error: msg });
   };
 
   app.get('/api/strategies', async (_req, reply) => {
@@ -1043,6 +1046,9 @@ async function main() {
   reloadScheduler();
   // 停机期间错过的定时任务检查（仅提示不自动补跑）；不阻塞启动
   void catchUpMissedRuns();
+
+  // 安全控制台（交易/模拟总闸：kill switch + 自动开关，须早于交易类模块注册）
+  registerSafetyModule(app);
 
   // 实时盯盘模块（独立，可删除以下两行整模块下线）
   registerWatchModule(app);

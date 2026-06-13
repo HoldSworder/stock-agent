@@ -2202,6 +2202,33 @@ export interface ScheduleOverviewItem {
   modelConfig: ModelConfig | null;
   /** 仅 central：运行超时秒 */
   timeoutSec: number | null;
+  /** 疑似重复分组标识（同一 cron 时刻聚合）；无冲突为 null */
+  duplicateGroup?: string | null;
+  /** 重复风险：none=无 / time_conflict=同刻同类 / purpose_conflict=疑似同用途 */
+  risk?: 'none' | 'time_conflict' | 'purpose_conflict';
+}
+
+/** 全局安全控制状态（交易/模拟总闸） */
+export interface SafetyState {
+  /** 总急停：开启后拒绝一切交易/模拟动作 */
+  killSwitch: boolean;
+  killReason: string | null;
+  /** 自动本地模拟交易开关（cron/agent/watch 触发的 sim_trade） */
+  autoLocalSimEnabled: boolean;
+  /** 自动外部模拟交易开关（cron/agent 触发的 mx_trade 妙想模拟盘） */
+  autoExternalSimEnabled: boolean;
+  /** 是否允许手动强制成交（跳过交易日/时段校验） */
+  allowManualForceTrade: boolean;
+  updatedAt: string;
+}
+
+/** 安全控制更新（部分字段） */
+export interface SafetyUpdate {
+  killSwitch?: boolean;
+  killReason?: string | null;
+  autoLocalSimEnabled?: boolean;
+  autoExternalSimEnabled?: boolean;
+  allowManualForceTrade?: boolean;
 }
 
 // ===== 运维（Ops）·SQLite 体积治理 =====

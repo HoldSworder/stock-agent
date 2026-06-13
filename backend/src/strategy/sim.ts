@@ -9,7 +9,8 @@ import type {
 } from '@stock-agent/shared';
 import { db, schema } from '../db/client';
 import { getQuoteWithLimits, getQuotes } from '../market/eastmoney';
-import { isAShareTradingTime, newId, nowIso, shanghaiClock } from '../util';
+import { newId, nowIso } from '../util';
+import { assertTradeAllowed } from '../safety/guard';
 import { syncMiaoxiangStrategy } from './miaoxiangSync';
 
 // 战法模拟引擎：每个战法是一个独立的本地纸上交易账户。
@@ -322,12 +323,13 @@ export async function executeSimTrade(input: ExecuteSimTradeInput): Promise<Exec
   if (strategy.kind === 'miaoxiang') {
     throw new StrategyError('妙想镜像账户不支持本地下单，请在妙想模拟盘交易后同步');
   }
-  // 交易时段限制：仅 A 股连续竞价时段可成交；前端手动下单可显式 force 跳过
-  if (!input.force && !isAShareTradingTime()) {
-    throw new StrategyError(
-      `当前(${shanghaiClock()})非 A 股交易时段，仅 9:30-11:30、13:00-15:00（周一至周五）可成交`,
-    );
-  }
+  // 安全守卫（代码层总闸）：kill switch / 自动开关 / 交易日 + 时段统一在此判定。
+  // 手动 force 仅跳过交易日/时段校验，不绕过 kill switch。
+  assertTradeAllowed({
+    operation: input.side === 'buy' ? 'sim_buy' : 'sim_sell',
+    source: input.source,
+    forceTrade: input.force ?? false,
+  });
 
   const code = String(input.code ?? '').trim();
   if (!/^\d{6}$/.test(code)) throw new StrategyError('请输入 6 位股票代码');
