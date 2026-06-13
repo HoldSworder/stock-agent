@@ -24,6 +24,7 @@ import type {
   EtfPoolItem,
   EtfOverview,
   EtfSignalsResult,
+  RadarOverview,
   EtfStatus,
   HomeModule,
   IdingpanPushResult,
@@ -432,6 +433,11 @@ export const api = {
       unwrap<{ runId: string; status: string; text: string }>(
         http.post('/etf/review', {}, { timeout: 300000 }),
       ),
+  },
+
+  // 中线雷达（行业强弱 + 持仓趋势 + 候选池，确定性只读）
+  radar: {
+    overview: () => unwrap<RadarOverview>(http.get('/radar/overview', { timeout: 60000 })),
   },
 
   // 数据源中心（统一管理外部取数：健康/配置/启停/统计）

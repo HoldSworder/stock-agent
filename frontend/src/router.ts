@@ -16,6 +16,7 @@ export const router = createRouter({
     { path: '/watch', name: 'watch', component: () => import('./views/WatchView.vue') },
     { path: '/intel', name: 'intel', component: () => import('./views/IntelView.vue') },
     { path: '/themes', name: 'themes', component: () => import('./views/ThemesView.vue') },
+    { path: '/radar', name: 'radar', component: () => import('./views/RadarView.vue') },
     { path: '/research', name: 'research', component: () => import('./views/ResearchView.vue') },
     { path: '/etf', name: 'etf', component: () => import('./views/EtfView.vue') },
     { path: '/review', name: 'review', component: () => import('./views/ReviewView.vue') },

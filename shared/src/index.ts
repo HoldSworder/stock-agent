@@ -752,6 +752,81 @@ export interface DecisionVerdictCache {
   updatedAt: string;
 }
 
+// ===== 中线主线雷达（行业强弱 + 持仓趋势 + 候选池，确定性只读） =====
+
+/** 趋势状态：多头排列 / 趋势向上 / 震荡 / 走弱 */
+export type TrendState = 'multi_long' | 'up' | 'range' | 'down';
+
+/** 趋势指标快照（复用 ETF 确定性指标层口径） */
+export interface TrendMetrics {
+  price: number | null;
+  ma20: number | null;
+  ma60: number | null;
+  ma250: number | null;
+  /** 年线（MA250）偏离 % */
+  maDeviation: number | null;
+  /** 价格分位 0-100 */
+  pricePercentile: number | null;
+  ret20: number | null;
+  ret60: number | null;
+  /** 动量打分（0.4*ret20+0.6*ret60） */
+  momentum: number | null;
+  volatility: number | null;
+}
+
+/** 行业强弱（按趋势 + 动量综合排序） */
+export interface IndustryStrength {
+  /** 东财板块代码 BKxxxx */
+  code: string;
+  name: string;
+  /** 当日涨跌 % */
+  pct: number | null;
+  leadStock: string;
+  leadStockCode: string;
+  trend: TrendState;
+  /** 综合强度 0-100 */
+  strengthScore: number;
+  /** 池内动量排名（仅趋势向上者参与，1=最强） */
+  momentumRank: number | null;
+  metrics: TrendMetrics;
+  notes: string[];
+}
+
+/** 持仓趋势状态（中线视角，趋势跟随建议为研判，不下单） */
+export interface PositionTrend {
+  code: string;
+  name: string;
+  trend: TrendState;
+  strengthScore: number;
+  /** 持有盈亏 % */
+  holdRate: number | null;
+  /** 仓位 % */
+  positionRate: number | null;
+  /** 现价距 MA60 %（正=在 MA60 上方） */
+  toMa60Pct: number | null;
+  metrics: TrendMetrics;
+  advice: string;
+}
+
+/** 中线候选（来自强势行业龙头或强趋势 ETF） */
+export interface MidCandidate {
+  code: string;
+  name: string;
+  kind: 'industry_leader' | 'etf';
+  reason: string;
+  fromIndustry?: string;
+  strengthScore: number;
+}
+
+/** 中线雷达总览（行业强弱 + 持仓趋势 + 候选池） */
+export interface RadarOverview {
+  asOf: string;
+  industries: IndustryStrength[];
+  positions: PositionTrend[];
+  candidates: MidCandidate[];
+  note: string;
+}
+
 /** 决策交易记忆条目（反思闭环：记录入场快照 + 复盘后的 Alpha 与教训） */
 export interface DecisionMemoryItem {
   id: string;

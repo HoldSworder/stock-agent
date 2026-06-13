@@ -121,6 +121,7 @@ import { registerSafetyModule } from './safety';
 import { SafetyError } from './safety/guard';
 import { registerPositionsModule } from './positions';
 import { registerThemesModule } from './themes';
+import { registerRadarModule } from './radar';
 import { buildDeepReviewPrompt } from './review/service';
 import { catchUpModuleMissedRuns } from './scheduling/moduleScheduler';
 
@@ -1057,6 +1058,9 @@ async function main() {
 
   // 结构化市场主线模块（复盘/热点聚合 market_themes，独立，删除此行整模块下线）
   registerThemesModule(app);
+
+  // 中线雷达模块（行业强弱+持仓趋势+候选池，确定性只读，独立，删除此行整模块下线）
+  registerRadarModule(app);
 
   // 实时盯盘模块（独立，可删除以下两行整模块下线）
   registerWatchModule(app);
