@@ -120,6 +120,7 @@ import { registerScreenerModule } from './screener';
 import { registerSafetyModule } from './safety';
 import { SafetyError } from './safety/guard';
 import { registerPositionsModule } from './positions';
+import { registerThemesModule } from './themes';
 import { buildDeepReviewPrompt } from './review/service';
 import { catchUpModuleMissedRuns } from './scheduling/moduleScheduler';
 
@@ -1053,6 +1054,9 @@ async function main() {
 
   // 真实持仓纪律模块（确定性体检 + 纪律事件 + 定时，独立，删除此行整模块下线）
   registerPositionsModule(app);
+
+  // 结构化市场主线模块（复盘/热点聚合 market_themes，独立，删除此行整模块下线）
+  registerThemesModule(app);
 
   // 实时盯盘模块（独立，可删除以下两行整模块下线）
   registerWatchModule(app);

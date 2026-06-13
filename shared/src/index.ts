@@ -2579,3 +2579,51 @@ export interface ScreenRun {
 export interface ScreenRunDetail extends ScreenRun {
   picks: ScreenPick[];
 }
+
+// ===== 结构化市场主线（market_themes 模块）=====
+
+/** 主线状态：active 活跃 / fading 退潮中 / archived 归档 */
+export type MarketThemeStatus = 'active' | 'fading' | 'archived';
+
+/** 主线信号来源：复盘计划 / 热点雷达 / 研报 */
+export type ThemeSource = 'review' | 'hotspot' | 'research';
+
+/** 主线证据（逐条留痕，含来源与时间） */
+export interface ThemeEvidence {
+  source: ThemeSource;
+  text: string;
+  /** 采集日 YYYY-MM-DD（Asia/Shanghai） */
+  at: string;
+}
+
+/** 结构化市场主线（把复盘/热点/研报的板块判断统一沉淀） */
+export interface MarketTheme {
+  id: string;
+  /** 主线名（归并键，如「半导体」「机器人」） */
+  theme: string;
+  /** 关联东财板块代码（可空） */
+  boardCode: string | null;
+  /** 强度 0-100（多源叠加，越高越强） */
+  strength: number;
+  status: MarketThemeStatus;
+  /** 命中过的来源集合 */
+  sources: ThemeSource[];
+  /** 证据要点（最近若干条） */
+  evidence: ThemeEvidence[];
+  /** 首次出现日 YYYY-MM-DD */
+  firstSeenDate: string;
+  /** 最近更新日 YYYY-MM-DD（据此判定退潮/归档） */
+  lastSeenDate: string;
+  updatedAt: string;
+}
+
+/** 主线聚合刷新结果 */
+export interface ThemesRefreshResult {
+  asOf: string;
+  /** 本次写入/更新的主线条数 */
+  ingested: number;
+  /** 本次转入 fading/archived 的条数 */
+  archived: number;
+  /** 当前活跃主线总数 */
+  activeTotal: number;
+}

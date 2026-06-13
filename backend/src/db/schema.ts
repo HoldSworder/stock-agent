@@ -639,6 +639,34 @@ export const positionDiscipline = sqliteTable(
   (t) => ({ pk: primaryKey({ columns: [t.account, t.code] }) }),
 );
 
+/**
+ * 结构化市场主线（themes 模块）：把复盘计划 focusSectors / 热点雷达 / 研报里的板块判断
+ * 按主线名归并沉淀，多源叠加强度，供计划、决策、中线雷达统一复用。theme 唯一。
+ */
+export const marketThemes = sqliteTable(
+  'market_themes',
+  {
+    id: text('id').primaryKey(),
+    /** 主线名（归并键，唯一） */
+    theme: text('theme').notNull().unique(),
+    /** 关联东财板块代码（可空） */
+    boardCode: text('board_code'),
+    /** 强度 0-100 */
+    strength: real('strength').notNull().default(0),
+    /** active / fading / archived */
+    status: text('status').notNull().default('active'),
+    /** 来源集合 JSON（ThemeSource[]） */
+    sources: text('sources').notNull().default('[]'),
+    /** 证据要点 JSON（ThemeEvidence[]） */
+    evidence: text('evidence').notNull().default('[]'),
+    firstSeenDate: text('first_seen_date').notNull(),
+    lastSeenDate: text('last_seen_date').notNull(),
+    updatedAt: text('updated_at').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({ byStatus: index('idx_market_themes_status').on(t.status) }),
+);
+
 /** 真实持仓纪律事件流（确定性体检命中止损/止盈/超配/超期等时落库，供历史与智能推送去重） */
 export const disciplineEvents = sqliteTable(
   'discipline_events',

@@ -43,6 +43,9 @@ import type {
   DisciplineOverride,
   DisciplineOverrideInput,
   DisciplineReport,
+  MarketTheme,
+  MarketThemeStatus,
+  ThemesRefreshResult,
   ScheduleOverviewItem,
   ResearchAiAnalysis,
   ResearchAnnouncementItem,
@@ -189,6 +192,18 @@ export const api = {
       unwrap<void>(http.delete(`/positions/discipline/overrides/${code}`)),
     events: (limit?: number) =>
       unwrap<DisciplineEvent[]>(http.get('/positions/discipline/events', { params: { limit } })),
+  },
+
+  // 结构化市场主线（复盘/热点聚合 market_themes）
+  themes: {
+    list: (includeArchived = false) =>
+      unwrap<MarketTheme[]>(
+        http.get('/themes', { params: includeArchived ? { includeArchived: '1' } : {} }),
+      ),
+    refresh: () =>
+      unwrap<ThemesRefreshResult>(http.post('/themes/refresh', {}, { timeout: 60000 })),
+    setStatus: (id: string, status: MarketThemeStatus) =>
+      unwrap<MarketTheme>(http.put(`/themes/${id}`, { status })),
   },
 
   // 公共 AI 分析历史（按 kind + 可选 refKey 作用域；流式发起走 WS /ws/analyze）

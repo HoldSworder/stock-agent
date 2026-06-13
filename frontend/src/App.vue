@@ -43,6 +43,7 @@ const groups = [
       { to: '/', title: '大盘', desc: 'Market', icon: Histogram },
       { to: '/etf', title: 'ETF', desc: 'ETF', icon: PieChart },
       { to: '/intel', title: '热点雷达', desc: 'Intel', icon: TrendCharts },
+      { to: '/themes', title: '市场主线', desc: 'Themes', icon: Connection },
       { to: '/research', title: '研报', desc: 'Research', icon: Document },
     ],
   },

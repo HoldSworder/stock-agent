@@ -407,6 +407,21 @@ CREATE TABLE IF NOT EXISTS discipline_events (
 );
 CREATE INDEX IF NOT EXISTS idx_discipline_events_created ON discipline_events(created_at);
 CREATE INDEX IF NOT EXISTS idx_discipline_events_dedup ON discipline_events(code, kind, event_date);
+
+CREATE TABLE IF NOT EXISTS market_themes (
+  id TEXT PRIMARY KEY,
+  theme TEXT NOT NULL UNIQUE,
+  board_code TEXT,
+  strength REAL NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'active',
+  sources TEXT NOT NULL DEFAULT '[]',
+  evidence TEXT NOT NULL DEFAULT '[]',
+  first_seen_date TEXT NOT NULL,
+  last_seen_date TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_market_themes_status ON market_themes(status);
 `;
 
 export function ensureSchema(): void {
