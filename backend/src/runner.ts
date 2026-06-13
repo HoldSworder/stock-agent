@@ -1,7 +1,5 @@
 import type { ModelConfig, NotifyChannel, RunTrigger, StreamEvent } from '@stock-agent/shared';
-import { runAgent } from './agent/loop';
-import { createRun, finishRun } from './repo';
-import { sendTelegram } from './notify/telegram';
+import * as gateway from './agent/gateway';
 
 export interface RunnableTask {
   id: string | null;
@@ -10,6 +8,12 @@ export interface RunnableTask {
   modelConfig: ModelConfig;
   notifyChannels: NotifyChannel[];
   timeoutSec: number;
+  /** 绑定的战法（存在时 agent 可用 sim_trade 落该战法账户） */
+  strategy?: { id: string; name: string } | null;
+  /** 调用用途分类（落 llm_calls）；缺省按定时任务计 */
+  purpose?: string;
+  /** 强制成交：sim_trade 跳过交易时段校验（收盘后按收盘价补买等） */
+  forceTrade?: boolean;
 }
 
 export interface RunTaskResult {
@@ -18,54 +22,32 @@ export interface RunTaskResult {
   outputText: string;
 }
 
-/** 执行一个任务的完整生命周期：建运行记录 → agent → 收尾 → 按渠道推送 */
+/**
+ * 执行一个任务的完整生命周期。仅作为统一门面 gateway.call（agent 模式）的薄封装，
+ * 保留既有调用方签名；运行管理、调用记录、瞬时重试、失败告警、自动推送全部由 gateway 接管。
+ */
 export async function runTask(
   task: RunnableTask,
   trigger: RunTrigger,
   onEvent?: (e: StreamEvent) => void,
 ): Promise<RunTaskResult> {
-  const runId = createRun({
-    taskId: task.id,
-    taskName: task.name,
+  const result = await gateway.call({
+    mode: 'agent',
     trigger,
-    inputPrompt: task.prompt,
+    purpose: task.purpose ?? 'scheduled-task',
+    taskId: task.id ?? null,
+    taskName: task.name,
+    prompt: task.prompt,
+    modelConfig: task.modelConfig,
+    timeoutSec: task.timeoutSec,
+    strategy: task.strategy ?? null,
+    forceTrade: task.forceTrade ?? false,
+    notifyChannels: task.notifyChannels,
+    onEvent,
   });
-  onEvent?.({ type: 'run_started', runId });
-
-  try {
-    const result = await runAgent({
-      runId,
-      prompt: task.prompt,
-      modelConfig: task.modelConfig,
-      timeoutSec: task.timeoutSec,
-      onEvent,
-    });
-
-    finishRun(runId, {
-      status: result.status,
-      outputText: result.outputText,
-      promptTokens: result.promptTokens,
-      completionTokens: result.completionTokens,
-      error: result.error ?? null,
-    });
-
-    // 定时/手动任务：按渠道自动推送最终结果
-    if (
-      task.notifyChannels.includes('telegram') &&
-      result.outputText &&
-      result.status === 'success'
-    ) {
-      const title = task.name ? `【${task.name}】\n` : '';
-      await sendTelegram(title + result.outputText);
-    }
-
-    onEvent?.({ type: 'run_finished', runId, status: result.status });
-    return { runId, status: result.status, outputText: result.outputText };
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    finishRun(runId, { status: 'error', error: msg });
-    onEvent?.({ type: 'error', message: msg });
-    onEvent?.({ type: 'run_finished', runId, status: 'error' });
-    return { runId, status: 'error', outputText: '' };
-  }
+  return {
+    runId: result.runId ?? '',
+    status: result.status,
+    outputText: result.outputText,
+  };
 }

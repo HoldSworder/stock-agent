@@ -12,14 +12,19 @@
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",
     "@stock-agent/shared": "workspace:*",
+    "@vue-js-cron/element-plus": "^3.1.11",
     "axios": "^1.7.9",
     "dayjs": "^1.11.13",
+    "echarts": "^6.1.0",
     "element-plus": "^2.9.1",
+    "klinecharts": "9.8.10",
+    "markdown-it": "^14.2.0",
     "pinia": "^2.3.0",
     "vue": "^3.5.13",
     "vue-router": "^4.5.0"
   },
   "devDependencies": {
+    "@types/markdown-it": "^14.1.2",
     "@vitejs/plugin-vue": "^5.2.1",
     "typescript": "^5.7.2",
     "vite": "^6.0.5",

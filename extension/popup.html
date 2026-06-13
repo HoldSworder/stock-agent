@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Stock-Agent 凭据桥</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <nav class="tabs">
+      <button id="tabWatch" class="tab active" data-view="viewWatch">自选股</button>
+      <button id="tabSettings" class="tab" data-view="viewSettings">设置</button>
+    </nav>
+
+    <div id="viewWatch" class="view"></div>
+
+    <div id="viewSettings" class="view hidden">
+    <section class="card">
+      <div class="card-title">后端配置</div>
+      <label>环境
+        <select id="env">
+          <option value="dev">开发</option>
+          <option value="prod">生产</option>
+        </select>
+      </label>
+      <label>后端地址
+        <input id="backendUrl" type="text" placeholder="https://stock.example.com" />
+      </label>
+      <label>推送密钥（BRIDGE_SECRET）
+        <input id="bridgeSecret" type="password" placeholder="与后端 .env 一致" />
+      </label>
+      <label class="row">
+        <input id="autoRefresh" type="checkbox" />
+        <span>每 6 小时自动重推投资账本 Cookie</span>
+      </label>
+      <button id="saveConfig" class="btn">保存配置</button>
+    </section>
+
+    <section class="card">
+      <div class="card-title">投资账本 Cookie</div>
+      <p class="hint">需先在本浏览器登录同花顺投资账本。</p>
+      <button id="syncCookie" class="btn primary">采集并推送 Cookie</button>
+    </section>
+
+    <section class="card">
+      <div class="card-title">爱盯盘 token（微信扫码）</div>
+      <button id="startLogin" class="btn primary">开始扫码登录</button>
+      <div id="qrBox" class="qr-box hidden">
+        <img id="qrImg" alt="微信二维码" />
+        <p class="hint">请用微信扫码并在手机上确认</p>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-title">状态</div>
+      <pre id="log" class="log"></pre>
+    </section>
+    </div>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

@@ -1,12 +1,8 @@
-import { desc, eq, and, gte, lte } from 'drizzle-orm';
-import type {
-  RunTrigger,
-  RunStatus,
-  MessageRole,
-  StockPickInput,
-} from '@stock-agent/shared';
+import { desc, eq, and, inArray } from 'drizzle-orm';
+import type { RunTrigger, RunStatus, MessageRole } from '@stock-agent/shared';
 import { db, schema } from './db/client';
 import { newId, nowIso } from './util';
+import { broadcast } from './ws';
 
 // ===== 运行记录 =====
 
@@ -33,6 +29,8 @@ export function createRun(input: {
       error: null,
     })
     .run();
+  // 全局广播：任何路径建立的 run 都进入「Agent 运行中」抽屉
+  broadcast({ type: 'run_started', runId: id });
   return id;
 }
 
@@ -57,6 +55,38 @@ export function finishRun(
     })
     .where(eq(schema.taskRuns.id, runId))
     .run();
+  // 全局广播：run 结束（成功/失败/超时）即从「运行中」列表清除
+  broadcast({ type: 'run_finished', runId, status: patch.status });
+}
+
+/**
+ * 启动时回收孤儿运行：进程刚启动时不可能有正在执行的 run，
+ * 任何残留的 status='running' 都是上一个进程异常退出（如 tsx watch 重启）遗留的，
+ * 标记为 error 以免前端永远显示「运行中」。
+ */
+export function reconcileOrphanRuns(): number {
+  const res = db
+    .update(schema.taskRuns)
+    .set({
+      status: 'error',
+      finishedAt: nowIso(),
+      error: '运行中断（服务重启或异常退出）',
+    })
+    .where(eq(schema.taskRuns.status, 'running'))
+    .run();
+  return res.changes;
+}
+
+/** 取某任务最近一次运行的 startedAt（ISO），无运行记录返回 null。用于 missed-run 判定。 */
+export function getLastRunStartedAt(taskId: string): string | null {
+  const row = db
+    .select({ startedAt: schema.taskRuns.startedAt })
+    .from(schema.taskRuns)
+    .where(eq(schema.taskRuns.taskId, taskId))
+    .orderBy(desc(schema.taskRuns.startedAt))
+    .limit(1)
+    .get();
+  return row?.startedAt ?? null;
 }
 
 let msgSeq = new Map<string, number>();
@@ -93,6 +123,106 @@ export function listRuns(limit = 50) {
     .all();
 }
 
+/** 按任务 id 集合倒序取运行记录（用于战法「每日产出」聚合）。空集合直接返回空数组。 */
+export function listRunsByTaskIds(taskIds: string[], limit = 200) {
+  if (taskIds.length === 0) return [];
+  return db
+    .select()
+    .from(schema.taskRuns)
+    .where(inArray(schema.taskRuns.taskId, taskIds))
+    .orderBy(desc(schema.taskRuns.startedAt))
+    .limit(limit)
+    .all();
+}
+
+/** 复盘历史：筛选「一键复盘」成功运行，返回结构化 JSON 输出供前端重渲染 */
+export function listReviews(limit = 50) {
+  return db
+    .select({
+      id: schema.taskRuns.id,
+      createdAt: schema.taskRuns.startedAt,
+      finishedAt: schema.taskRuns.finishedAt,
+      outputText: schema.taskRuns.outputText,
+    })
+    .from(schema.taskRuns)
+    .where(
+      and(eq(schema.taskRuns.taskName, '一键复盘'), eq(schema.taskRuns.status, 'success')),
+    )
+    .orderBy(desc(schema.taskRuns.startedAt))
+    .limit(limit)
+    .all();
+}
+
+/** 研报机会历史：筛选「研报机会」成功运行，返回结构化 JSON 输出供前端重渲染 */
+export function listResearchReviews(limit = 50) {
+  return db
+    .select({
+      id: schema.taskRuns.id,
+      createdAt: schema.taskRuns.startedAt,
+      finishedAt: schema.taskRuns.finishedAt,
+      outputText: schema.taskRuns.outputText,
+    })
+    .from(schema.taskRuns)
+    .where(
+      and(eq(schema.taskRuns.taskName, '研报机会'), eq(schema.taskRuns.status, 'success')),
+    )
+    .orderBy(desc(schema.taskRuns.startedAt))
+    .limit(limit)
+    .all();
+}
+
+/** 大盘复盘点评历史：筛选「大盘复盘点评」成功运行，返回点评正文供今日计划引用 */
+export function listMarketReviews(limit = 50) {
+  return db
+    .select({
+      id: schema.taskRuns.id,
+      createdAt: schema.taskRuns.startedAt,
+      finishedAt: schema.taskRuns.finishedAt,
+      outputText: schema.taskRuns.outputText,
+    })
+    .from(schema.taskRuns)
+    .where(
+      and(eq(schema.taskRuns.taskName, '大盘复盘点评'), eq(schema.taskRuns.status, 'success')),
+    )
+    .orderBy(desc(schema.taskRuns.startedAt))
+    .limit(limit)
+    .all();
+}
+
+// ===== 热点 AI 研判历史 =====
+
+/** 落库一次热点 AI 研判，返回生成的记录 id 与时间 */
+export function insertTrendSummary(input: {
+  reportType: string;
+  content: string;
+  promptTokens?: number | null;
+  completionTokens?: number | null;
+}): { id: string; createdAt: string } {
+  const id = newId();
+  const createdAt = nowIso();
+  db.insert(schema.trendSummaries)
+    .values({
+      id,
+      reportType: input.reportType,
+      content: input.content,
+      promptTokens: input.promptTokens ?? null,
+      completionTokens: input.completionTokens ?? null,
+      createdAt,
+    })
+    .run();
+  return { id, createdAt };
+}
+
+/** 热点 AI 研判历史（按生成时间倒序） */
+export function listTrendSummaries(limit = 30) {
+  return db
+    .select()
+    .from(schema.trendSummaries)
+    .orderBy(desc(schema.trendSummaries.createdAt))
+    .limit(limit)
+    .all();
+}
+
 export function getRun(runId: string) {
   const run = db
     .select()
@@ -106,43 +236,4 @@ export function getRun(runId: string) {
     .orderBy(schema.runMessages.seq)
     .all();
   return { run, messages };
-}
-
-// ===== 选股留痕 =====
-
-export function saveStockPicks(
-  runId: string | null,
-  picks: StockPickInput[],
-): number {
-  const at = nowIso();
-  for (const p of picks) {
-    db.insert(schema.stockPicks)
-      .values({
-        id: newId(),
-        runId,
-        code: p.code,
-        name: p.name,
-        price: p.price ?? null,
-        reason: p.reason ?? null,
-        signals: p.signals ? JSON.stringify(p.signals) : null,
-        tags: p.tags ? p.tags.join(',') : null,
-        pickedAt: at,
-      })
-      .run();
-  }
-  return picks.length;
-}
-
-export function listPicks(opts: { from?: string; to?: string; limit?: number }) {
-  const conds = [];
-  if (opts.from) conds.push(gte(schema.stockPicks.pickedAt, opts.from));
-  if (opts.to) conds.push(lte(schema.stockPicks.pickedAt, opts.to));
-  const where = conds.length ? and(...conds) : undefined;
-  return db
-    .select()
-    .from(schema.stockPicks)
-    .where(where)
-    .orderBy(desc(schema.stockPicks.pickedAt))
-    .limit(opts.limit ?? 200)
-    .all();
 }

@@ -15,3 +15,7 @@ services:
       DATABASE_PATH: /app/data/stock-agent.sqlite
     volumes:
       - ./data:/app/data
+
+  # 注：AKShare HTTP 服务（aktools）作为群晖独立基础设施容器部署（与 trendradar/scrapling 一致），
+  # 仅绑 127.0.0.1:9117，经群晖 nginx 反代为 https://router.qzran.cn:8091，故不并入本 compose。
+  # 数据源页 Base URL 填该反代地址即可。

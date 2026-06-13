@@ -7,6 +7,7 @@ import type {
 } from '@stock-agent/shared';
 import { db, schema } from './db/client';
 import { newId, nowIso } from './util';
+import { getStrategy } from './strategy/sim';
 import type { RunnableTask } from './runner';
 
 type Row = typeof schema.scheduledTasks.$inferSelect;
@@ -23,6 +24,7 @@ function rowToDto(row: Row): ScheduledTask {
     notifyChannels: safeParse<NotifyChannel[]>(row.notifyChannels, ['webui']),
     timeoutSec: row.timeoutSec,
     enabled: row.enabled,
+    strategyId: row.strategyId ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -64,6 +66,7 @@ export function createTask(input: ScheduledTaskInput): ScheduledTask {
       notifyChannels: JSON.stringify(input.notifyChannels ?? ['webui']),
       timeoutSec: input.timeoutSec,
       enabled: input.enabled,
+      strategyId: input.strategyId ?? null,
       createdAt: now,
       updatedAt: now,
     })
@@ -88,6 +91,8 @@ export function updateTask(
       notifyChannels: JSON.stringify(patch.notifyChannels ?? existing.notifyChannels),
       timeoutSec: patch.timeoutSec ?? existing.timeoutSec,
       enabled: patch.enabled ?? existing.enabled,
+      strategyId:
+        patch.strategyId !== undefined ? patch.strategyId : existing.strategyId ?? null,
       updatedAt: nowIso(),
     })
     .where(eq(schema.scheduledTasks.id, id))
@@ -100,6 +105,7 @@ export function deleteTask(id: string): void {
 }
 
 export function toRunnable(task: ScheduledTask): RunnableTask {
+  const strategy = task.strategyId ? getStrategy(task.strategyId) : undefined;
   return {
     id: task.id,
     name: task.name,
@@ -107,5 +113,6 @@ export function toRunnable(task: ScheduledTask): RunnableTask {
     modelConfig: task.modelConfig,
     notifyChannels: task.notifyChannels,
     timeoutSec: task.timeoutSec,
+    strategy: strategy ? { id: strategy.id, name: strategy.name } : null,
   };
 }

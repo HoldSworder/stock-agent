@@ -1,4 +1,4 @@
-import { desc, eq } from 'drizzle-orm';
+import { desc, eq, notInArray } from 'drizzle-orm';
 import type { ChatMessage, ChatSession, MessageRole } from '@stock-agent/shared';
 import { db, schema } from './db/client';
 import { newId, nowIso } from './util';
@@ -18,6 +18,21 @@ export function createSession(title = '新对话'): ChatSession {
     .values({ id, title, createdAt: now, updatedAt: now })
     .run();
   return { id, title, createdAt: now, updatedAt: now };
+}
+
+export function deleteSession(id: string): void {
+  db.delete(schema.chatMessages).where(eq(schema.chatMessages.sessionId, id)).run();
+  db.delete(schema.chatSessions).where(eq(schema.chatSessions.id, id)).run();
+}
+
+/** 清理无任何消息的空壳会话 */
+export function pruneEmptySessions(): void {
+  const withMessages = db
+    .selectDistinct({ sessionId: schema.chatMessages.sessionId })
+    .from(schema.chatMessages);
+  db.delete(schema.chatSessions)
+    .where(notInArray(schema.chatSessions.id, withMessages))
+    .run();
 }
 
 export function touchSession(id: string, title?: string): void {

@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=22 <23"
+  },
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
@@ -15,11 +18,13 @@
     "@fastify/websocket": "^11.0.1",
     "@stock-agent/shared": "workspace:*",
     "better-sqlite3": "^11.7.0",
+    "chinese-days": "^1.5.9",
     "croner": "^9.0.0",
     "dotenv": "^16.4.7",
     "drizzle-orm": "^0.38.2",
     "fastify": "^5.2.0",
     "openai": "^4.77.0",
+    "trading-signals": "^7.4.3",
     "zod": "^3.24.1"
   },
   "devDependencies": {

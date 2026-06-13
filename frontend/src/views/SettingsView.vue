@@ -1,67 +1,85 @@
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
+import { useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
-import { api } from '@/api';
+import { api, clearToken } from '@/api';
 import type { AppSettings } from '@stock-agent/shared';
+
+const router = useRouter();
 
 const loading = ref(false);
 const testing = ref(false);
 const settings = ref<AppSettings | null>(null);
 
-// 表单：留空表示不修改对应敏感字段
+// 访问密码
+const pwForm = reactive({ next: '', confirm: '' });
+const pwLoading = ref(false);
+
+async function savePassword() {
+  if (!pwForm.next) {
+    ElMessage.warning('请输入新密码');
+    return;
+  }
+  if (pwForm.next !== pwForm.confirm) {
+    ElMessage.warning('两次输入的密码不一致');
+    return;
+  }
+  pwLoading.value = true;
+  try {
+    await api.setPassword(pwForm.next);
+    clearToken();
+    ElMessage.success('密码已更新，请重新登录');
+    router.replace('/login');
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '设置失败');
+  } finally {
+    pwLoading.value = false;
+  }
+}
+
+// 系统级配置；各数据源凭据/启停已迁移到「数据源」页统一管理。
 const form = reactive({
   llmBaseUrl: '',
   llmModel: '',
+  llmLightModel: '',
+  llmContextWindow: '',
   llmApiKey: '',
-  emApiKey: '',
-  mxApiKey: '',
   telegramBotToken: '',
   telegramChatId: '',
   telegramThreadId: '',
-  ovBaseUrl: '',
-  ovApiKey: '',
-  ovAccount: '',
-  ovUser: '',
-  ovEventsPrefix: '',
+  etfEnabled: 'true',
 });
+
+// 启用开关：DB 以 'true'/'false' 字符串存储，UI 用布尔切换
+const etfEnabled = computed({
+  get: () => form.etfEnabled !== 'false',
+  set: (v: boolean) => {
+    form.etfEnabled = v ? 'true' : 'false';
+  },
+});
+
+function fill(s: AppSettings) {
+  form.llmBaseUrl = s.llmBaseUrl;
+  form.llmModel = s.llmModel;
+  form.llmLightModel = s.llmLightModel;
+  form.llmContextWindow = s.llmContextWindow;
+  form.llmApiKey = s.llmApiKey;
+  form.telegramBotToken = s.telegramBotToken;
+  form.telegramChatId = s.telegramChatId;
+  form.telegramThreadId = s.telegramThreadId;
+  form.etfEnabled = s.etfEnabled || 'true';
+}
 
 async function load() {
   settings.value = await api.getSettings();
-  form.llmBaseUrl = settings.value.llmBaseUrl;
-  form.llmModel = settings.value.llmModel;
-  form.telegramChatId = settings.value.telegramChatId;
-  form.telegramThreadId = settings.value.telegramThreadId;
-  form.ovBaseUrl = settings.value.ovBaseUrl;
-  form.ovAccount = settings.value.ovAccount;
-  form.ovUser = settings.value.ovUser;
-  form.ovEventsPrefix = settings.value.ovEventsPrefix;
+  fill(settings.value);
 }
 
 async function save() {
   loading.value = true;
   try {
-    const patch: Record<string, string> = {
-      llmBaseUrl: form.llmBaseUrl,
-      llmModel: form.llmModel,
-      telegramChatId: form.telegramChatId,
-      telegramThreadId: form.telegramThreadId,
-      ovBaseUrl: form.ovBaseUrl,
-      ovAccount: form.ovAccount,
-      ovUser: form.ovUser,
-      ovEventsPrefix: form.ovEventsPrefix,
-    };
-    // 敏感字段仅在填写了新值时提交
-    if (form.llmApiKey) patch.llmApiKey = form.llmApiKey;
-    if (form.emApiKey) patch.emApiKey = form.emApiKey;
-    if (form.mxApiKey) patch.mxApiKey = form.mxApiKey;
-    if (form.telegramBotToken) patch.telegramBotToken = form.telegramBotToken;
-    if (form.ovApiKey) patch.ovApiKey = form.ovApiKey;
-    settings.value = await api.updateSettings(patch);
-    form.llmApiKey = '';
-    form.emApiKey = '';
-    form.mxApiKey = '';
-    form.telegramBotToken = '';
-    form.ovApiKey = '';
+    settings.value = await api.updateSettings({ ...form });
+    fill(settings.value);
     ElMessage.success('已保存');
   } finally {
     loading.value = false;
@@ -78,92 +96,176 @@ async function test() {
   }
 }
 
-function tag(set: boolean) {
-  return set ? '已配置' : '未配置';
-}
-
 onMounted(load);
 </script>
 
 <template>
   <div class="page">
     <div class="page-head"><div class="page-title">设置</div></div>
-    <div class="page-sub">密钥保存在本地 SQLite，仅返回是否已配置；留空表示不修改</div>
-    <el-form v-if="settings" label-width="140px" style="max-width: 640px">
-      <el-divider content-position="left">模型（OpenAI 兼容，任意服务）</el-divider>
-      <el-form-item label="Base URL">
-        <el-input v-model="form.llmBaseUrl" placeholder="https://your-gateway/v1" />
-      </el-form-item>
-      <el-form-item label="模型">
-        <el-input v-model="form.llmModel" placeholder="如 gpt-4o-mini / deepseek-chat / 自定义" />
-      </el-form-item>
-      <el-form-item label="API Key">
-        <el-input
-          v-model="form.llmApiKey"
-          type="password"
-          show-password
-          :placeholder="tag(settings.llmApiKeySet)"
-        />
-      </el-form-item>
+    <div class="page-sub">
+      系统级配置（模型 / Telegram / 访问密码）。各数据源凭据与启停已迁移至「数据源」页统一管理。
+    </div>
+    <el-form v-if="settings" label-position="top" class="s-form">
+      <section class="s-card">
+        <div class="s-card-head">
+          <div class="s-card-title">模型</div>
+          <div class="s-card-sub">OpenAI 兼容，任意服务</div>
+        </div>
+        <div class="s-grid">
+          <el-form-item label="Base URL" class="s-full">
+            <el-input v-model="form.llmBaseUrl" placeholder="https://your-gateway/v1" />
+          </el-form-item>
+          <el-form-item label="默认模型">
+            <el-input v-model="form.llmModel" placeholder="如 gpt-4o-mini / deepseek-chat / 自定义" />
+          </el-form-item>
+          <el-form-item label="轻度模型">
+            <el-input
+              v-model="form.llmLightModel"
+              placeholder="便宜模型名，用于盯盘初筛，留空=跳过初筛"
+            />
+          </el-form-item>
+          <el-form-item label="上下文窗口(token)">
+            <el-input
+              v-model="form.llmContextWindow"
+              placeholder="如 128000，超 75% 自动压缩历史，留空=默认 128000"
+            />
+          </el-form-item>
+          <el-form-item label="API Key">
+            <el-input v-model="form.llmApiKey" placeholder="未配置" />
+          </el-form-item>
+        </div>
+      </section>
 
-      <el-divider content-position="left">妙想（东方财富）</el-divider>
-      <el-form-item label="EM_API_KEY">
-        <el-input
-          v-model="form.emApiKey"
-          type="password"
-          show-password
-          :placeholder="tag(settings.emApiKeySet)"
-        />
-      </el-form-item>
-      <el-form-item label="MX_APIKEY">
-        <el-input
-          v-model="form.mxApiKey"
-          type="password"
-          show-password
-          :placeholder="tag(settings.mxApiKeySet)"
-        />
-      </el-form-item>
+      <section class="s-card">
+        <div class="s-card-head">
+          <div class="s-card-title">Telegram</div>
+          <div class="s-card-sub">通知推送</div>
+        </div>
+        <div class="s-grid">
+          <el-form-item label="Bot Token" class="s-full">
+            <el-input v-model="form.telegramBotToken" placeholder="未配置" />
+          </el-form-item>
+          <el-form-item label="Chat ID">
+            <el-input v-model="form.telegramChatId" />
+          </el-form-item>
+          <el-form-item label="Thread ID">
+            <el-input v-model="form.telegramThreadId" placeholder="可选，话题 id" />
+          </el-form-item>
+        </div>
+      </section>
 
-      <el-divider content-position="left">Telegram</el-divider>
-      <el-form-item label="Bot Token">
-        <el-input
-          v-model="form.telegramBotToken"
-          type="password"
-          show-password
-          :placeholder="tag(settings.telegramBotTokenSet)"
-        />
-      </el-form-item>
-      <el-form-item label="Chat ID">
-        <el-input v-model="form.telegramChatId" />
-      </el-form-item>
-      <el-form-item label="Thread ID">
-        <el-input v-model="form.telegramThreadId" placeholder="可选，话题 id" />
-      </el-form-item>
+      <section class="s-card">
+        <div class="s-card-head">
+          <div class="s-card-title">ETF</div>
+          <div class="s-card-sub">ETF 跟踪池与买卖信号模块</div>
+        </div>
+        <div class="s-grid">
+          <el-form-item label="启用" class="s-full">
+            <el-switch v-model="etfEnabled" active-text="开启" inactive-text="关闭" inline-prompt />
+          </el-form-item>
+        </div>
+      </section>
 
-      <el-divider content-position="left">真实持仓（OpenViking）</el-divider>
-      <el-form-item label="Base URL">
-        <el-input v-model="form.ovBaseUrl" placeholder="http://192.168.31.144:9109" />
-      </el-form-item>
-      <el-form-item label="API Key">
-        <el-input
-          v-model="form.ovApiKey"
-          type="password"
-          show-password
-          :placeholder="tag(settings.ovApiKeySet)"
-        />
-      </el-form-item>
-      <el-form-item label="Account / User">
-        <el-input v-model="form.ovAccount" style="width: 49%" placeholder="user" />
-        <el-input v-model="form.ovUser" style="width: 49%; margin-left: 2%" placeholder="default" />
-      </el-form-item>
-      <el-form-item label="快照 URI 前缀">
-        <el-input v-model="form.ovEventsPrefix" placeholder="viking://user/default/memories/events" />
-      </el-form-item>
+      <section class="s-card">
+        <div class="s-card-head">
+          <div class="s-card-title">访问密码</div>
+          <div class="s-card-sub">全局登录保护</div>
+        </div>
+        <div class="s-grid">
+          <el-form-item label="新密码">
+            <el-input v-model="pwForm.next" placeholder="留空不修改" />
+          </el-form-item>
+          <el-form-item label="确认新密码">
+            <el-input v-model="pwForm.confirm" placeholder="再次输入" />
+          </el-form-item>
+          <el-form-item class="s-full">
+            <el-button :loading="pwLoading" @click="savePassword">更新密码</el-button>
+            <span class="hint" style="margin-left: 12px">更新后将退出登录，需用新密码重新进入</span>
+          </el-form-item>
+        </div>
+      </section>
 
-      <el-form-item>
+      <div class="s-actions">
         <el-button type="primary" :loading="loading" @click="save">保存</el-button>
         <el-button :loading="testing" @click="test">测试模型连通性</el-button>
-      </el-form-item>
+      </div>
     </el-form>
   </div>
 </template>
+
+<style scoped>
+.s-form {
+  max-width: 880px;
+}
+
+.s-card {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  margin-bottom: 16px;
+}
+
+.s-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border-soft);
+}
+.s-card-title {
+  font-family: var(--font-display);
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+.s-card-sub {
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.s-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0 18px;
+}
+.s-grid :deep(.el-form-item) {
+  margin-bottom: 14px;
+}
+.s-grid :deep(.el-form-item:last-child) {
+  margin-bottom: 0;
+}
+.s-full {
+  grid-column: 1 / -1;
+}
+
+.s-actions {
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  gap: 10px;
+  padding: 14px 0;
+  margin-top: 4px;
+  background: linear-gradient(to top, var(--bg-1) 70%, transparent);
+}
+
+@media (max-width: 720px) {
+  .s-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.hint {
+  margin-top: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-2);
+}
+.hint code {
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bg-1);
+  font-size: 12px;
+}
+</style>

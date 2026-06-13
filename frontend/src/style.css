@@ -8,12 +8,13 @@
   --bg-2: #11151c;
   --bg-3: #171c25;
   --bg-hover: #1c222c;
-  --border: #232b36;
-  --border-soft: #1a202a;
+  --border: #323c4a;
+  --border-soft: #283140;
+  --grid-line: #161b22;
 
   --text-0: #e8edf4;
   --text-1: #9aa6b4;
-  --text-2: #5f6b78;
+  --text-2: #788694;
 
   --brand: #f0b429;
   --brand-2: #ffcd4d;
@@ -22,6 +23,11 @@
 
   --up: #f6465d; /* 涨 / 红 */
   --down: #1fc77f; /* 跌 / 绿 */
+
+  /* 状态语义色（与 A股涨跌色解耦：绿=正常 / 琥珀=待处理 / 红=异常） */
+  --status-ok: #1fc77f;
+  --status-warn: #f0b429;
+  --status-err: #f6465d;
 
   --radius: 10px;
   --radius-sm: 7px;
@@ -81,8 +87,8 @@ body {
   /* 微妙的网格 + 顶部光晕，营造终端氛围 */
   background-image:
     radial-gradient(900px 420px at 78% -8%, rgba(240, 180, 41, 0.07), transparent 60%),
-    linear-gradient(var(--border-soft) 1px, transparent 1px),
-    linear-gradient(90deg, var(--border-soft) 1px, transparent 1px);
+    linear-gradient(var(--grid-line) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
   background-size: 100% 100%, 44px 44px, 44px 44px;
   -webkit-font-smoothing: antialiased;
 }
@@ -139,33 +145,7 @@ body {
   color: var(--down) !important;
 }
 
-/* 卡片细节 */
-.el-card {
-  border: 1px solid var(--border) !important;
-  border-radius: var(--radius) !important;
-  background: var(--bg-2) !important;
-}
-.el-card__header {
-  border-bottom: 1px solid var(--border-soft) !important;
-  font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 14px;
-}
-
-/* 表格更紧凑、表头大写小字 */
-.el-table th .cell {
-  font-size: 12px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  color: var(--text-1) !important;
-}
-
-/* 按钮：主按钮文字用深色压在金色上 */
-.el-button--primary {
-  --el-button-text-color: #1a1407;
-  --el-button-hover-text-color: #1a1407;
-  font-weight: 600;
-}
+/* Element Plus 组件覆盖见 ./styles/element-theme.css */
 
 /* 滚动条 */
 ::-webkit-scrollbar {

@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22 <23"
   },
   "scripts": {
     "dev": "pnpm --parallel --filter ./backend --filter ./frontend dev",
@@ -12,7 +12,9 @@
     "dev:frontend": "pnpm --filter ./frontend dev",
     "build": "pnpm --filter ./frontend build",
     "typecheck": "pnpm --filter ./backend typecheck && pnpm --filter ./frontend typecheck",
-    "db:push": "pnpm --filter ./backend db:push"
+    "fix:native": "pnpm --filter ./backend rebuild better-sqlite3",
+    "db:push": "pnpm --filter ./backend db:push",
+    "ext:vendor-klinecharts": "node -e \"const fs=require('fs');const p=require.resolve('klinecharts/dist/index.esm.js',{paths:['./frontend','.']});fs.mkdirSync('extension/vendor',{recursive:true});let s=fs.readFileSync(p,'utf8').replace(/process\\.env\\.NODE_ENV === 'development'/g,'false');fs.writeFileSync('extension/vendor/klinecharts.esm.js',s);console.log('vendored (process shimmed) from',p)\""
   },
   "packageManager": "pnpm@8.15.4+sha512.0bd3a9be9eb0e9a692676deec00a303ba218ba279d99241475616b398dbaeedd11146f92c2843458f557b1d127e09d4c171e105bdcd6b61002b39685a8016b9e"
 }

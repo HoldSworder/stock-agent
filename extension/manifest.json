@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Stock-Agent 凭据桥",
+  "version": "0.1.0",
+  "description": "本地采集同花顺投资账本 Cookie，并通过微信扫码自助登录铸造爱盯盘 token，一键推送到 Stock-Agent 后端。",
+  "permissions": ["cookies", "storage", "alarms"],
+  "host_permissions": [
+    "*://*.10jqka.com.cn/*",
+    "https://52etf.site/*",
+    "http://localhost:8787/*",
+    "http://127.0.0.1:8787/*"
+  ],
+  "optional_host_permissions": ["*://*/*"],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Stock-Agent 凭据桥"
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "icons": {}
+}

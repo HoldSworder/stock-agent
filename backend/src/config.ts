@@ -9,38 +9,17 @@ function env(key: string, fallback = ''): string {
   return process.env[key]?.trim() || fallback;
 }
 
+// 仅保留进程级基础设施配置（端口/时区/数据库路径）。
+// 模型、妙想、Telegram、同花顺等业务配置一律存 SQLite，并在 WebUI 设置页维护。
 export const config = {
   port: Number(env('PORT', '8787')),
   databasePath: env('DATABASE_PATH', './data/stock-agent.sqlite'),
   tz: env('TZ', 'Asia/Shanghai'),
-
-  // 任意 OpenAI 兼容模型服务（DEEPSEEK_* 作为旧变量名兜底）
-  llm: {
-    baseUrl: env('OPENAI_BASE_URL', env('DEEPSEEK_BASE_URL', 'https://api.openai.com/v1')),
-    apiKey: env('OPENAI_API_KEY', env('DEEPSEEK_API_KEY')),
-    model: env('OPENAI_MODEL', env('DEEPSEEK_MODEL', 'gpt-4o-mini')),
-  },
-
-  miaoxiang: {
-    emApiKey: env('EM_API_KEY'),
-    mxApiKey: env('MX_APIKEY'),
-  },
-
-  telegram: {
-    botToken: env('TELEGRAM_BOT_TOKEN'),
-    chatId: env('TELEGRAM_CHAT_ID'),
-    threadId: env('TELEGRAM_THREAD_ID'),
-  },
-
-  // 真实持仓数据源：复用 LXC portfolio-sync 写入 OpenViking 的快照
-  openviking: {
-    baseUrl: env('OPENVIKING_BASE_URL', 'http://192.168.31.144:9109'),
-    apiKey: env('OPENVIKING_API_KEY'),
-    account: env('OPENVIKING_ACCOUNT', 'user'),
-    user: env('OPENVIKING_USER', 'default'),
-    // 快照 URI 前缀，实际文件为 <prefix>/YYYY/MM/DD/portfolio_snapshot.md
-    eventsPrefix: env('OPENVIKING_EVENTS_PREFIX', 'viking://user/default/memories/events'),
-  },
+  // 配套扩展推送凭据（idpToken/thsCookie）到 /api/credentials 时校验的共享密钥；
+  // 未设置则该端点拒绝服务，避免公网裸奔。
+  bridgeSecret: env('BRIDGE_SECRET', ''),
+  // 生产 CORS 白名单（逗号分隔的来源）；留空则回退为反射任意来源（仅适合本地开发）。
+  corsOrigins: env('CORS_ORIGINS', ''),
 };
 
 export type AppConfig = typeof config;
