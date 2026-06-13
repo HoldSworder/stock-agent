@@ -9,6 +9,7 @@ import RunResultDrawer from '@/components/RunResultDrawer.vue';
 import type {
   ScheduledTask,
   SkillDimension,
+  StrategyForwardStats,
   StrategyKind,
   StrategyListItem,
   StrategySkill,
@@ -114,14 +115,53 @@ async function loadDaily() {
   }
 }
 
+// ===== 前向验证 + 自动模拟总闸 =====
+const forward = ref<StrategyForwardStats | null>(null);
+const forwardLoading = ref(false);
+const autoSimGlobal = ref(false);
+
+async function loadForward() {
+  if (!selectedId.value) {
+    forward.value = null;
+    return;
+  }
+  forwardLoading.value = true;
+  try {
+    forward.value = await api.getStrategyForward(selectedId.value);
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : String(e));
+  } finally {
+    forwardLoading.value = false;
+  }
+}
+
+async function loadAutoSim() {
+  try {
+    autoSimGlobal.value = (await api.getAutoSim()).enabled;
+  } catch {
+    autoSimGlobal.value = false;
+  }
+}
+
+async function toggleAutoSim(val: string | number | boolean) {
+  const on = val === true;
+  try {
+    autoSimGlobal.value = (await api.setAutoSim(on)).enabled;
+    ElMessage.success(autoSimGlobal.value ? '已开启自动模拟总闸' : '已关闭自动模拟总闸');
+  } catch (e) {
+    autoSimGlobal.value = !on;
+    ElMessage.error(e instanceof Error ? e.message : String(e));
+  }
+}
+
 async function select(id: string) {
   selectedId.value = id;
-  await Promise.all([loadSnap(), loadTasks(), loadRuns(), loadDaily()]);
+  await Promise.all([loadSnap(), loadTasks(), loadRuns(), loadDaily(), loadForward()]);
   await loadSkills();
 }
 
 async function refreshAll() {
-  await Promise.all([loadList(), loadSnap(), loadTasks(), loadRuns(), loadDaily()]);
+  await Promise.all([loadList(), loadSnap(), loadTasks(), loadRuns(), loadDaily(), loadForward()]);
   await loadSkills();
 }
 
@@ -173,10 +213,16 @@ async function submitCreate() {
 
 // ===== 编辑战法（名称/描述/Skill 开关；kind 与初始资金锁定）=====
 const editVisible = ref(false);
-const editForm = ref<{ name: string; description: string; skillEnabled: boolean }>({
+const editForm = ref<{
+  name: string;
+  description: string;
+  skillEnabled: boolean;
+  autoSimEnabled: boolean;
+}>({
   name: '',
   description: '',
   skillEnabled: false,
+  autoSimEnabled: false,
 });
 const editing = ref(false);
 
@@ -186,6 +232,7 @@ function openEdit() {
     name: snap.value.strategy.name,
     description: snap.value.strategy.description ?? '',
     skillEnabled: !!snap.value.strategy.skillEnabled,
+    autoSimEnabled: !!snap.value.strategy.autoSimEnabled,
   };
   editVisible.value = true;
 }
@@ -199,6 +246,7 @@ async function submitEdit() {
       name: editForm.value.name.trim(),
       description: editForm.value.description.trim() || null,
       skillEnabled: editForm.value.skillEnabled,
+      autoSimEnabled: editForm.value.autoSimEnabled,
     });
     editVisible.value = false;
     ElMessage.success('已保存');
@@ -570,6 +618,7 @@ let ws: WebSocket | null = null;
 
 onMounted(() => {
   loadList();
+  loadAutoSim();
   ws = openWs('/ws/runs');
   ws.onmessage = async (ev) => {
     const e: StreamEvent = JSON.parse(ev.data);
@@ -718,6 +767,55 @@ onUnmounted(() => ws?.close());
                 {{ signed(snap.totalProfit) }}
                 <span class="sub">{{ pct(snap.totalProfitRate) }}</span>
               </div>
+            </div>
+          </div>
+
+          <!-- 前向验证：样本曲线统计 + 自动模拟闸门（确定性只读） -->
+          <div v-if="!isMiaoxiang" class="forward-panel" v-loading="forwardLoading">
+            <div class="forward-head">
+              <span class="forward-title">前向验证</span>
+              <span class="forward-meta">
+                {{ forward?.sinceDate ? `自 ${forward.sinceDate} · ${forward.days} 个样本日` : '尚无样本（收盘后自动采集）' }}
+              </span>
+              <el-tag
+                size="small"
+                effect="plain"
+                :type="forward?.autoSimEnabled ? 'success' : 'info'"
+              >
+                {{ forward?.autoSimEnabled ? '已入自动模拟白名单' : '未入白名单' }}
+              </el-tag>
+            </div>
+            <div v-if="forward && forward.days >= 2" class="forward-stats">
+              <div class="fwd-item">
+                <span class="fwd-label">区间收益</span>
+                <span class="fwd-value num" :class="dir(forward.cumReturn ?? 0)">
+                  {{ forward.cumReturn != null ? `${forward.cumReturn > 0 ? '+' : ''}${forward.cumReturn}%` : '—' }}
+                </span>
+              </div>
+              <div class="fwd-item">
+                <span class="fwd-label">最大回撤</span>
+                <span class="fwd-value num down">
+                  {{ forward.maxDrawdown != null ? `${forward.maxDrawdown}%` : '—' }}
+                </span>
+              </div>
+              <div class="fwd-item">
+                <span class="fwd-label">已实现笔数</span>
+                <span class="fwd-value num">{{ forward.closedTrades }}</span>
+              </div>
+              <div class="fwd-item">
+                <span class="fwd-label">胜率</span>
+                <span class="fwd-value num">
+                  {{ forward.winRate != null ? `${forward.winRate}%` : '—' }}
+                </span>
+              </div>
+            </div>
+            <div class="forward-gate">
+              <span class="fwd-label">自动模拟总闸</span>
+              <el-switch :model-value="autoSimGlobal" size="small" @change="toggleAutoSim" />
+              <span class="form-tip">
+                总闸 + 白名单同时开启才会自动下单；当前
+                {{ autoSimGlobal ? '已开启' : '关闭（默认）' }}，自动买入受底座急停约束
+              </span>
             </div>
           </div>
 
@@ -1075,6 +1173,12 @@ onUnmounted(() => ws?.close());
           <el-switch v-model="editForm.skillEnabled" />
           <span class="form-tip">开启后复盘时 agent 可提议调整选股/买入/卖出打法（需你确认才生效）</span>
         </el-form-item>
+        <el-form-item v-if="!isMiaoxiang" label="自动模拟">
+          <el-switch v-model="editForm.autoSimEnabled" />
+          <span class="form-tip">
+            纳入自动模拟白名单；仅当上方「自动模拟总闸」也开启时才会自动下单（默认关闭）
+          </span>
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="editVisible = false">取消</el-button>
@@ -1259,6 +1363,53 @@ onUnmounted(() => ws?.close());
   grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   gap: 12px;
   margin-bottom: 18px;
+}
+.forward-panel {
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 8px;
+  padding: 12px 14px;
+  margin-bottom: 18px;
+  background: var(--fill-1, #fafafa);
+}
+.forward-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.forward-title {
+  font-weight: 600;
+  font-size: 14px;
+}
+.forward-meta {
+  font-size: 12px;
+  color: var(--text-2);
+}
+.forward-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+.fwd-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.fwd-label {
+  font-size: 12px;
+  color: var(--text-2);
+}
+.fwd-value {
+  font-size: 16px;
+  font-weight: 600;
+}
+.forward-gate {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--border, #e5e7eb);
 }
 .card {
   background: var(--bg-2);

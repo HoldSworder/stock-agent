@@ -70,6 +70,7 @@ import type {
   SkillDimension,
   Strategy,
   StrategyInput,
+  StrategyForwardStats,
   StrategyListItem,
   StrategySkillView,
   StrategySnapshot,
@@ -286,7 +287,12 @@ export const api = {
     unwrap<StrategySnapshot>(http.get(`/strategies/${id}`, { timeout: 20000 })),
   updateStrategy: (
     id: string,
-    body: { name?: string; description?: string | null; skillEnabled?: boolean },
+    body: {
+      name?: string;
+      description?: string | null;
+      skillEnabled?: boolean;
+      autoSimEnabled?: boolean;
+    },
   ) => unwrap<Strategy>(http.put(`/strategies/${id}`, body)),
   deleteStrategy: (id: string) => unwrap<void>(http.delete(`/strategies/${id}`)),
   simTrade: (id: string, body: SimTradeInput) =>
@@ -301,6 +307,13 @@ export const api = {
     unwrap<StrategySnapshot>(http.post(`/strategies/${id}/reset`, {}, { timeout: 30000 })),
   getStrategyDailyOutput: (id: string) =>
     unwrap<TaskRun[]>(http.get(`/strategies/${id}/daily-output`)),
+
+  // 战法前向验证（样本曲线/累计收益/回撤/胜率）+ 自动模拟总闸
+  getStrategyForward: (id: string) =>
+    unwrap<StrategyForwardStats>(http.get(`/strategies/${id}/forward`, { timeout: 20000 })),
+  getAutoSim: () => unwrap<{ enabled: boolean }>(http.get('/strategies/auto-sim')),
+  setAutoSim: (enabled: boolean) =>
+    unwrap<{ enabled: boolean }>(http.put('/strategies/auto-sim', { enabled })),
 
   // 战法 Skill 自迭代
   getStrategySkills: (id: string) =>

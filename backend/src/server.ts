@@ -71,6 +71,7 @@ import {
   updateStrategy,
 } from './strategy/sim';
 import { syncMiaoxiangStrategy } from './strategy/miaoxiangSync';
+import { registerStrategyForward } from './strategy/forwardModule';
 import {
   approveProposal,
   listSkillView,
@@ -424,7 +425,12 @@ async function main() {
 
   app.put<{
     Params: { id: string };
-    Body: { name?: string; description?: string | null; skillEnabled?: boolean };
+    Body: {
+      name?: string;
+      description?: string | null;
+      skillEnabled?: boolean;
+      autoSimEnabled?: boolean;
+    };
   }>(
     '/api/strategies/:id',
     (req, reply) => {
@@ -1061,6 +1067,9 @@ async function main() {
 
   // 中线雷达模块（行业强弱+持仓趋势+候选池，确定性只读，独立，删除此行整模块下线）
   registerRadarModule(app);
+
+  // 战法前向验证（收盘样本采集 + 前向统计 + 自动模拟总闸，自动买入默认关闭，删除此行整模块下线）
+  registerStrategyForward(app);
 
   // 实时盯盘模块（独立，可删除以下两行整模块下线）
   registerWatchModule(app);

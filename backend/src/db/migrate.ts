@@ -441,6 +441,18 @@ CREATE TABLE IF NOT EXISTS decision_verdicts (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_verdicts_key ON decision_verdicts(code, scenario, horizon);
 CREATE INDEX IF NOT EXISTS idx_decision_verdicts_expiry ON decision_verdicts(expires_at);
+
+CREATE TABLE IF NOT EXISTS strategy_samples (
+  id TEXT PRIMARY KEY,
+  strategy_id TEXT NOT NULL,
+  sample_date TEXT NOT NULL,
+  total_asset REAL NOT NULL DEFAULT 0,
+  total_profit_rate REAL NOT NULL DEFAULT 0,
+  position_count INTEGER NOT NULL DEFAULT 0,
+  cash REAL NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_samples_key ON strategy_samples(strategy_id, sample_date);
 `;
 
 export function ensureSchema(): void {
@@ -453,6 +465,7 @@ export function ensureSchema(): void {
     "ALTER TABLE strategies ADD COLUMN kind TEXT NOT NULL DEFAULT 'local'",
     "ALTER TABLE strategies ADD COLUMN synced_at TEXT",
     "ALTER TABLE strategies ADD COLUMN skill_enabled INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE strategies ADD COLUMN auto_sim_enabled INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE sim_trades ADD COLUMN ext_id TEXT",
     "ALTER TABLE watch_alerts ADD COLUMN trigger_price REAL NOT NULL DEFAULT 0",
     "ALTER TABLE watch_alerts ADD COLUMN outcome TEXT",

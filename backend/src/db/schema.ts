@@ -154,9 +154,27 @@ export const strategies = sqliteTable('strategies', {
   syncedAt: text('synced_at'),
   /** 是否启用 Skill 自迭代（复盘可提案调整选股/买入/卖出打法） */
   skillEnabled: integer('skill_enabled', { mode: 'boolean' }).notNull().default(false),
+  /** 是否纳入自动模拟白名单（默认 false；仍受全局 simAutoEnabled 总闸约束） */
+  autoSimEnabled: integer('auto_sim_enabled', { mode: 'boolean' }).notNull().default(false),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
+
+/** 战法前向样本：每交易日收盘记录一次权益快照，累积 3-6 个月前向验证轨迹（只读、不交易） */
+export const strategySamples = sqliteTable(
+  'strategy_samples',
+  {
+    id: text('id').primaryKey(),
+    strategyId: text('strategy_id').notNull(),
+    sampleDate: text('sample_date').notNull(),
+    totalAsset: real('total_asset').notNull().default(0),
+    totalProfitRate: real('total_profit_rate').notNull().default(0),
+    positionCount: integer('position_count').notNull().default(0),
+    cash: real('cash').notNull().default(0),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({ byKey: uniqueIndex('idx_strategy_samples_key').on(t.strategyId, t.sampleDate) }),
+);
 
 /**
  * 战法 Skill（打法）版本链：三维度（选股/买入/卖出）共表、追加式版本化。

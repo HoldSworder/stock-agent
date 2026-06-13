@@ -967,6 +967,8 @@ export interface Strategy {
   syncedAt?: string | null;
   /** 是否启用 Skill 自迭代（复盘可提案调整选股/买入/卖出打法） */
   skillEnabled: boolean;
+  /** 是否纳入自动模拟白名单（默认 false；仍受全局 simAutoEnabled 总闸约束） */
+  autoSimEnabled: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -979,6 +981,40 @@ export interface StrategyInput {
   kind?: StrategyKind;
   /** 是否启用 Skill 自迭代 */
   skillEnabled?: boolean;
+  /** 是否纳入自动模拟白名单 */
+  autoSimEnabled?: boolean;
+}
+
+/** 战法前向样本（单日权益快照） */
+export interface StrategySample {
+  strategyId: string;
+  sampleDate: string;
+  totalAsset: number;
+  totalProfitRate: number;
+  positionCount: number;
+  cash: number;
+}
+
+/** 战法前向验证统计（基于样本曲线 + 成交流水，确定性计算） */
+export interface StrategyForwardStats {
+  strategyId: string;
+  /** 首个样本日 */
+  sinceDate: string | null;
+  /** 样本天数 */
+  days: number;
+  /** 区间累计收益率（最新样本相对首样本，权益口径） */
+  cumReturn: number | null;
+  /** 期间最大回撤（权益曲线，负值） */
+  maxDrawdown: number | null;
+  /** 已实现交易笔数（卖出） */
+  closedTrades: number;
+  /** 已实现胜率（realizedProfit>0 占卖出比） */
+  winRate: number | null;
+  /** 是否纳入自动模拟白名单 */
+  autoSimEnabled: boolean;
+  /** 全局自动模拟总闸是否开启 */
+  globalAutoEnabled: boolean;
+  samples: StrategySample[];
 }
 
 // ===== 战法 Skill（打法）自迭代 =====
