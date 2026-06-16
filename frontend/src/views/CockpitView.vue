@@ -1,20 +1,66 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, ref, watch } from 'vue';
 import dayjs from 'dayjs';
+import { useRoute, useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Refresh, Warning, VideoPause, VideoPlay } from '@element-plus/icons-vue';
+import { Refresh, Warning, VideoPause, VideoPlay, TopRight } from '@element-plus/icons-vue';
 import { api } from '@/api';
+import AiAnalysisHub from '@/components/AiAnalysisHub.vue';
 import StockLink from '@/components/StockLink.vue';
-import type { CockpitEvent, CockpitOverview, SafetyState } from '@stock-agent/shared';
+import type {
+  CockpitEvent,
+  CockpitModuleSummary,
+  CockpitOverview,
+  SafetyState,
+} from '@stock-agent/shared';
 
 const data = ref<CockpitOverview | null>(null);
 const loading = ref(false);
 const acting = ref(false);
 
+const route = useRoute();
+const router = useRouter();
+
+// 两 tab：驾驶舱主模块（只读聚合 + 急停）/ AI 分析中心（发起 + 历史 + 定时调度）。
+const VALID_TABS = ['cockpit', 'ai'] as const;
+type CockpitTab = (typeof VALID_TABS)[number];
+function normalizeTab(v: unknown): CockpitTab {
+  return VALID_TABS.includes(v as CockpitTab) ? (v as CockpitTab) : 'cockpit';
+}
+const tab = ref<CockpitTab>(normalizeTab(route.query.tab));
+watch(
+  () => route.query.tab,
+  (v) => {
+    tab.value = normalizeTab(v);
+  },
+);
+watch(tab, (v) => {
+  if (route.query.tab !== v) router.replace({ query: { ...route.query, tab: v } });
+});
+
 const safety = computed<SafetyState | null>(() => data.value?.safety ?? null);
 const plan = computed(() => data.value?.plan ?? null);
+const planStance = computed(() => data.value?.planStance ?? null);
 const themes = computed(() => data.value?.themes ?? []);
+const modules = computed(() => data.value?.modules ?? []);
+const screenerPicks = computed(() => data.value?.screenerPicks ?? []);
 const events = computed(() => data.value?.events ?? []);
+
+/** 跳转模块全文页（带可选 query） */
+function goModule(m: CockpitModuleSummary) {
+  void router.push(m.routeQuery ? { path: m.route, query: m.routeQuery } : m.route);
+}
+
+// 大盘方向标签（与计划页一致：偏多红 / 偏空绿 / 中性）
+const BIAS_META: Record<'bull' | 'bear' | 'neutral', { label: string; cls: string }> = {
+  bull: { label: '偏多', cls: 'up' },
+  bear: { label: '偏空', cls: 'down' },
+  neutral: { label: '中性', cls: '' },
+};
+
+function goPlan() {
+  void router.push('/plan');
+}
 
 const KIND_LABEL: Record<CockpitEvent['kind'], string> = {
   discipline: '持仓纪律',
@@ -77,7 +123,9 @@ async function doResume() {
   }
 }
 
-onMounted(load);
+onMounted(() => {
+  void load();
+});
 </script>
 
 <template>
@@ -89,117 +137,186 @@ onMounted(load);
       </div>
     </div>
     <div class="page-sub">
-      一屏概览 · 急停 · 跨模块事件时间线，纯只读聚合。
+      一屏概览 · 急停 · 跨模块事件时间线；AI 分析中心一处发起 / 看历史 / 定时调度。
       <span v-if="data" class="as-of">更新于 {{ dayjs(data.asOf).format('MM-DD HH:mm:ss') }}</span>
     </div>
 
-    <div v-loading="loading">
-      <!-- 安全总闸 / 急停 -->
-      <div v-if="safety" class="safety-bar" :class="{ killed: safety.killSwitch }">
-        <div class="safety-state">
-          <el-icon class="safety-ic">
-            <Warning v-if="safety.killSwitch" />
-            <VideoPlay v-else />
-          </el-icon>
-          <div>
-            <div class="safety-title">
-              {{ safety.killSwitch ? '安全总闸已拉下（急停中）' : '安全总闸正常' }}
-            </div>
-            <div class="safety-meta">
-              <span>自动本地模拟 <b :class="safety.autoLocalSimEnabled ? 'on' : 'off'">{{ safety.autoLocalSimEnabled ? '开' : '关' }}</b></span>
-              <span class="sep">/</span>
-              <span>自动外部模拟 <b :class="safety.autoExternalSimEnabled ? 'on' : 'off'">{{ safety.autoExternalSimEnabled ? '开' : '关' }}</b></span>
-              <span class="sep">/</span>
-              <span>手动强制 <b :class="safety.allowManualForceTrade ? 'on' : 'off'">{{ safety.allowManualForceTrade ? '允许' : '禁用' }}</b></span>
-              <template v-if="safety.killSwitch && safety.killReason">
-                <span class="sep">/</span><span>原因 {{ safety.killReason }}</span>
-              </template>
-            </div>
-          </div>
-        </div>
-        <el-button
-          v-if="!safety.killSwitch"
-          type="danger"
-          :icon="VideoPause"
-          :loading="acting"
-          @click="doKill"
-        >
-          急停
-        </el-button>
-        <el-button v-else type="success" :icon="VideoPlay" :loading="acting" @click="doResume">
-          解除急停
-        </el-button>
-      </div>
-
-      <div class="grid">
-        <!-- 当日计划兑现 -->
-        <section class="panel">
-          <div class="panel-head">
-            <span class="section-title">今日计划兑现</span>
-            <span v-if="plan" class="panel-meta num">{{ plan.planDate }}</span>
-          </div>
-          <div v-if="plan" class="plan-body">
-            <div class="hit-rate">
-              <span class="hit-value num">{{ fmtPct(plan.hitRate) }}</span>
-              <span class="hit-label">兑现率</span>
-            </div>
-            <div class="plan-stats">
-              <div class="ps"><span class="ps-n num">{{ plan.total }}</span><span class="ps-l">标的</span></div>
-              <div class="ps"><span class="ps-n num">{{ plan.triggered }}</span><span class="ps-l">已触发</span></div>
-              <div class="ps"><span class="ps-n num">{{ plan.done }}</span><span class="ps-l">已完成</span></div>
-              <div class="ps"><span class="ps-n num">{{ plan.pending }}</span><span class="ps-l">待触发</span></div>
-              <div class="ps"><span class="ps-n num">{{ plan.invalid }}</span><span class="ps-l">已失效</span></div>
-            </div>
-          </div>
-          <el-empty v-else :image-size="60" description="今日暂无计划" />
-        </section>
-
-        <!-- 强势主线 -->
-        <section class="panel">
-          <div class="panel-head">
-            <span class="section-title">强势主线</span>
-            <span class="panel-meta">Top {{ themes.length }}</span>
-          </div>
-          <div v-if="themes.length" class="themes">
-            <div v-for="t in themes" :key="t.id" class="theme-row">
-              <span class="theme-name">{{ t.theme }}</span>
-              <div class="bar">
-                <div
-                  class="bar-fill"
-                  :class="strengthClass(t.strength)"
-                  :style="{ width: `${Math.min(t.strength, 100)}%` }"
-                />
+    <el-tabs v-model="tab" class="cockpit-tabs">
+      <el-tab-pane label="驾驶舱" name="cockpit">
+        <div v-loading="loading">
+          <!-- 安全总闸 / 急停 -->
+          <div v-if="safety" class="safety-bar" :class="{ killed: safety.killSwitch }">
+            <div class="safety-state">
+              <el-icon class="safety-ic">
+                <Warning v-if="safety.killSwitch" />
+                <VideoPlay v-else />
+              </el-icon>
+              <div>
+                <div class="safety-title">
+                  {{ safety.killSwitch ? '安全总闸已拉下（急停中）' : '安全总闸正常' }}
+                </div>
+                <div class="safety-meta">
+                  <span>自动本地模拟 <b :class="safety.autoLocalSimEnabled ? 'on' : 'off'">{{ safety.autoLocalSimEnabled ? '开' : '关' }}</b></span>
+                  <span class="sep">/</span>
+                  <span>自动外部模拟 <b :class="safety.autoExternalSimEnabled ? 'on' : 'off'">{{ safety.autoExternalSimEnabled ? '开' : '关' }}</b></span>
+                  <span class="sep">/</span>
+                  <span>手动强制 <b :class="safety.allowManualForceTrade ? 'on' : 'off'">{{ safety.allowManualForceTrade ? '允许' : '禁用' }}</b></span>
+                  <template v-if="safety.killSwitch && safety.killReason">
+                    <span class="sep">/</span><span>原因 {{ safety.killReason }}</span>
+                  </template>
+                </div>
               </div>
-              <span class="theme-strength num">{{ t.strength }}</span>
             </div>
+            <el-button
+              v-if="!safety.killSwitch"
+              type="danger"
+              :icon="VideoPause"
+              :loading="acting"
+              @click="doKill"
+            >
+              急停
+            </el-button>
+            <el-button v-else type="success" :icon="VideoPlay" :loading="acting" @click="doResume">
+              解除急停
+            </el-button>
           </div>
-          <el-empty v-else :image-size="60" description="暂无活跃主线" />
-        </section>
-      </div>
 
-      <!-- 事件时间线 -->
-      <section class="panel timeline-panel">
-        <div class="panel-head">
-          <span class="section-title">事件时间线</span>
-          <span class="panel-meta">最近 {{ events.length }} 条 · 纪律 / 成交 / 盯盘 / 研判</span>
-        </div>
-        <div v-if="events.length" class="timeline">
-          <div v-for="e in events" :key="e.id" class="tl-item">
-            <span class="tl-dot" :class="sevDot(e.severity)" />
-            <div class="tl-body">
-              <div class="tl-line">
-                <el-tag size="small" effect="plain" :type="kindTag(e.kind)">{{ KIND_LABEL[e.kind] }}</el-tag>
-                <span class="tl-title">{{ e.title }}</span>
-                <StockLink v-if="e.code" :code="e.code" :name="e.name ?? undefined" class="tl-code" />
-                <span class="tl-time num">{{ dayjs(e.at).format('MM-DD HH:mm') }}</span>
+          <div class="grid">
+            <!-- 当日计划兑现 -->
+            <section class="panel">
+              <div class="panel-head">
+                <span class="section-title">今日计划兑现</span>
+                <span class="panel-head-right">
+                  <span v-if="plan" class="panel-meta num">{{ plan.planDate }}</span>
+                  <el-button link type="primary" :icon="TopRight" @click="goPlan">查看完整计划</el-button>
+                </span>
               </div>
-              <div class="tl-detail">{{ e.detail }}</div>
-            </div>
+              <div v-if="plan" class="plan-body">
+                <!-- 大盘定调（直达计划全文的轻量摘要） -->
+                <div v-if="planStance" class="plan-stance">
+                  <span
+                    v-if="planStance.bias"
+                    class="stance-bias"
+                    :class="BIAS_META[planStance.bias].cls"
+                  >
+                    {{ BIAS_META[planStance.bias].label }}
+                  </span>
+                  <span v-if="planStance.positionPct != null" class="stance-pos num">
+                    仓位 {{ planStance.positionPct }}%
+                  </span>
+                  <span v-if="planStance.summary" class="stance-summary">{{ planStance.summary }}</span>
+                </div>
+                <div class="plan-metrics">
+                  <div class="hit-rate">
+                    <span class="hit-value num">{{ fmtPct(plan.hitRate) }}</span>
+                    <span class="hit-label">兑现率</span>
+                  </div>
+                  <div class="plan-stats">
+                    <div class="ps"><span class="ps-n num">{{ plan.total }}</span><span class="ps-l">标的</span></div>
+                    <div class="ps"><span class="ps-n num">{{ plan.triggered }}</span><span class="ps-l">已触发</span></div>
+                    <div class="ps"><span class="ps-n num">{{ plan.done }}</span><span class="ps-l">已完成</span></div>
+                    <div class="ps"><span class="ps-n num">{{ plan.pending }}</span><span class="ps-l">待触发</span></div>
+                    <div class="ps"><span class="ps-n num">{{ plan.invalid }}</span><span class="ps-l">已失效</span></div>
+                  </div>
+                </div>
+              </div>
+              <el-empty v-else :image-size="60" description="今日暂无计划" />
+            </section>
+
+            <!-- 强势主线 -->
+            <section class="panel">
+              <div class="panel-head">
+                <span class="section-title">强势主线</span>
+                <span class="panel-meta">Top {{ themes.length }}</span>
+              </div>
+              <div v-if="themes.length" class="themes">
+                <div v-for="t in themes" :key="t.id" class="theme-row">
+                  <span class="theme-name">{{ t.theme }}</span>
+                  <div class="bar">
+                    <div
+                      class="bar-fill"
+                      :class="strengthClass(t.strength)"
+                      :style="{ width: `${Math.min(t.strength, 100)}%` }"
+                    />
+                  </div>
+                  <span class="theme-strength num">{{ t.strength }}</span>
+                </div>
+              </div>
+              <el-empty v-else :image-size="60" description="暂无活跃主线" />
+            </section>
           </div>
+
+          <!-- 模块总结卡：各模块最新一次持久化产出（只读，秒开） -->
+          <section class="panel module-panel">
+            <div class="panel-head">
+              <span class="section-title">模块总结</span>
+              <span class="panel-meta">各模块最新产出 · 点卡片查看全文</span>
+            </div>
+            <div class="module-grid">
+              <button
+                v-for="m in modules"
+                :key="m.key"
+                class="module-card"
+                :class="{ stale: m.stale, empty: !m.createdAt }"
+                type="button"
+                @click="goModule(m)"
+              >
+                <div class="mc-head">
+                  <span class="mc-title">{{ m.title }}</span>
+                  <span v-if="m.stale && m.createdAt" class="mc-stale">非当日</span>
+                </div>
+                <div v-if="m.headline" class="mc-headline">{{ m.headline }}</div>
+                <div class="mc-excerpt">{{ m.excerpt }}</div>
+                <div class="mc-foot">
+                  <span class="mc-time num">{{ m.createdAt ? dayjs(m.createdAt).format('MM-DD HH:mm') : '—' }}</span>
+                  <span class="mc-link">查看全文 →</span>
+                </div>
+              </button>
+            </div>
+            <!-- 最新选股候选速览 -->
+            <div v-if="screenerPicks.length" class="screener-picks">
+              <div class="sp-head">最新选股候选 Top {{ screenerPicks.length }}</div>
+              <div class="sp-list">
+                <div v-for="p in screenerPicks" :key="p.code" class="sp-item">
+                  <span class="sp-rank num">{{ p.rank }}</span>
+                  <StockLink :code="p.code" :name="p.name" class="sp-name" />
+                  <span class="sp-score num">{{ p.screenScore }}</span>
+                  <span v-if="p.confidence != null" class="sp-conf num">信心{{ p.confidence }}</span>
+                  <span v-if="p.thesis" class="sp-thesis">{{ p.thesis }}</span>
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <!-- 事件时间线 -->
+          <section class="panel timeline-panel">
+            <div class="panel-head">
+              <span class="section-title">事件时间线</span>
+              <span class="panel-meta">最近 {{ events.length }} 条 · 纪律 / 成交 / 盯盘 / 研判</span>
+            </div>
+            <div v-if="events.length" class="timeline">
+              <div v-for="e in events" :key="e.id" class="tl-item">
+                <span class="tl-dot" :class="sevDot(e.severity)" />
+                <div class="tl-body">
+                  <div class="tl-line">
+                    <el-tag size="small" effect="plain" :type="kindTag(e.kind)">{{ KIND_LABEL[e.kind] }}</el-tag>
+                    <span class="tl-title">{{ e.title }}</span>
+                    <StockLink v-if="e.code" :code="e.code" :name="e.name ?? undefined" class="tl-code" />
+                    <span class="tl-time num">{{ dayjs(e.at).format('MM-DD HH:mm') }}</span>
+                  </div>
+                  <div class="tl-detail">{{ e.detail }}</div>
+                </div>
+              </div>
+            </div>
+            <el-empty v-else :image-size="80" description="暂无事件" />
+          </section>
         </div>
-        <el-empty v-else :image-size="80" description="暂无事件" />
-      </section>
-    </div>
+      </el-tab-pane>
+
+      <el-tab-pane label="AI 分析中心" name="ai" lazy>
+        <AiAnalysisHub />
+      </el-tab-pane>
+    </el-tabs>
   </div>
 </template>
 
@@ -214,6 +331,9 @@ onMounted(load);
   font-size: 12px;
   color: var(--text-2);
   font-family: var(--font-mono);
+}
+.cockpit-tabs {
+  margin-top: 4px;
 }
 
 /* ---- 安全总闸 / 急停 ---- */
@@ -310,9 +430,46 @@ onMounted(load);
   font-size: 12px;
   color: var(--text-2);
 }
+.panel-head-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
 
 /* 计划兑现 */
 .plan-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.plan-stance {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.stance-bias {
+  font-weight: 700;
+  font-size: 15px;
+}
+.stance-bias.up {
+  color: var(--el-color-danger, #f56c6c);
+}
+.stance-bias.down {
+  color: var(--el-color-success, #67c23a);
+}
+.stance-pos {
+  font-size: 13px;
+  color: var(--text-2);
+}
+.stance-summary {
+  font-size: 13px;
+  color: var(--text-2);
+  line-height: 1.5;
+  flex: 1;
+  min-width: 0;
+}
+.plan-metrics {
   display: flex;
   align-items: center;
   gap: 22px;
@@ -402,6 +559,135 @@ onMounted(load);
   text-align: right;
   font-size: 13px;
   color: var(--text-1);
+}
+
+/* ---- 模块总结卡 ---- */
+.module-panel {
+  margin-top: 16px;
+}
+.module-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+.module-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  text-align: left;
+  padding: 12px 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-3);
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  transition:
+    border-color 0.18s ease,
+    background-color 0.18s ease;
+}
+.module-card:hover {
+  border-color: var(--brand);
+  background: var(--bg-hover);
+}
+.module-card.empty {
+  opacity: 0.62;
+}
+.mc-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.mc-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--text-0);
+}
+.mc-stale {
+  font-size: 11px;
+  color: var(--status-warn);
+  border: 1px solid var(--status-warn);
+  border-radius: 4px;
+  padding: 0 4px;
+  line-height: 1.5;
+}
+.mc-headline {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--brand);
+}
+.mc-excerpt {
+  font-size: 12px;
+  color: var(--text-2);
+  line-height: 1.5;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.mc-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 2px;
+}
+.mc-time {
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+.mc-link {
+  font-size: 11.5px;
+  color: var(--brand);
+}
+
+/* 选股候选速览 */
+.screener-picks {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border-soft);
+}
+.sp-head {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-1);
+  margin-bottom: 8px;
+}
+.sp-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.sp-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+}
+.sp-rank {
+  width: 18px;
+  text-align: center;
+  color: var(--text-2);
+  flex-shrink: 0;
+}
+.sp-name {
+  flex-shrink: 0;
+}
+.sp-score {
+  color: var(--brand);
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.sp-conf {
+  color: var(--text-2);
+  flex-shrink: 0;
+}
+.sp-thesis {
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
 }
 
 /* ---- 事件时间线 ---- */

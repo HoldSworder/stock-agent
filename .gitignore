@@ -10,3 +10,4 @@ data/
 frontend/dist/
 backend/public/
 .playwright-cli
+.codegraph

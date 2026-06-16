@@ -33,13 +33,9 @@ function closeDb(): void {
     // 关闭期异常忽略：进程即将退出，不阻断退出流程
   }
 }
+// 仅在进程真正退出时兜底 checkpoint。SIGINT/SIGTERM 的优雅关闭由 server.ts 统一主导
+// （先关 HTTP 释放端口、标记在跑 run、再 checkpoint），此处不再抢先 process.exit 以免打断该流程。
 process.once('exit', closeDb);
-for (const sig of ['SIGINT', 'SIGTERM'] as const) {
-  process.once(sig, () => {
-    closeDb();
-    process.exit(0);
-  });
-}
 
 export const db = drizzle(sqlite, { schema });
 export { schema };

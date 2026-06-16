@@ -88,6 +88,49 @@ export function registerScreenerModule(app: FastifyInstance): void {
     }
   });
 
+  // 手动选股（流式）：经 WebSocket 逐阶段推进度（快照→硬筛→打分→二段增强→LLM 横排），
+  // 完成后推 done + 详情。落库与 /api/screener/run 同源（svc.runScreen），仅多了 onProgress。
+  app.get('/ws/screener', { websocket: true }, (socket) => {
+    socket.on('message', async (raw: Buffer) => {
+      let payload: {
+        action?: string;
+        params?: { engine?: string; strategyId?: string; context?: string; topN?: number; useLlm?: boolean };
+      };
+      try {
+        payload = JSON.parse(raw.toString());
+      } catch {
+        socket.send(JSON.stringify({ type: 'error', message: '消息格式错误' }));
+        return;
+      }
+      if (payload.action !== 'run') return;
+
+      const send = (e: Record<string, unknown>) => {
+        try {
+          socket.send(JSON.stringify(e));
+        } catch {
+          /* socket 可能已关闭 */
+        }
+      };
+
+      const p = payload.params ?? {};
+      try {
+        const detail = await svc.runScreen({
+          engine: p.engine,
+          strategyId: p.strategyId,
+          context: p.context,
+          topN: p.topN,
+          useLlm: p.useLlm,
+          trigger: 'manual',
+          taskName: '手动选股',
+          onProgress: (ev) => send({ type: 'progress', ...ev }),
+        });
+        send({ type: 'done', detail });
+      } catch (e) {
+        send({ type: 'error', message: e instanceof Error ? e.message : String(e) });
+      }
+    });
+  });
+
   // T+N 轻量复盘：用最新快照价回填区间收益
   app.post<{ Params: { id: string } }>('/api/screener/runs/:id/eval', async (req, reply) => {
     try {

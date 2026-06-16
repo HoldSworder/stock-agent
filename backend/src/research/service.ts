@@ -26,6 +26,9 @@ import {
 
 // 把东方财富研报原始 JSON 映射为本系统 shared DTO，并提供按需 AI 分析（走自有 LLM）。
 
+// 消息催化结构化记录（情报研判落库 → 今日计划读取），供 agent 工具 record_catalysts / list_catalysts。
+export { upsertCatalyst, listCatalysts, type ListCatalystOptions } from './catalystRepo';
+
 const TYPE_LABEL: Record<ResearchReportType, string> = {
   stock: '个股研报',
   industry: '行业研报',
@@ -588,6 +591,28 @@ export const DISCOVER_PROMPT =
   '}\n' +
   'marketDigest 概述当日研报总量与上调家数等；reason 说明机会逻辑；impact 用「利好/利空/中性 + 一句话」；' +
   'continuity 无历史对比区块时置 null。数据不可用的字段：对象类置 null 或省略，数组类返回空数组。';
+
+// ===== 情报研判（研报机会 + 全网热点 合并）=====
+// 合并原「研报机会」（research_reports discover）+「每日热点研判」（trendradar_hotspots summary）
+// 为一次 agent 运行，产出一份「研报机会 + 全网热点」综合情报，落 taskRun（taskName=情报研判），
+// 作为今日计划的「情报」基准源，并供情报页 / 研报页 / 驾驶舱统一展示。
+
+/** 情报研判统一任务名 */
+export const INTEL_TASK_NAME = '情报研判';
+
+/** 情报研判 prompt（研报机会 + 全网热点综合，竖排 Markdown，非 JSON） */
+export const INTEL_PROMPT =
+  '做一份 A 股「情报研判」，把【券商研报机会】与【全网热点】合并为一份盘前情报，供今日计划直接引用。只研判、不下单。\n\n' +
+  '交易日校验（默认放行）：仅周一至周五触发，默认按交易日执行；接口异常一律按交易日继续，不据此判休市。\n\n' +
+  '第1步 研报机会：调用 research_reports(action=discover) 取近一日五类研报（个股/行业/策略/宏观/晨报）聚合摘要——板块热度聚类、评级上调/首次覆盖清单、代表正文样本，末尾含候选重大公告标题（含 art_code）。从中挑出明显影响标的的重大公告，用 research_reports(action=ann_content, codes=[...]) 抓正文研判影响（codes≤20）。\n' +
+  '第2步 全网热点：调用 trendradar_hotspots(action=summary) 取当日热点摘要，必要时 action=trending 补高频话题。提炼正在升温的题材风口与消息面，并按发酵阶段区分：【起爆前·消息催化】——有明确催化剂（政策/订单/事件）但尚未充分发酵、个股多在低位/平台、尚未连板放量；【已发酵/高位】——已连续大涨或连板、情绪透支。前者是今日计划个股短线「起爆前选股」的核心来源。\n' +
+  '第3步 综合研判：把研报机会主线与全网热点风口交叉印证——哪些板块被研报集中关注/密集上调且同时是热点风口（高确定性主线）、哪些个股有首次覆盖或评级上调机会、哪些仅是情绪热点需警惕；并标注哪些属「起爆前·消息催化」（适合右侧介入前埋伏）哪些已「发酵高位」（追高风险）。必要时用 mx_finance_data 核对现价/估值（≤2 次）。\n' +
+  '第4步 催化落库：把第2/3步识别出的「消息催化主线」用 record_catalysts 结构化入库（一次传数组），每条含 theme 题材、catalystType 催化类型、direction 受益方向、codes 相关标的、catalystWindow 预计时间窗、fermented 是否已发酵（起爆前未发酵传 false、已连板/大涨传 true）、note 催化要点。系统按 theme 去重并自动累计出现次数与首现日期，供今日计划识别「反复出现但未发酵」的潜伏主线。\n\n' +
+  '输出（竖排清单，禁止 Markdown 表格，标注数据时间）：\n' +
+  '📑 一、研报机会：①热门板块（≤6 条：板块｜研报数/上调数｜一句逻辑）②个股机会（≤10 条：名称(代码)｜评级/变动｜目标价｜逻辑）③重大公告影响（≤6 条：名称｜利好/利空/中性 + 一句话）。\n' +
+  '🔥 二、全网热点：①起爆前·消息催化板块（≤6 条：题材｜催化剂｜预计时间窗｜受益方向，未充分发酵优先）②已发酵/高位需警惕（≤4 条：题材｜发酵程度｜追高风险）③消息面要点（≤4 条）。\n' +
+  '🎯 三、交叉结论：研报与热点共振的高确定性主线（≤3 条）、起爆前催化主线（≤3 条：可右侧埋伏的方向）、仅情绪需警惕的方向、延续/新增/退热小结。\n' +
+  '⚠️ 仅供参考，不构成投资建议。';
 
 /** 旧版 discover prompt（仅供种子退役识别，勿用于运行） */
 export const DISCOVER_PROMPT_LEGACY =

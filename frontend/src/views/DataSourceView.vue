@@ -6,6 +6,8 @@ import type { DataSourceHealth, DataSourceInfo, DataSourceRoute } from '@stock-a
 
 // 数据源中心：统一管理所有外部取数（行情/选股/账本/资讯/研报/热点/本地）。
 // 总览行（始终可见）+ 点击展开详情（凭据/统计/健康/操作），是各模块取数路径的单一收口入口。
+// embedded：作为系统设置页的 Tab 面板嵌入时隐藏自身 page-head/page-sub。
+defineProps<{ embedded?: boolean }>();
 
 const loading = ref(false);
 const sources = ref<DataSourceInfo[]>([]);
@@ -164,15 +166,19 @@ onMounted(load);
 </script>
 
 <template>
-  <div class="page">
-    <div class="page-head">
+  <div :class="{ page: !embedded }">
+    <div v-if="!embedded" class="page-head">
       <div class="page-title">数据源</div>
       <div class="head-actions">
         <el-button size="small" :loading="loading" @click="load">刷新</el-button>
       </div>
     </div>
-    <div class="page-sub">
+    <div v-if="!embedded" class="page-sub">
       所有外部取数统一经此中枢（缓存 / 重试 / 鉴权失效判断 / 调用打点 / 行情自动调度）。点击任一数据源展开，可测试连通、配置凭据（明文）、启停与查看调用统计。
+    </div>
+    <div v-else class="embed-bar">
+      <span class="embed-sub">所有外部取数统一经此中枢（缓存 / 重试 / 鉴权失效 / 调用打点 / 行情调度）。</span>
+      <el-button size="small" :loading="loading" @click="load">刷新</el-button>
     </div>
 
     <div v-loading="loading" class="ds-wrap">
@@ -326,6 +332,17 @@ onMounted(load);
 .page-head {
   display: flex;
   align-items: center;
+}
+.embed-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+.embed-sub {
+  flex: 1;
+  font-size: 12.5px;
+  color: var(--text-2);
 }
 .ds-wrap {
   margin-top: 12px;

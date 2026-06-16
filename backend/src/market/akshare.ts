@@ -13,7 +13,7 @@ type AkshareResult = unknown;
 /** aktools 基址（去尾斜杠）；未配置抛中文错误，提示去数据源页填写 */
 function baseUrl(): string {
   const raw = getValue('akshareBaseUrl' as never).trim();
-  if (!raw) throw new AkshareError('AKShare 未配置 Base URL（数据源页填写 aktools 反代地址，如 https://router.qzran.cn:8091）');
+  if (!raw) throw new AkshareError('AKShare 未配置 Base URL（请在数据源页填写 aktools 反代地址）');
   return raw.replace(/\/+$/, '');
 }
 
@@ -31,20 +31,25 @@ function toQuery(params: Record<string, string | number | undefined | null>): st
 /**
  * 调用 akshare 任意公开函数，返回解析后的 JSON（多为记录数组）。
  * aktools 返回的可能是数组（不符合 requestJson 的 object 约定），故走 requestText 后自行 JSON.parse。
+ * sourceId 默认归在 'akshare'，财联社/雪球等复用 aktools 透传的逻辑源可传各自 id 以独立计入调用统计。
+ * timeoutMs/maxAttempts 可覆盖默认（30s / 2 次）：多源兜底等场景传更短超时与单次尝试以快速失败。
  */
 export async function callAkshare(
   func: string,
   params: Record<string, string | number | undefined | null> = {},
   signal?: AbortSignal,
+  sourceId = 'akshare',
+  timeoutMs = 30_000,
+  maxAttempts = 2,
 ): Promise<AkshareResult> {
   const name = func.trim();
   if (!name) throw new AkshareError('AKShare 函数名为空');
   const url = `${baseUrl()}/api/public/${encodeURIComponent(name)}${toQuery(params)}`;
   const text = await requestText({
-    sourceId: 'akshare',
+    sourceId,
     url,
-    timeoutMs: 30_000,
-    maxAttempts: 2,
+    timeoutMs,
+    maxAttempts,
     retryBaseMs: 800,
     signal,
     errorLabel: `AKShare ${name}`,

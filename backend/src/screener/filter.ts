@@ -32,21 +32,38 @@ function inRange(v: number | null, min?: number | null, max?: number | null): bo
   return true;
 }
 
+/**
+ * 硬筛模式（盘前兜底用）：
+ * - full：可交易性 + 全部静态/量价阈值（现状）。
+ * - skipVolumePrice：仅保留可交易性 + 静态阈值（pe/pb/marketCap），跳过当日量价阈值
+ *   （amount/turnover/pct）。用于盘前量价退化、又无收盘缓存时不至于剔空。
+ * - tradableOnly：仅可交易性，作为最终兜底。
+ */
+export type HardFilterMode = 'full' | 'skipVolumePrice' | 'tradableOnly';
+
 /** 应用策略硬阈值 */
-function passHardFilter(row: SnapshotRow, f: HardFilter): boolean {
+function passHardFilter(row: SnapshotRow, f: HardFilter, mode: HardFilterMode): boolean {
   if (!inRange(row.pe, f.peMin, f.peMax)) return false;
   if (!inRange(row.pb, f.pbMin, f.pbMax)) return false;
-  if (!inRange(row.turnoverRate, f.turnoverMin, f.turnoverMax)) return false;
   if (!inRange(row.marketCap, f.marketCapMinYi, f.marketCapMaxYi)) return false;
-  // 成交额下限（amount 始终有值）
-  if (f.amountMinYi != null && row.amount < f.amountMinYi) return false;
-  // 涨跌幅区间（pct 始终有值）
-  if (f.pctMin != null && row.pct < f.pctMin) return false;
-  if (f.pctMax != null && row.pct > f.pctMax) return false;
+  // 量价阈值（当日盘中口径，盘前退化时跳过）
+  if (mode === 'full') {
+    if (!inRange(row.turnoverRate, f.turnoverMin, f.turnoverMax)) return false;
+    // 成交额下限
+    if (f.amountMinYi != null && row.amount < f.amountMinYi) return false;
+    // 涨跌幅区间
+    if (f.pctMin != null && row.pct < f.pctMin) return false;
+    if (f.pctMax != null && row.pct > f.pctMax) return false;
+  }
   return true;
 }
 
-/** L1 硬筛：可交易性 + 策略阈值，返回候选子集 */
-export function hardFilter(rows: SnapshotRow[], f: HardFilter): SnapshotRow[] {
-  return rows.filter((r) => isTradableAShare(r) && passHardFilter(r, f));
+/** L1 硬筛：可交易性 + 按模式应用阈值，返回候选子集（mode 缺省 full，保持现有行为） */
+export function hardFilter(
+  rows: SnapshotRow[],
+  f: HardFilter,
+  mode: HardFilterMode = 'full',
+): SnapshotRow[] {
+  if (mode === 'tradableOnly') return rows.filter((r) => isTradableAShare(r));
+  return rows.filter((r) => isTradableAShare(r) && passHardFilter(r, f, mode));
 }

@@ -7,6 +7,7 @@ import type {
 } from '@stock-agent/shared';
 import { db, schema } from '../db/client';
 import { newId, nowIso } from '../util';
+import { getNlStrategy, hasNlStrategy } from '../screener/nlStrategies';
 import { getStrategy, StrategyError } from './sim';
 
 // 战法 Skill（打法）自迭代引擎：选股/买入/卖出 三维度各自独立、追加式版本化。
@@ -138,20 +139,41 @@ export function buildPlaybook(strategyId: string): string {
 }
 
 /**
+ * 战法买入关联选股口径片段：当战法配置了 screenEngine='nl' + 合法预设时，
+ * 注入「买入标的须来自选股模块该预设的选出清单」及其自然语言口径，
+ * 使买入标准与选股模块同源。未关联或预设非法返回 ''。
+ */
+function buildScreenLinkAddon(
+  strategy: NonNullable<ReturnType<typeof getStrategy>>,
+): string {
+  if (strategy.screenEngine !== 'nl' || !strategy.screenStrategyId) return '';
+  if (!hasNlStrategy(strategy.screenStrategyId)) return '';
+  const nl = getNlStrategy(strategy.screenStrategyId);
+  return (
+    `\n\n## 本战法买入关联选股（须严格遵循）\n` +
+    `- 买入标的须来自选股模块「自然语言选股 · ${nl.name}」预设选出的候选清单。\n` +
+    `- 该预设选股口径：${nl.keyword}\n` +
+    `- 可调用 screen_stocks 或 mx_screener 复现该口径取候选；买入仅在此口径选出的标的中挑选，不在口径外自行扩选。`
+  );
+}
+
+/**
  * 返回注入 system prompt 的战法打法片段：
- * 未启用 Skill 或无 active 内容时返回 ''。
+ * 含 Skill 现行打法（启用时）+ 买入关联选股口径（配置时）；两者皆空返回 ''。
  */
 export function getStrategyDirectiveAddon(strategyId: string): string {
   const strategy = getStrategy(strategyId);
-  if (!strategy || !strategy.skillEnabled) return '';
-  const playbook = buildPlaybook(strategyId);
-  if (!playbook) return '';
+  if (!strategy) return '';
+  const screenAddon = buildScreenLinkAddon(strategy);
+  const playbook = strategy.skillEnabled ? buildPlaybook(strategyId) : '';
+  if (!playbook) return screenAddon;
   return (
     `\n\n## 本战法打法（Skill，须严格遵循）\n${playbook}\n\n` +
     '- 本次运行务必按上述【现行打法】执行选股/买入/卖出决策。\n' +
     '- 仅在复盘类运行中，若你基于持仓表现与近期成交发现现行打法存在可改进之处，' +
     '可调用 propose_skill_update 提交对应维度（pick/buy/sell）的修订提案；' +
-    '提案不会立刻生效，需用户在战法页确认后才采用，本次运行仍按现行打法处理。'
+    '提案不会立刻生效，需用户在战法页确认后才采用，本次运行仍按现行打法处理。' +
+    screenAddon
   );
 }
 

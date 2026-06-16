@@ -3,7 +3,7 @@ import type { NotifyChannel, ResearchReportType, RunTrigger } from '@stock-agent
 import * as svc from './service';
 import { fetchAnnouncementContent } from './client';
 import { runTask, type RunTaskResult } from '../runner';
-import { listResearchReviews } from '../repo';
+import { listIntelReviews } from '../repo';
 import { sendTelegram } from '../notify/telegram';
 import { defineModuleSchedules } from '../scheduling/defineModuleSchedules';
 
@@ -18,20 +18,21 @@ function parseType(v: unknown): ResearchReportType {
 }
 
 /**
- * 每日研报分析统一执行体：跑 agent（discover 五类研报 + 候选公告标题 → ann_content 取选中正文 → 结构化 JSON），
- * 记录入库（taskName=研报机会，延续历史/continuity）。手动按需与 8 点定时共用。
- * maxSteps=12 容纳「discover→ann_content→出 JSON」多轮；maxTokens=16000 防五类+公告输出被截断。
+ * 情报研判统一执行体（合并研报机会 + 全网热点）：跑 agent（research_reports(discover) 五类研报 + 公告
+ * + trendradar_hotspots(summary) 全网热点 → 合成一份综合情报），记录入库（taskName=情报研判）。
+ * 手动按需与 8 点定时共用。承接原 research.dailyAnalysis（研报机会）与 trendradar intel.daily（热点），避免双跑。
+ * maxSteps=14 容纳「discover→ann_content→hotspots→出报告」多轮；maxTokens=16000 防输出被截断。
  */
-export async function runDailyResearchAnalysis(opts: {
+export async function runIntelReview(opts: {
   trigger: RunTrigger;
   channels: NotifyChannel[];
 }): Promise<RunTaskResult> {
   return runTask(
     {
       id: null,
-      name: svc.RESEARCH_OPP_TASK_NAME,
-      prompt: svc.DISCOVER_PROMPT,
-      modelConfig: { thinking: false, maxSteps: 12, maxTokens: 16000 },
+      name: svc.INTEL_TASK_NAME,
+      prompt: svc.INTEL_PROMPT,
+      modelConfig: { thinking: false, maxSteps: 14, maxTokens: 16000 },
       notifyChannels: opts.channels,
       timeoutSec: 600,
       purpose: 'research',
@@ -44,19 +45,20 @@ export function registerResearchModule(app: FastifyInstance): void {
   const fail = (reply: FastifyReply, e: unknown) =>
     reply.code(502).send({ ok: false, error: e instanceof Error ? e.message : String(e) });
 
-  // 模块内定时。每日研报分析为模块定时（替代原中央 17:30「研报机会」任务，避免双跑）。
+  // 模块内定时。情报研判（研报机会 + 全网热点 合并）为唯一情报定时（替代原 research.dailyAnalysis
+  // 与 trendradar intel.daily，避免双跑）。复用 research.dailyAnalysis 槽位，避免历史调度配置失效。
   defineModuleSchedules({
     app,
     module: 'research',
     jobs: [
       {
         id: 'research.dailyAnalysis',
-        label: '每日研报分析（8:00）',
+        label: '情报研判·研报+热点（8:00）',
         defaultCron: '0 8 * * 1-5',
         defaultEnabled: true,
         run: async () => {
           // 周末由 cron 1-5 排除，节假日由 skipHoliday gate，周一窗口由聚合层 discoverWindowDays 补齐
-          await runDailyResearchAnalysis({ trigger: 'cron', channels: ['webui', 'telegram'] });
+          await runIntelReview({ trigger: 'cron', channels: ['webui', 'telegram'] });
         },
       },
       {
@@ -170,24 +172,24 @@ export function registerResearchModule(app: FastifyInstance): void {
 
   // ===== 研报机会发现复盘 =====
 
-  // 按需生成：跑 agent（research_reports(action=discover) → 结构化 JSON），记录入库（taskName=研报机会）
+  // 按需生成：跑 agent（research_reports(discover) + trendradar_hotspots(summary) → 合成情报），记录入库（taskName=情报研判）
   app.post('/api/research/discover-review', async (_req, reply) => {
     try {
-      const result = await runDailyResearchAnalysis({ trigger: 'manual', channels: ['webui'] });
+      const result = await runIntelReview({ trigger: 'manual', channels: ['webui'] });
       return {
         ok: result.status === 'success',
         data: { runId: result.runId, status: result.status, text: result.outputText },
-        error: result.status === 'success' ? undefined : `研报分析未成功（${result.status}）`,
+        error: result.status === 'success' ? undefined : `情报研判未成功（${result.status}）`,
       };
     } catch (e) {
       return fail(reply, e);
     }
   });
 
-  // 研报机会历史（成功的「研报机会」运行）
+  // 情报研判历史（成功的「情报研判」运行；union 旧「研报机会」保历史不丢）
   app.get<{ Querystring: { limit?: string } }>('/api/research/opportunity-reviews', (req) => ({
     ok: true,
-    data: listResearchReviews(req.query?.limit ? Number(req.query.limit) : undefined),
+    data: listIntelReviews(req.query?.limit ? Number(req.query.limit) : undefined),
   }));
 
   // ===== 公告列表（全市场重大公告，纯实时爬取，不落库） =====

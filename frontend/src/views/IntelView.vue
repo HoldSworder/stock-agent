@@ -1,18 +1,20 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import { Refresh, Search, MagicStick } from '@element-plus/icons-vue';
 import { api } from '@/api';
+import AiAnalysisDialog from '@/components/AiAnalysisDialog.vue';
 import MarkdownView from '@/components/MarkdownView.vue';
 import ModuleScheduleDialog from '@/components/ModuleScheduleDialog.vue';
 import type {
   TrendNews,
   TrendRadarStatus,
   TrendRssItem,
-  TrendSummary,
-  TrendSummaryHistoryItem,
   TrendTopic,
 } from '@stock-agent/shared';
+
+// embedded：作为「情报」父页的 Tab 面板嵌入时隐藏自身 page-head。
+defineProps<{ embedded?: boolean }>();
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : '请求失败');
 
@@ -22,11 +24,11 @@ const status = ref<TrendRadarStatus | null>(null);
 const topics = ref<TrendTopic[]>([]);
 const news = ref<TrendNews[]>([]);
 const rss = ref<TrendRssItem[]>([]);
-const summary = ref<TrendSummary | TrendSummaryHistoryItem | null>(null);
-const summaryType = ref<'daily' | 'weekly'>('daily');
-const summaryHistory = ref<TrendSummaryHistoryItem[]>([]);
-const currentSummaryId = ref<string>('');
-const summaryLoaded = ref(false);
+// 情报研判（合并研报机会 + 全网热点，kind=intel）：本页仅内嵌最新一条 + 统一弹窗发起/看历史。
+// 原「当日/近一周热点研判」已并入情报研判，周度热点底稿仍由定时落 trend_summaries（不在此展示）。
+const intelLatest = ref('');
+const intelAt = ref('');
+const intelDialog = ref(false);
 
 const loading = ref({
   trending: false,
@@ -126,73 +128,33 @@ const fmtTime = (iso: string) => {
   const p = (n: number) => String(n).padStart(2, '0');
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 };
-const summaryTypeLabel = (t: string) => (t === 'weekly' ? '近一周' : '当日');
-// 历史列表按当前类型（当日/近一周）过滤，避免两种研判混在一起
-const filteredHistory = computed(() =>
-  summaryHistory.value.filter((h) => h.reportType === summaryType.value),
-);
-const historyLabel = (h: TrendSummaryHistoryItem) => fmtTime(h.createdAt);
-
-async function loadSummaries(force = false) {
-  if (summaryLoaded.value && !force) return;
-  try {
-    summaryHistory.value = await api.trendradar.summaries(30);
-    summaryLoaded.value = true;
-    // 进页面自动恢复最近一条
-    if (!summary.value && summaryHistory.value.length) {
-      const latest = summaryHistory.value[0];
-      summary.value = latest;
-      currentSummaryId.value = latest.id;
-      summaryType.value = latest.reportType === 'weekly' ? 'weekly' : 'daily';
-    }
-  } catch {
-    /* 历史加载失败不阻断主流程 */
-  }
-}
-
-function selectSummary(id: string) {
-  const hit = summaryHistory.value.find((h) => h.id === id);
-  if (!hit) return;
-  summary.value = hit;
-  currentSummaryId.value = hit.id;
-}
-
-// 切换「当日/近一周」时，历史下拉与正文联动到对应类型的最新一条
-watch(summaryType, () => {
-  if (summary.value && summary.value.reportType === summaryType.value) return;
-  const latest = filteredHistory.value[0];
-  if (latest) {
-    summary.value = latest;
-    currentSummaryId.value = latest.id;
-  } else {
-    summary.value = null;
-    currentSummaryId.value = '';
-  }
-});
-
-async function genSummary() {
+// 情报研判：拉取最近一条（统一历史端点 kind=intel）
+async function loadIntel() {
   loading.value.summary = true;
   try {
-    const res = await api.trendradar.summary(summaryType.value);
-    summary.value = res;
-    currentSummaryId.value = res.id;
-    // 新记录即时入历史顶部（去重后 unshift）
-    summaryHistory.value = [
-      { id: res.id, reportType: res.reportType, content: res.content, createdAt: res.createdAt },
-      ...summaryHistory.value.filter((h) => h.id !== res.id),
-    ];
-  } catch (e) {
-    ElMessage.error(msg(e));
+    const list = await api.listAnalyses('intel', undefined, 1, true);
+    if (list.length > 0) {
+      intelLatest.value = list[0].content;
+      intelAt.value = fmtTime(list[0].createdAt);
+    }
+  } catch {
+    /* 首屏静默 */
   } finally {
     loading.value.summary = false;
   }
+}
+
+// 弹窗关闭后刷新内嵌最新结论
+function onIntelDialog(open: boolean) {
+  intelDialog.value = open;
+  if (!open) void loadIntel();
 }
 
 function onTab(name: string) {
   if (name === 'news') void loadNews();
   else if (name === 'rss') void loadRss();
   else if (name === 'trending') void loadTrending();
-  else if (name === 'summary') void loadSummaries();
+  else if (name === 'summary') void loadIntel();
 }
 
 function refreshActive() {
@@ -210,8 +172,8 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="page">
-    <div class="page-head">
+  <div :class="{ page: !embedded }">
+    <div v-if="!embedded" class="page-head">
       <div class="page-title">热点雷达</div>
       <div class="head-actions">
         <span class="st-chip" :class="{ live: status?.online }">
@@ -223,8 +185,17 @@ onMounted(() => {
         <el-button :icon="Refresh" @click="refreshActive">刷新</el-button>
       </div>
     </div>
-    <div class="page-sub">
+    <div v-if="!embedded" class="page-sub">
       接入群晖 TrendRadar：多平台热榜 / 新闻 / RSS 实时情报，AI 研判由本系统 LLM 现场生成
+    </div>
+    <div v-else class="embed-bar">
+      <span class="st-chip" :class="{ live: status?.online }">
+        <span class="dot" />
+        {{ statusText }}
+        <span v-if="status?.latestRecord" class="muted">· {{ status.latestRecord }}</span>
+      </span>
+      <ModuleScheduleDialog module="trendradar" />
+      <el-button :icon="Refresh" @click="refreshActive">刷新</el-button>
     </div>
 
     <el-tabs v-model="activeTab" class="intel-tabs" @tab-change="onTab">
@@ -332,42 +303,35 @@ onMounted(() => {
         </div>
       </el-tab-pane>
 
-      <!-- AI 分析（本系统 LLM 现场研判） -->
-      <el-tab-pane label="AI 分析" name="summary">
+      <!-- 情报研判（研报机会 + 全网热点 合并，本系统 LLM 现场研判） -->
+      <el-tab-pane label="情报研判" name="summary">
         <div v-loading="loading.summary" class="panel">
           <div class="panel-title">
-            <span>AI 热点研判（本系统 LLM 生成）</span>
-            <span v-if="summary?.createdAt" class="muted summary-time">
-              {{ fmtTime(summary.createdAt) }} · {{ summaryTypeLabel(summary.reportType) }}
+            <span>情报研判（研报机会 + 全网热点）</span>
+            <span v-if="intelAt" class="muted summary-time">{{ intelAt }}</span>
+          </div>
+          <div v-if="!embedded" class="summary-bar">
+            <el-button type="primary" :icon="MagicStick" @click="intelDialog = true">
+              {{ intelLatest ? '重新研判 / 历史' : '生成研判' }}
+            </el-button>
+            <span class="muted">
+              由本系统 LLM 合成五类研报机会与全网热点，可能需要 20-40 秒；与今日计划的情报基准同源
             </span>
           </div>
-          <div class="summary-bar">
-            <el-radio-group v-model="summaryType" size="small">
-              <el-radio-button label="daily">当日</el-radio-button>
-              <el-radio-button label="weekly">近一周</el-radio-button>
-            </el-radio-group>
-            <el-button type="primary" :icon="MagicStick" :loading="loading.summary" @click="genSummary">
-              生成研判
-            </el-button>
-            <el-select
-              v-if="filteredHistory.length"
-              v-model="currentSummaryId"
-              size="small"
-              :placeholder="`${summaryTypeLabel(summaryType)}历史`"
-              class="summary-history"
-              @change="selectSummary"
-            >
-              <el-option
-                v-for="h in filteredHistory"
-                :key="h.id"
-                :label="historyLabel(h)"
-                :value="h.id"
-              />
-            </el-select>
-            <span class="muted">由本系统 LLM 基于 TrendRadar 热榜/新闻/RSS 现场研判，可能需要 10-30 秒</span>
-          </div>
-          <MarkdownView v-if="summary?.content" :source="summary.content" class="summary-body" />
-          <el-empty v-else-if="!loading.summary" description="点击「生成研判」获取 AI 分析" :image-size="80" />
+          <MarkdownView v-if="intelLatest" :source="intelLatest" class="summary-body" />
+          <el-empty
+            v-else-if="!loading.summary"
+            :description="embedded ? '点击右上角「AI 分析」获取情报研判' : '点击「生成研判」获取情报研判'"
+            :image-size="80"
+          />
+
+          <AiAnalysisDialog
+            v-if="!embedded"
+            :model-value="intelDialog"
+            kind="intel"
+            title="情报研判"
+            @update:model-value="onIntelDialog"
+          />
         </div>
       </el-tab-pane>
     </el-tabs>
@@ -379,6 +343,12 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+.embed-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 4px;
 }
 .st-chip {
   display: inline-flex;

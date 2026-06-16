@@ -30,8 +30,8 @@ export interface IdealPoint {
   tolerance: number;
 }
 
-/** 后端内部策略定义（前端只消费其 ScreenStrategy 子集） */
-export interface ScreenStrategyDef extends ScreenStrategy {
+/** 后端内部策略定义（前端只消费其 ScreenStrategy 子集；criteria 由 listStrategies 派生，故此处排除） */
+export interface ScreenStrategyDef extends Omit<ScreenStrategy, 'criteria'> {
   hardFilters: HardFilter;
   /** 动量因子理想点（基于当日涨跌幅 %） */
   momentumIdeal: IdealPoint;
@@ -75,6 +75,24 @@ const STRATEGIES: ScreenStrategyDef[] = [
     },
     momentumIdeal: { ideal: 5, tolerance: 5 },
     activityIdeal: { ideal: 14, tolerance: 10 },
+  },
+  {
+    id: 'pre_breakout_catalyst',
+    name: '起爆前·趋势资金',
+    description:
+      '起爆前埋伏 / 右侧确认：在题材走强的板块里，挑日K多头排列、临近20日新高且主力资金持续净流入的活跃股，回避已大涨透支。需逐只校验趋势与资金面。',
+    factorWeights: { trend: 0.3, fundFlow: 0.25, themeHeat: 0.2, activity: 0.15, momentum: 0.1 },
+    hardFilters: {
+      amountMinYi: 1.5,
+      turnoverMin: 2,
+      turnoverMax: 25,
+      pctMin: -3,
+      pctMax: 6,
+      marketCapMinYi: 30,
+      marketCapMaxYi: 600,
+    },
+    momentumIdeal: { ideal: 2, tolerance: 5 },
+    activityIdeal: { ideal: 8, tolerance: 7 },
   },
   {
     id: 'balanced_alpha',
@@ -132,14 +150,36 @@ export function listStrategyDefs(): ScreenStrategyDef[] {
   return STRATEGIES;
 }
 
-/** 前端/agent 用的策略清单（仅暴露 id/name/description/factorWeights） */
+/** 区间口径文案：按下/上限拼成「a-b」「≥a」「≤b」（单位可选） */
+function rangeText(label: string, lo: number | null | undefined, hi: number | null | undefined, unit = ''): string | null {
+  if (lo != null && hi != null) return `${label} ${lo}-${hi}${unit}`;
+  if (lo != null) return `${label} ≥${lo}${unit}`;
+  if (hi != null) return `${label} ≤${hi}${unit}`;
+  return null;
+}
+
+/** 把硬筛阈值 + 理想点拼成「指标口径」人话数组（前端展示） */
+function buildCriteria(def: ScreenStrategyDef): string[] {
+  const f = def.hardFilters;
+  const out: (string | null)[] = [
+    rangeText('成交额', f.amountMinYi, null, '亿'),
+    rangeText('换手率', f.turnoverMin, f.turnoverMax, '%'),
+    rangeText('当日涨幅', f.pctMin, f.pctMax, '%'),
+    rangeText('市值', f.marketCapMinYi, f.marketCapMaxYi, '亿'),
+    rangeText('PE', f.peMin, f.peMax),
+    rangeText('PB', f.pbMin, f.pbMax),
+    `动量理想 ${def.momentumIdeal.ideal >= 0 ? '+' : ''}${def.momentumIdeal.ideal}%（容差${def.momentumIdeal.tolerance}）`,
+    `活跃理想 换手${def.activityIdeal.ideal}%（容差${def.activityIdeal.tolerance}）`,
+  ];
+  return out.filter((s): s is string => s != null);
+}
+
+/** 前端/agent 用的策略清单（暴露 id/name/description/factorWeights + 口径 criteria） */
 export function listStrategies(): ScreenStrategy[] {
-  return STRATEGIES.map(({ id, name, description, factorWeights }) => ({
-    id,
-    name,
-    description,
-    factorWeights,
-  }));
+  return STRATEGIES.map(({ id, name, description, factorWeights }) => {
+    const def = BY_ID.get(id)!;
+    return { id, name, description, factorWeights, criteria: buildCriteria(def) };
+  });
 }
 
 /** 按 id 取策略定义；未知 id 回退默认策略 */

@@ -10,6 +10,8 @@
     "dev": "pnpm --parallel --filter ./backend --filter ./frontend dev",
     "dev:backend": "pnpm --filter ./backend dev",
     "dev:frontend": "pnpm --filter ./frontend dev",
+    "start:backend": "pnpm --filter ./backend start",
+    "restart:backend": "PIDS=$(lsof -nP -iTCP:8787 -sTCP:LISTEN -t 2>/dev/null); if [ -n \"$PIDS\" ]; then echo \"停止旧后端 $PIDS\"; kill $PIDS; sleep 2; fi; pnpm --filter ./backend start",
     "build": "pnpm --filter ./frontend build",
     "typecheck": "pnpm --filter ./backend typecheck && pnpm --filter ./frontend typecheck",
     "fix:native": "pnpm --filter ./backend rebuild better-sqlite3",

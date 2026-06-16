@@ -8,6 +8,7 @@ import TaskEditDialog from '@/components/TaskEditDialog.vue';
 import RunResultDrawer from '@/components/RunResultDrawer.vue';
 import type {
   ScheduledTask,
+  ScreenNlStrategy,
   SkillDimension,
   StrategyForwardStats,
   StrategyKind,
@@ -211,18 +212,34 @@ async function submitCreate() {
   }
 }
 
-// ===== 编辑战法（名称/描述/Skill 开关；kind 与初始资金锁定）=====
+// ===== 买入关联选股（自然语言选股预设，与选股模块同源）=====
+const nlStrategies = ref<ScreenNlStrategy[]>([]);
+async function loadNlStrategies() {
+  try {
+    nlStrategies.value = (await api.screener.status()).nlStrategies ?? [];
+  } catch {
+    /* 选股状态获取失败不阻塞战法页 */
+  }
+}
+const currentScreenLink = computed(() => {
+  const id = snap.value?.strategy.screenStrategyId;
+  return id ? nlStrategies.value.find((s) => s.id === id) ?? null : null;
+});
+
+// ===== 编辑战法（名称/描述/Skill 开关/买入关联选股；kind 与初始资金锁定）=====
 const editVisible = ref(false);
 const editForm = ref<{
   name: string;
   description: string;
   skillEnabled: boolean;
   autoSimEnabled: boolean;
+  screenStrategyId: string;
 }>({
   name: '',
   description: '',
   skillEnabled: false,
   autoSimEnabled: false,
+  screenStrategyId: '',
 });
 const editing = ref(false);
 
@@ -233,6 +250,7 @@ function openEdit() {
     description: snap.value.strategy.description ?? '',
     skillEnabled: !!snap.value.strategy.skillEnabled,
     autoSimEnabled: !!snap.value.strategy.autoSimEnabled,
+    screenStrategyId: snap.value.strategy.screenStrategyId ?? '',
   };
   editVisible.value = true;
 }
@@ -242,11 +260,14 @@ async function submitEdit() {
   if (!editForm.value.name.trim()) return ElMessage.warning('请输入战法名称');
   editing.value = true;
   try {
+    const screenStrategyId = editForm.value.screenStrategyId || null;
     await api.updateStrategy(selectedId.value, {
       name: editForm.value.name.trim(),
       description: editForm.value.description.trim() || null,
       skillEnabled: editForm.value.skillEnabled,
       autoSimEnabled: editForm.value.autoSimEnabled,
+      screenEngine: screenStrategyId ? 'nl' : null,
+      screenStrategyId,
     });
     editVisible.value = false;
     ElMessage.success('已保存');
@@ -619,6 +640,7 @@ let ws: WebSocket | null = null;
 onMounted(() => {
   loadList();
   loadAutoSim();
+  loadNlStrategies();
   ws = openWs('/ws/runs');
   ws.onmessage = async (ev) => {
     const e: StreamEvent = JSON.parse(ev.data);
@@ -721,6 +743,11 @@ onUnmounted(() => ws?.close());
               </div>
               <div v-if="snap.strategy.description" class="detail-desc">
                 {{ snap.strategy.description }}
+              </div>
+              <div v-if="currentScreenLink" class="detail-desc">
+                <el-tag size="small" effect="plain" type="success">
+                  买入关联选股 · {{ currentScreenLink.name }}
+                </el-tag>
               </div>
               <div v-if="isMiaoxiang" class="detail-desc">
                 最近同步：{{ snap.strategy.syncedAt ? dayjs(snap.strategy.syncedAt).format('MM-DD HH:mm:ss') : '未同步' }}
@@ -1169,6 +1196,24 @@ onUnmounted(() => ws?.close());
           <span class="num">{{ snap ? money(snap.strategy.initialCapital) : '' }}</span>
           <span class="form-tip">初始资金不可修改</span>
         </el-form-item>
+        <el-form-item label="买入关联选股">
+          <el-select
+            v-model="editForm.screenStrategyId"
+            clearable
+            placeholder="不关联（自由买入）"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="s in nlStrategies"
+              :key="s.id"
+              :label="`自然语言选股 · ${s.name}`"
+              :value="s.id"
+            />
+          </el-select>
+          <span class="form-tip">
+            关联后买入标的须来自选股模块该预设选出的候选清单，使买入标准与选股口径同源
+          </span>
+        </el-form-item>
         <el-form-item label="Skill 自迭代">
           <el-switch v-model="editForm.skillEnabled" />
           <span class="form-tip">开启后复盘时 agent 可提议调整选股/买入/卖出打法（需你确认才生效）</span>
@@ -1365,11 +1410,11 @@ onUnmounted(() => ws?.close());
   margin-bottom: 18px;
 }
 .forward-panel {
-  border: 1px solid var(--border, #e5e7eb);
-  border-radius: 8px;
-  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px 16px;
   margin-bottom: 18px;
-  background: var(--fill-1, #fafafa);
+  background: var(--bg-2);
 }
 .forward-head {
   display: flex;
@@ -1409,7 +1454,7 @@ onUnmounted(() => ws?.close());
   align-items: center;
   gap: 10px;
   padding-top: 8px;
-  border-top: 1px dashed var(--border, #e5e7eb);
+  border-top: 1px dashed var(--border-soft);
 }
 .card {
   background: var(--bg-2);

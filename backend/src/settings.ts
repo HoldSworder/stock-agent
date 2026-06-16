@@ -10,17 +10,16 @@ const DEFAULTS: Partial<Record<SettingKey, string>> = {
   llmBaseUrl: 'https://api.openai.com/v1',
   llmModel: 'gpt-4o-mini',
   llmContextWindow: '128000',
-  trendradarMcpUrl: 'https://router.qzran.cn:8087/mcp',
   trendradarEnabled: 'true',
   researchBaseUrl: 'https://reportapi.eastmoney.com',
   researchEnabled: 'true',
   etfEnabled: 'true',
-  // 行情数据源启停（参与 datasource 调度，默认全开）；集思录默认关闭（公开端点偶发需 cookie）
+  // 行情数据源启停（参与 datasource 调度，默认全开）；集思录默认开启用于补 ETF 折溢价（公开端点被限流时可在数据源页补 cookie）
   eastmoneyEnabled: 'true',
   tencentEnabled: 'true',
   sinaEnabled: 'true',
   neteaseEnabled: 'true',
-  jisiluEnabled: 'false',
+  jisiluEnabled: 'true',
   akshareEnabled: 'true',
   // 华泰证券 AI 网关（涨乐/妙想 edge gate），默认开启并指向官方生产网关
   htscBaseUrl: 'https://ai.zhangle.com',
@@ -28,6 +27,13 @@ const DEFAULTS: Partial<Record<SettingKey, string>> = {
   // 同花顺问财 OpenAPI（ETF 智能选股），默认开启并指向官方网关
   iwencaiBaseUrl: 'https://openapi.iwencai.com',
   iwencaiEnabled: 'true',
+  iwencaiSkillId: 'hithink-etf-selector',
+  // 问财个股选股：复用同一 token/网关，默认关闭（账号未开通对应 skill 时探测会报错刷红）
+  iwencaiStockSkillId: 'hithink-stock-selector',
+  iwencaiStockEnabled: 'false',
+  // 财联社电报 / 雪球：经 AKShare(aktools) 透传，默认开启
+  clsEnabled: 'true',
+  xueqiuEnabled: 'true',
 };
 
 const KEYS = {
@@ -64,6 +70,11 @@ const KEYS = {
   iwencaiApiKey: 'iwencai_api_key',
   iwencaiBaseUrl: 'iwencai_base_url',
   iwencaiEnabled: 'iwencai_enabled',
+  iwencaiSkillId: 'iwencai_skill_id',
+  iwencaiStockSkillId: 'iwencai_stock_skill_id',
+  iwencaiStockEnabled: 'iwencai_stock_enabled',
+  clsEnabled: 'cls_enabled',
+  xueqiuEnabled: 'xueqiu_enabled',
 } as const;
 
 type SettingKey = keyof typeof KEYS;
@@ -189,6 +200,11 @@ export function getPublicSettings(): AppSettings {
     iwencaiApiKey: getValue('iwencaiApiKey'),
     iwencaiBaseUrl: getValue('iwencaiBaseUrl'),
     iwencaiEnabled: getValue('iwencaiEnabled'),
+    iwencaiSkillId: getValue('iwencaiSkillId'),
+    iwencaiStockSkillId: getValue('iwencaiStockSkillId'),
+    iwencaiStockEnabled: getValue('iwencaiStockEnabled'),
+    clsEnabled: getValue('clsEnabled'),
+    xueqiuEnabled: getValue('xueqiuEnabled'),
   };
 }
 
@@ -226,6 +242,11 @@ export interface SettingsUpdate {
   iwencaiApiKey?: string;
   iwencaiBaseUrl?: string;
   iwencaiEnabled?: string;
+  iwencaiSkillId?: string;
+  iwencaiStockSkillId?: string;
+  iwencaiStockEnabled?: string;
+  clsEnabled?: string;
+  xueqiuEnabled?: string;
 }
 
 export function updateSettings(patch: SettingsUpdate): void {

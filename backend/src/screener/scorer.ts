@@ -105,10 +105,17 @@ export interface ScoredRow {
  * 对候选池打分（横截面），按策略权重加权出 screenScore（0-100）。
  * factors[].weight 为该因子对总分的贡献（score * 归一权重），其和等于 screenScore。
  */
+/**
+ * 候选 code → 趋势/资金因子分（0-100）的外部补充表（由 trend.ts 限量取 K 线/资金流后算得）。
+ * 仅 trend / fundFlow 两个因子需要逐只历史数据，故经此参数注入；缺失则该因子记中性 50。
+ */
+export type ExtraFactorScores = Map<string, Partial<Record<ScreenFactorKey, number>>>;
+
 export function scoreCandidates(
   rows: SnapshotRow[],
   def: ScreenStrategyDef,
   theme: ThemeContext,
+  extraScores?: ExtraFactorScores,
 ): ScoredRow[] {
   const keys = activeFactors(def);
   const totalW = keys.reduce((s, k) => s + (def.factorWeights[k] ?? 0), 0) || 1;
@@ -143,6 +150,12 @@ export function scoreCandidates(
           if (hit) base = Math.min(100, base + 25);
         }
         return base;
+      }
+      case 'trend':
+      case 'fundFlow': {
+        // 趋势/资金流为逐只历史因子，由外部 extraScores 注入；缺失记中性 50
+        const v = extraScores?.get(r.code)?.[key];
+        return typeof v === 'number' ? v : 50;
       }
       default:
         return 50;

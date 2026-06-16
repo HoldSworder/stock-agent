@@ -7,6 +7,8 @@ import type { OpsDbStats, RetentionConfig } from '@stock-agent/shared';
 
 // 运维·SQLite 体积治理：库体积/各表行数总览、按表设保留天数（0=不自动清理）、单表手动清理、VACUUM 回收、自动清理定时开关。
 // 仅治理日志/历史表；配置/账本/学习闭环表不在此暴露，永久保留。
+// embedded：作为系统设置页的 Tab 面板嵌入时隐藏自身 page-head/page-sub。
+defineProps<{ embedded?: boolean }>();
 
 const loading = ref(false);
 const stats = ref<OpsDbStats | null>(null);
@@ -152,13 +154,17 @@ onMounted(load);
 </script>
 
 <template>
-  <div class="page">
-    <div class="page-head">
+  <div :class="{ page: !embedded }">
+    <div v-if="!embedded" class="page-head">
       <div class="page-title">运维</div>
       <el-button size="small" :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
     </div>
-    <div class="page-sub">
+    <div v-if="!embedded" class="page-sub">
       SQLite 体积治理：清理累积的日志 / 历史记录并回收空间。配置 / 账本 / 战法学习闭环等表永久保留，不在此暴露。
+    </div>
+    <div v-else class="embed-bar">
+      <span class="embed-sub">SQLite 体积治理：清理累积日志 / 历史并回收空间。配置 / 账本 / 学习闭环表永久保留。</span>
+      <el-button size="small" :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
     </div>
 
     <el-skeleton v-if="loading && !stats" :rows="6" animated />
@@ -259,6 +265,17 @@ onMounted(load);
   display: flex;
   align-items: center;
   justify-content: space-between;
+}
+.embed-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.embed-sub {
+  flex: 1;
+  font-size: 12.5px;
+  color: var(--text-2);
 }
 .cards {
   display: grid;

@@ -1,4 +1,4 @@
-import { asc, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
 import type {
   DailyPlan,
   DailyPlanEvent,
@@ -35,6 +35,13 @@ function parseTrigger(s: string | null): PlanTrigger | null {
   const v = parse<PlanTrigger | null>(s, null);
   if (!v || typeof v.value !== 'number' || !Number.isFinite(v.value)) return null;
   return { type: v.type ?? 'price', value: v.value, note: v.note };
+}
+
+/** 解析 string[] JSON（条件清单），非数组/解析失败回退空数组，并过滤空串 */
+function parseStrArray(s: string | null): string[] {
+  const v = parse<unknown>(s, []);
+  if (!Array.isArray(v)) return [];
+  return v.filter((x): x is string => typeof x === 'string' && x.trim().length > 0);
 }
 
 /**
@@ -75,7 +82,10 @@ function rowToItem(row: ItemRow): DailyPlanItem {
     stopLoss: parseTrigger(row.stopLoss),
     takeProfit: parseTrigger(row.takeProfit),
     positionHint: row.positionHint ?? '',
+    confirmConditions: parseStrArray(row.confirmConditions),
+    invalidConditions: parseStrArray(row.invalidConditions),
     source: row.source as DailyPlanItem['source'],
+    confidence: row.confidence ?? null,
     priority: row.priority,
     status: row.status as PlanItemStatus,
     lastNote: row.lastNote ?? null,
@@ -106,6 +116,27 @@ export function getPlanByDate(date: string): DailyPlan | null {
     .select()
     .from(schema.dailyPlans)
     .where(eq(schema.dailyPlans.planDate, date))
+    .get();
+  return row ? rowToPlan(row) : null;
+}
+
+/**
+ * 取「上一份已收盘且有复盘总结」的计划（planDate < beforeDate、status=closed、reviewSummary 非空）。
+ * 供今日计划生成时闭环反哺：把上一交易日计划的复盘结论与次日预案草稿注入基准上下文。
+ */
+export function getPreviousReviewedPlan(beforeDate: string): DailyPlan | null {
+  const row = db
+    .select()
+    .from(schema.dailyPlans)
+    .where(
+      and(
+        sql`${schema.dailyPlans.planDate} < ${beforeDate}`,
+        eq(schema.dailyPlans.status, 'closed'),
+        sql`${schema.dailyPlans.reviewSummary} is not null and ${schema.dailyPlans.reviewSummary} != ''`,
+      ),
+    )
+    .orderBy(desc(schema.dailyPlans.planDate))
+    .limit(1)
     .get();
   return row ? rowToPlan(row) : null;
 }
@@ -222,12 +253,19 @@ export interface ItemInput {
   stopLoss?: PlanTrigger | null;
   takeProfit?: PlanTrigger | null;
   positionHint?: string;
+  confirmConditions?: string[];
+  invalidConditions?: string[];
   source?: DailyPlanItem['source'];
+  confidence?: number | null;
   priority?: number;
 }
 
 const trig = (t: PlanTrigger | null | undefined): string | null =>
   t && typeof t.value === 'number' ? JSON.stringify(t) : null;
+
+/** 条件清单序列化：过滤空串后存 JSON，恒为合法数组字符串 */
+const condList = (arr: string[] | undefined): string =>
+  JSON.stringify((arr ?? []).filter((x) => typeof x === 'string' && x.trim().length > 0));
 
 /** 全量替换某计划的标的项（重新生成时用） */
 export function replaceItems(planId: string, items: ItemInput[]): void {
@@ -249,7 +287,10 @@ export function replaceItems(planId: string, items: ItemInput[]): void {
           stopLoss: trig(it.stopLoss),
           takeProfit: trig(it.takeProfit),
           positionHint: it.positionHint ?? null,
+          confirmConditions: condList(it.confirmConditions),
+          invalidConditions: condList(it.invalidConditions),
           source: it.source ?? 'other',
+          confidence: typeof it.confidence === 'number' ? it.confidence : null,
           priority: it.priority ?? 0,
           status: 'pending',
           lastNote: null,

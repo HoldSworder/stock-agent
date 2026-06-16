@@ -1,4 +1,4 @@
-import type { ModelConfig, StreamEvent } from '@stock-agent/shared';
+import type { AiAnalysisHistoryItem, ModelConfig, StreamEvent } from '@stock-agent/shared';
 
 // 公共 AI 分析「类型注册表」。
 // 每个分析能力（kind）声明：任务名、prompt 构造、可选前置校验、历史作用域键、模型配置。
@@ -27,9 +27,42 @@ export interface AnalysisRunResult {
   runId?: string | null;
 }
 
+/** 驾驶舱 AI 分析中心的能力分组 */
+export type AnalysisGroup =
+  | '复盘'
+  | '大盘'
+  | '板块主线'
+  | 'ETF'
+  | '研报'
+  | '热点'
+  | '情报'
+  | '持仓'
+  | '决策';
+
 export interface AnalysisKindDef {
   /** 运行名 + 历史标题 */
   taskName: string;
+  /** 中心卡片标题（缺省回退 taskName） */
+  title?: string;
+  /** 驾驶舱中心分组 */
+  group: AnalysisGroup;
+  /**
+   * 作用域：global（无标的，可在中心一键发起）/ perStock（需个股，中心仅展示历史 + 引导去对应页）。
+   * 缺省 global。
+   */
+  scope?: 'global' | 'perStock';
+  /**
+   * 历史读取器：置位即「外部持久化型」——历史不读 ai_analyses，改读此函数
+   * （如 taskRun 复盘类读 task_runs、热点读 trend_summaries），与今日计划读取口径一致。
+   */
+  loadHistory?: (limit: number) => AiAnalysisHistoryItem[];
+  /**
+   * 跳过 ai_analyses 自动落库：置位用于「外部已持久化」的 kind（taskRun / trend_summaries 已落库），
+   * 避免双写、保住今日计划读取。通常与 loadHistory 同时设置。
+   */
+  skipAutoSave?: boolean;
+  /** 运行成功后的回调（如复盘验证回流共享主线）。best-effort，不应抛错。 */
+  onSuccess?: (outputText: string) => void;
   /** 据入参构造 agent 指令 prompt */
   buildPrompt: (params: Record<string, unknown>) => string | Promise<string>;
   /**
@@ -47,6 +80,12 @@ export interface AnalysisKindDef {
   timeoutSec?: number;
   /** 调用用途分类（缺省 analyze） */
   purpose?: string;
+  /**
+   * 底层模块定时引用（唯一映射来源）：声明该能力对应的 defineModuleSchedules job。
+   * AI 分析中心「定时调度」据此把能力 join 到 /api/schedules 项，就地开关 / 改 cron / 触发。
+   * 无对应定时（如 perStock 决策）则不声明。
+   */
+  scheduleRef?: { module: string; jobId: string };
 }
 
 const kinds = new Map<string, AnalysisKindDef>();
@@ -57,4 +96,9 @@ export function registerKind(kind: string, def: AnalysisKindDef): void {
 
 export function getKind(kind: string): AnalysisKindDef | null {
   return kinds.get(kind) ?? null;
+}
+
+/** 全部已注册 kind（驾驶舱 AI 分析中心目录用），按注册顺序返回 */
+export function listKinds(): Array<{ kind: string; def: AnalysisKindDef }> {
+  return [...kinds.entries()].map(([kind, def]) => ({ kind, def }));
 }

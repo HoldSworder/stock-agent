@@ -133,6 +133,10 @@ export interface SectorItem {
   name: string;
   /** 涨跌幅 % */
   pct: number;
+  /** 60 日涨跌幅 %（板块级多日强弱，东财 f24；取不到为 null） */
+  ret60?: number | null;
+  /** 年初至今涨跌幅 %（东财 f25；取不到为 null） */
+  ytd?: number | null;
   /** 领涨股名称 */
   leadStock: string;
   /** 领涨股代码 */
@@ -397,6 +401,8 @@ export interface ReviewMainTheme {
   strength: string;
   /** 判断依据 */
   reason: string;
+  /** 对照共享主线清单给出的验证结论（延续/加速/分歧/退潮/证伪），用于结构化回流 themes */
+  verdict?: ThemeVerdict;
 }
 
 /** 复盘中的热门板块/概念项 */
@@ -625,6 +631,38 @@ export interface ReviewHistoryItem {
   outputText: string | null;
 }
 
+/** AI 分析能力分组（驾驶舱 AI 分析中心按此分组展示卡片） */
+export type AiAnalysisGroup =
+  | '复盘'
+  | '大盘'
+  | '板块主线'
+  | 'ETF'
+  | '研报'
+  | '热点'
+  | '情报'
+  | '持仓'
+  | '决策';
+
+/** 统一 AI 分析中心的能力目录条目（GET /api/analyses） */
+export interface AiAnalysisKindInfo {
+  /** 分析类型（对应后端注册 kind） */
+  kind: string;
+  /** 卡片标题 */
+  title: string;
+  /** 分组 */
+  group: AiAnalysisGroup;
+  /** 作用域：global 可一键发起；perStock 需个股，中心仅展示历史 + 引导去对应页 */
+  scope: 'global' | 'perStock';
+  /** 最新一条结论时间（ISO），无则 null */
+  latestAt: string | null;
+  /** 最新一条结论摘要，无则 null */
+  latestSnippet: string | null;
+  /** 底层模块定时所属模块前缀（无定时则 null），用于定时调度写操作分流 */
+  scheduleModule: string | null;
+  /** 底层模块定时 job id（无定时则 null），与 /api/schedules 的 id 对齐 */
+  scheduleId: string | null;
+}
+
 /** 公共 AI 分析历史条目（通用弹窗各 kind 共用，仅最终正文） */
 export interface AiAnalysisHistoryItem {
   id: string;
@@ -774,11 +812,25 @@ export interface TrendMetrics {
   volatility: number | null;
 }
 
+/** 评分构成项（前端拆解展示：基分/各项贡献，value 为对总分的贡献，可正可负） */
+export interface ScorePart {
+  label: string;
+  value: number;
+}
+
+/** 强度评分拆解（合计 = 各 part 之和后裁剪到 0-100） */
+export interface StrengthBreakdown {
+  total: number;
+  parts: ScorePart[];
+}
+
 /** 行业强弱（按趋势 + 动量综合排序） */
 export interface IndustryStrength {
   /** 东财板块代码 BKxxxx */
   code: string;
   name: string;
+  /** 板块归类：行业 / 概念（取数面扩到行业+概念后区分展示） */
+  boardKind?: 'industry' | 'concept';
   /** 当日涨跌 % */
   pct: number | null;
   leadStock: string;
@@ -786,8 +838,12 @@ export interface IndustryStrength {
   trend: TrendState;
   /** 综合强度 0-100 */
   strengthScore: number;
-  /** 池内动量排名（仅趋势向上者参与，1=最强） */
+  /** 强度评分构成（趋势基分 + 龙头动能 + 板块60日持续 + 年线偏离修正） */
+  breakdown: StrengthBreakdown;
+  /** 池内动量排名（按龙头动能 + 板块60日融合键，1=最强） */
   momentumRank: number | null;
+  /** 板块 60 日涨跌幅 %（板块级真实多日强弱；取不到为 null） */
+  ret60?: number | null;
   metrics: TrendMetrics;
   notes: string[];
 }
@@ -798,6 +854,8 @@ export interface PositionTrend {
   name: string;
   trend: TrendState;
   strengthScore: number;
+  /** 强度评分构成（基分 + 动量贡献 + 年线偏离修正） */
+  breakdown: StrengthBreakdown;
   /** 持有盈亏 % */
   holdRate: number | null;
   /** 仓位 % */
@@ -816,6 +874,8 @@ export interface MidCandidate {
   reason: string;
   fromIndustry?: string;
   strengthScore: number;
+  /** 强度评分构成（来源行业/ETF 的基分 + 动量贡献等） */
+  breakdown: StrengthBreakdown;
 }
 
 /** 中线雷达总览（行业强弱 + 持仓趋势 + 候选池） */
@@ -969,6 +1029,10 @@ export interface Strategy {
   skillEnabled: boolean;
   /** 是否纳入自动模拟白名单（默认 false；仍受全局 simAutoEnabled 总闸约束） */
   autoSimEnabled: boolean;
+  /** 买入关联的选股链路 id（如 nl；为空表示不关联选股模块） */
+  screenEngine?: string | null;
+  /** 买入关联的选股预设/策略 id（配合 screenEngine，买入标的来自该口径选出的候选） */
+  screenStrategyId?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -983,6 +1047,10 @@ export interface StrategyInput {
   skillEnabled?: boolean;
   /** 是否纳入自动模拟白名单 */
   autoSimEnabled?: boolean;
+  /** 买入关联的选股链路 id（如 nl） */
+  screenEngine?: string | null;
+  /** 买入关联的选股预设/策略 id */
+  screenStrategyId?: string | null;
 }
 
 /** 战法前向样本（单日权益快照） */
@@ -1202,6 +1270,26 @@ export interface TrendRssItem {
   publishedAt: string | null;
   /** 日期 YYYY-MM-DD */
   date: string | null;
+}
+
+/** 单条财经快讯/电报（首选财联社，失败按序降级到同花顺/富途/东财/新浪） */
+export interface ClsTelegraph {
+  /** 稳定 id（发布时间 + 标题哈希，前端去重/key 用） */
+  id: string;
+  /** 发布时间（ISO 字符串；解析失败回退原始串） */
+  time: string;
+  /** 电报标题（部分源无标题则空串） */
+  title: string;
+  /** 电报正文 */
+  content: string;
+  /** 涨跌倾向：positive 利好 / negative 利空 / neutral 中性（源无该字段时为 neutral） */
+  tag: 'positive' | 'negative' | 'neutral';
+  /** 实际来源中文名：财联社/同花顺/富途/东财/新浪（兜底降级时非财联社） */
+  source: string;
+  /** 是否财联社加红重点（level A/B）；非财联社降级源恒 false */
+  important: boolean;
+  /** 原文链接（部分源提供） */
+  url?: string | null;
 }
 
 /** AI 热点研判（按需经本系统自有 LLM 基于 MCP 原始数据现场生成） */
@@ -1623,6 +1711,121 @@ export interface EtfOverview {
   themes: EtfThemeCategory[];
 }
 
+// ===== M1 ETF 行业轮动引擎（建议向，中线赛道层）=====
+
+/** ETF 赛道轮动状态机：上升 / 回踩 / 加速 / 过热 / 破位 */
+export type EtfRotationState = '上升' | '回踩' | '加速' | '过热' | '破位';
+
+/** 单只 ETF 的轮动评估项（确定性指标 + 5 态 + 综合强度） */
+export interface EtfRotationItem {
+  code: string;
+  name: string;
+  /** 来源：跟踪池 / 主题赛道代表 */
+  source: 'pool' | 'theme';
+  /** 所属赛道（主题源为分类名，跟踪池取 tags 首项，可空） */
+  track: string | null;
+  state: EtfRotationState;
+  /** 综合轮动强度 0-100 */
+  score: number;
+  /** 强度评分构成（状态基分 + 相对强弱 + 动量 + 资金流） */
+  breakdown: StrengthBreakdown;
+  /** 相对沪深300 强弱（近 60 日超额收益 %，正=跑赢基准） */
+  rs: number | null;
+  ret20: number | null;
+  ret60: number | null;
+  ret120: number | null;
+  /** 周线均线多头（周线 价>MA20>MA60） */
+  weekMaTrend: boolean | null;
+  /** 主力净流入（亿，缺为 null） */
+  flowNetIn: number | null;
+  /** 年线（MA250）偏离 % */
+  maDeviation: number | null;
+  /** 价格分位 0-100 */
+  pricePercentile: number | null;
+  /** 折溢价率 %（正=溢价，权威源集思录 discount_rt；未启用集思录或缺失为 null） */
+  premiumPct: number | null;
+  note: string;
+}
+
+/** ETF 行业轮动总览（按综合强度降序） */
+export interface EtfRotationOverview {
+  asOf: string;
+  items: EtfRotationItem[];
+  note: string;
+}
+
+// ===== S1 市场情绪周期（短线择时总开关，确定性只读，不下单/不调 LLM）=====
+
+/** 情绪周期阶段（结合指数水位 + 日间方向判定） */
+export type SentimentPhase = '冰点' | '恢复' | '高潮' | '退潮' | '震荡';
+
+/** 情绪水位档位（仅按当日指数高低分档，与方向无关） */
+export type SentimentLevel = '冰点' | '低迷' | '平稳' | '活跃' | '高潮';
+
+/** 情绪指数的原始构成指标（best-effort，缺失为 null） */
+export interface SentimentComponents {
+  /** 上涨家数 */
+  up: number | null;
+  /** 下跌家数 */
+  down: number | null;
+  /** 平盘家数 */
+  flat: number | null;
+  /** 涨停数（含一字/ST） */
+  limitUp: number | null;
+  /** 真实涨停数（剔除一字/ST，赚钱效应更准） */
+  realLimitUp: number | null;
+  /** 跌停数 */
+  limitDown: number | null;
+  /** 真实跌停数 */
+  realLimitDown: number | null;
+  /** 炸板数 */
+  brokenBoard: number | null;
+  /** 炸板率 % */
+  brokenRate: number | null;
+  /** 最高连板高度 */
+  maxStreak: number | null;
+  /** 乐咕乐股市场活跃度 %（赚钱效应直读指标） */
+  activity: number | null;
+  /** 停牌数 */
+  suspended: number | null;
+}
+
+/** 市场情绪周期总览（0-100 指数 + 水位档 + 周期阶段 + 白话仓位倾向） */
+export interface SentimentOverview {
+  /** 数据时刻 ISO */
+  asOf: string;
+  /** 交易日 YYYY-MM-DD（Asia/Shanghai） */
+  tradeDate: string;
+  /** 综合情绪指数 0-100 */
+  index: number;
+  /** 水位档位（按指数高低） */
+  level: SentimentLevel;
+  /** 周期阶段（水位 + 方向） */
+  phase: SentimentPhase;
+  /** 上一交易日指数（判方向用，无历史为 null） */
+  prevIndex: number | null;
+  /** 较上一交易日的变动（index - prevIndex，无历史为 null） */
+  delta: number | null;
+  /** 指数构成拆解（各分项贡献，可审计） */
+  breakdown: StrengthBreakdown;
+  /** 原始构成指标 */
+  components: SentimentComponents;
+  /** 白话仓位倾向建议（不需量化知识） */
+  advice: string;
+  /** 备注 */
+  note: string;
+  /** 是否有数据源降级（部分指标缺失，指数为不完整估计） */
+  stale: boolean;
+}
+
+/** 情绪指数历史点（趋势图用） */
+export interface SentimentHistoryItem {
+  tradeDate: string;
+  index: number;
+  level: SentimentLevel;
+  phase: SentimentPhase;
+}
+
 /** 设置项（key-value）。模型为任意 OpenAI 兼容服务，非固定 DeepSeek。 */
 export interface AppSettings {
   /** OpenAI 兼容服务的 Base URL */
@@ -1681,6 +1884,16 @@ export interface AppSettings {
   iwencaiBaseUrl: string;
   /** 同花顺问财 ETF 选股数据源启停，默认开启 */
   iwencaiEnabled: string;
+  /** 问财 ETF 选股网关 skill id（X-Claw-Skill-Id），默认 hithink-etf-selector */
+  iwencaiSkillId: string;
+  /** 问财个股选股网关 skill id（X-Claw-Skill-Id），账号开通后填入 */
+  iwencaiStockSkillId: string;
+  /** 同花顺问财个股选股数据源启停，默认关闭（需账号开通对应 skill） */
+  iwencaiStockEnabled: string;
+  /** 财联社电报数据源启停（经 AKShare 透传），默认开启 */
+  clsEnabled: string;
+  /** 雪球数据源启停（经 AKShare 透传），默认开启 */
+  xueqiuEnabled: string;
 }
 
 // ===== 数据源中心（统一管理所有外部取数）=====
@@ -2080,11 +2293,12 @@ export type PlanDirection = 'buy' | 'hold' | 'reduce' | 'sell' | 'watch';
 /** 标的项盘中状态 */
 export type PlanItemStatus = 'pending' | 'triggered' | 'done' | 'invalid';
 
-/** 标的来源（体现「研报/热点/板块/持仓/自选」串联） */
+/** 标的来源（体现「研报/热点/板块/选股/持仓/自选」串联） */
 export type PlanItemSource =
   | 'research'
   | 'hotspot'
   | 'sector'
+  | 'screener'
   | 'position'
   | 'watchlist'
   | 'other';
@@ -2106,10 +2320,15 @@ export interface PlanTrigger {
   note?: string;
 }
 
+/** 今日择时档位：进攻 / 均衡 / 防守（大盘走势+资金+情绪+外盘综合定档，约束个股与 ETF 的方向与仓位） */
+export type TimingLevel = 'attack' | 'balanced' | 'defense';
+
 /** 大盘研判 */
 export interface MarketStance {
   /** 方向 */
   bias: 'bull' | 'bear' | 'neutral';
+  /** 今日择时档位（前提闸门）：进攻可正常 buy / 均衡精选 / 防守禁新开多。缺省按 bias 推断 */
+  timingLevel?: TimingLevel;
   /** 建议仓位 %（0-100） */
   positionPct: number;
   /** 关键支撑位（文本，如「上证 3380」） */
@@ -2143,7 +2362,13 @@ export interface DailyPlanItem {
   stopLoss: PlanTrigger | null;
   takeProfit: PlanTrigger | null;
   positionHint: string;
+  /** 右侧确认条件（个股突破确认 / ETF 回踩转强等，盘中据此判断是否真正介入） */
+  confirmConditions: string[];
+  /** 逻辑失效条件（满足则当天取消计划/降级，供盘中纠偏与收盘复盘对照） */
+  invalidConditions: string[];
   source: PlanItemSource;
+  /** 计划 agent 对该标的的综合置信度 0-100（盘前生成时打分；null=未给），与仅个股辩论后才有的 debateConfidence 语义不同 */
+  confidence: number | null;
   priority: number;
   status: PlanItemStatus;
   lastNote: string | null;
@@ -2645,7 +2870,9 @@ export type ScreenFactorKey =
   | 'size'
   | 'momentum'
   | 'activity'
-  | 'themeHeat';
+  | 'themeHeat'
+  | 'trend'
+  | 'fundFlow';
 
 /** 选股因子中文标签（前端展示） */
 export const SCREEN_FACTOR_LABELS: Record<ScreenFactorKey, string> = {
@@ -2655,7 +2882,19 @@ export const SCREEN_FACTOR_LABELS: Record<ScreenFactorKey, string> = {
   momentum: '动量',
   activity: '活跃度',
   themeHeat: '题材热度',
+  trend: '趋势',
+  fundFlow: '资金流',
 };
+
+/** 自然语言选股预设（nl 链路：一段自然语言 keyword 直喂妙想 mx_screener，与战法定时任务同源） */
+export interface ScreenNlStrategy {
+  id: string;
+  name: string;
+  /** 预设说明 */
+  description: string;
+  /** 自然语言选股 keyword（前端「选股口径」展示，亦为战法买入关联的指标口径） */
+  keyword: string;
+}
 
 /** 选股策略（内置 TS 常量；前端下拉与 agent 入参用 id 引用） */
 export interface ScreenStrategy {
@@ -2665,6 +2904,8 @@ export interface ScreenStrategy {
   description: string;
   /** 各因子权重（0-1，内部归一化；缺省因子按 0 处理） */
   factorWeights: Partial<Record<ScreenFactorKey, number>>;
+  /** 硬筛 + 理想点的人话口径（前端「指标口径」展示，如「成交额≥2亿」「动量理想+4%」） */
+  criteria: string[];
 }
 
 /** 单只候选的某因子得分（0-100，便于前端迷你条/雷达展示） */
@@ -2745,13 +2986,38 @@ export interface ScreenRunDetail extends ScreenRun {
   picks: ScreenPick[];
 }
 
+/** 选股链路实时进度阶段（快照→硬筛→打分→二段增强→LLM 横排） */
+export type ScreenProgressStage = 'snapshot' | 'filter' | 'score' | 'enrich' | 'rank';
+
+/** 一条选股进度事件（后端逐阶段经 WebSocket 推送，前端展示步进与实时只数） */
+export interface ScreenProgressEvent {
+  stage: ScreenProgressStage;
+  /** 中文阶段名（前端步进条直接展示） */
+  label: string;
+  status: 'running' | 'done';
+  /** 全市场快照只数（snapshot 阶段回填） */
+  marketCount?: number;
+  /** 硬筛后候选只数（filter 阶段回填） */
+  filteredCount?: number;
+  /** LLM 候选池只数（score/rank 阶段回填） */
+  poolCount?: number;
+  /** 运行模式备注（如「盘前模式」「已放宽硬筛」） */
+  note?: string;
+}
+
 // ===== 结构化市场主线（market_themes 模块）=====
 
 /** 主线状态：active 活跃 / fading 退潮中 / archived 归档 */
 export type MarketThemeStatus = 'active' | 'fading' | 'archived';
 
+/** 主线生命周期阶段（由复盘验证回流写入） */
+export type ThemePhase = '启动' | '加速' | '分歧' | '退潮' | '未知';
+
+/** 复盘对单条共享主线的验证结论 */
+export type ThemeVerdict = '延续' | '加速' | '分歧' | '退潮' | '证伪';
+
 /** 主线信号来源：复盘计划 / 热点雷达 / 研报 */
-export type ThemeSource = 'review' | 'hotspot' | 'research';
+export type ThemeSource = 'board' | 'review' | 'hotspot' | 'research';
 
 /** 主线证据（逐条留痕，含来源与时间） */
 export interface ThemeEvidence {
@@ -2771,6 +3037,8 @@ export interface MarketTheme {
   /** 强度 0-100（多源叠加，越高越强） */
   strength: number;
   status: MarketThemeStatus;
+  /** 生命周期阶段（复盘验证回流写入，默认「未知」） */
+  phase: ThemePhase;
   /** 命中过的来源集合 */
   sources: ThemeSource[];
   /** 证据要点（最近若干条） */
@@ -2815,14 +3083,136 @@ export interface CockpitEvent {
   name?: string | null;
 }
 
-/** 驾驶舱一屏概览：安全状态 + 当日计划兑现 + 强势主线 + 事件时间线 */
+/** 驾驶舱当日计划定调（直达计划全文用的轻量摘要） */
+export interface CockpitPlanStance {
+  /** 计划状态：draft/active/closed */
+  status: PlanStatus;
+  /** 大盘方向（无 marketStance 时为 null） */
+  bias: 'bull' | 'bear' | 'neutral' | null;
+  /** 建议仓位 %（无 marketStance 时为 null） */
+  positionPct: number | null;
+  /** 一句话定调（无 marketStance 时为空串） */
+  summary: string;
+}
+
+/**
+ * 结构化消息催化记录（情报研判落库 → 今日计划读取）：按题材去重，
+ * 追踪首次出现/重复次数/是否发酵，供选股识别「起爆前·未发酵」催化主线。
+ */
+export interface NewsCatalyst {
+  id: string;
+  /** 题材/板块名（去重键） */
+  theme: string;
+  /** 催化类型：政策/订单/事件/业绩/资金等（可空） */
+  catalystType: string | null;
+  /** 受益方向描述（可空） */
+  direction: string | null;
+  /** 相关标的（代码或名称） */
+  codes: string[];
+  /** 预计兑现/发酵时间窗描述（可空） */
+  catalystWindow: string | null;
+  /** 首次出现日 YYYY-MM-DD */
+  firstSeenDate: string;
+  /** 最近出现日 YYYY-MM-DD */
+  lastSeenDate: string;
+  /** 累计出现次数 */
+  seenCount: number;
+  /** 是否已发酵/高位（true=追高风险；false=起爆前未发酵） */
+  fermented: boolean;
+  /** 已兑现涨幅 %（可空） */
+  realizedPct: number | null;
+  /** 催化要点/备注（可空） */
+  note: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 一键计划编排单步状态：pending 待执行 / running 进行中 / success 成功 / error 失败（尽力而为继续） / skipped 跳过 */
+export type OneClickStepState = 'pending' | 'running' | 'success' | 'error' | 'skipped';
+
+/** 一键计划编排单步快照 */
+export interface OneClickStepStatus {
+  /** 步骤标识：intel/market-board/etf/screener/plan */
+  key: string;
+  /** 步骤展示名 */
+  label: string;
+  status: OneClickStepState;
+  /** 关联的 taskRun id（选股步为 screen_runs id，可空） */
+  runId: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  /** 失败原因（status=error 时） */
+  error: string | null;
+}
+
+/** 一键计划编排运行态（内存单例快照，供前端轮询渲染管线进度） */
+export interface OneClickRunState {
+  /** 是否正在运行 */
+  running: boolean;
+  startedAt: string | null;
+  finishedAt: string | null;
+  steps: OneClickStepStatus[];
+}
+
+/** 写入/更新一条催化记录的入参（按 theme upsert） */
+export interface NewsCatalystInput {
+  theme: string;
+  catalystType?: string | null;
+  direction?: string | null;
+  codes?: string[];
+  catalystWindow?: string | null;
+  fermented?: boolean;
+  realizedPct?: number | null;
+  note?: string | null;
+}
+
+/** 驾驶舱模块总结卡：消费各模块【最新一次持久化产出】，秒开展示摘要并可跳全文 */
+export interface CockpitModuleSummary {
+  /** 模块标识：intel/market-board/review/etf/plan/screener */
+  key: string;
+  /** 卡片标题 */
+  title: string;
+  /** 「查看全文」跳转的前端路由 path */
+  route: string;
+  /** 路由 query（如复盘/情报页的 tab），可空 */
+  routeQuery?: Record<string, string>;
+  /** 一句话定调/头条（结构化产出可提炼，否则为空串） */
+  headline: string;
+  /** 摘要正文（首段或截断），无产出时给缺失说明 */
+  excerpt: string;
+  /** 产出时间 ISO（无产出为 null） */
+  createdAt: string | null;
+  /** 是否非当日产出（过期需注意时效） */
+  stale: boolean;
+}
+
+/** 驾驶舱精简选股候选（最新一次选股运行的前若干条，供一屏速览） */
+export interface CockpitScreenerPick {
+  rank: number;
+  code: string;
+  name: string;
+  /** 确定性多因子分 0-100 */
+  screenScore: number;
+  /** LLM 横排信心 0-100（未跑 LLM 为 null） */
+  confidence: number | null;
+  /** 一句话选股逻辑（未跑 LLM 为 null） */
+  thesis: string | null;
+}
+
+/** 驾驶舱一屏概览：安全状态 + 当日计划兑现 + 强势主线 + 模块总结 + 选股候选 + 事件时间线 */
 export interface CockpitOverview {
   asOf: string;
   safety: SafetyState;
   /** 当日计划兑现（无当日计划时为 null） */
   plan: PlanFulfillment | null;
+  /** 当日计划定调（无当日计划时为 null），供驾驶舱直达计划全文 */
+  planStance: CockpitPlanStance | null;
   /** 强度最高的若干活跃主线 */
   themes: MarketTheme[];
+  /** 各模块最新产出摘要卡 */
+  modules: CockpitModuleSummary[];
+  /** 最新一次选股运行的精简候选（无运行为空数组） */
+  screenerPicks: CockpitScreenerPick[];
   /** 合并后的最近事件时间线（按时间倒序） */
   events: CockpitEvent[];
 }

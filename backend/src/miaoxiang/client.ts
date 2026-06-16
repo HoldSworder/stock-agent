@@ -54,6 +54,16 @@ function isSuccessCode(code: unknown): boolean {
   return code === 200 || code === '200';
 }
 
+/**
+ * 数据接口成功 code 判定（比模拟盘宽松）。
+ * 老门户数据接口（选股 stock-screen / 资讯 news-search）成功返回 code=0 message=ok，
+ * 而非模拟盘的 200；这里同时接受 0/200（及空 code），与新门户 searchData 的成功语义一致，
+ * 避免把正常的选股/资讯响应误判为「非成功」反复重试后抛错。
+ */
+function isDataSuccessCode(code: unknown): boolean {
+  return code == null || code === 0 || code === '0' || isSuccessCode(code);
+}
+
 // 妙想按 apikey 做全局限流（超频回 code=112「请求频率过高」）。这里把【所有】妙想请求
 // 串行化并施加最小间隔，从源头规避并发/高频触发限流；偶发 112 再由各调用的退避重试兜底。
 // 串行 + 间隔对 agent（几次调用）几乎无感，却能彻底消除「逐只并发查行情 / 分析与战法同步同时打」导致的 112。
@@ -116,9 +126,9 @@ function postData(url: string, body: unknown, signal?: AbortSignal): Promise<unk
       errorLabel: '妙想接口',
       makeError: (msg) => new MiaoxiangError(msg),
       validate: (json) =>
-        json.code != null && !isSuccessCode(json.code)
-          ? `妙想接口返回非成功 code=${String(json.code)} message=${String(json.message ?? '')}`
-          : null,
+        isDataSuccessCode(json.code)
+          ? null
+          : `妙想接口返回非成功 code=${String(json.code)} message=${String(json.message ?? '')}`,
     }),
   );
 }

@@ -16,7 +16,7 @@ import type {
 } from '@stock-agent/shared';
 import { getTrendsTencent, getIndicesTencent } from './tencent';
 import { requestJson } from '../datasource/httpClient';
-import { num, toSecid, PUSH2_QT } from '../datasource/codes';
+import { num, numOrNull, toSecid, PUSH2_QT } from '../datasource/codes';
 import { getQuotes as scheduleQuotes, getKline as scheduleKline } from '../datasource/scheduler';
 
 // 东方财富公开行情接口（push2）薄封装。无需鉴权，仅自用看盘/复盘。
@@ -553,18 +553,23 @@ export async function searchBoard(q: string, count = 8): Promise<StockSuggest[]>
   return out;
 }
 
-/** 板块涨幅榜（industry=行业 m:90 t:2 / concept=概念 m:90 t:3） */
+/** 板块涨幅榜（industry=行业 m:90 t:2 / concept=概念 m:90 t:3）。
+ * by=today 按当日涨幅(f3)排，mid60 按 60 日涨幅(f24)排取中线强势榜；两者均带 60日/年初至今多日字段。 */
 export async function getSectorRanking(
   kind: 'industry' | 'concept',
   n = 12,
+  by: 'today' | 'mid60' = 'today',
 ): Promise<SectorItem[]> {
   const t = kind === 'industry' ? 2 : 3;
-  const url = `${PUSH2}/clist/get?pn=1&pz=${n}&po=1&fid=f3&fltt=2&fs=m:90+t:${t}&fields=f3,f12,f14,f128,f140`;
+  const fid = by === 'mid60' ? 'f24' : 'f3';
+  const url = `${PUSH2}/clist/get?pn=1&pz=${n}&po=1&fid=${fid}&fltt=2&fs=m:90+t:${t}&fields=f3,f12,f14,f24,f25,f128,f140`;
   const json = await getJson(url);
   return toRows(json).map((r) => ({
     code: String(r.f12 ?? ''),
     name: String(r.f14 ?? ''),
     pct: num(r.f3),
+    ret60: numOrNull(r.f24),
+    ytd: numOrNull(r.f25),
     leadStock: String(r.f128 ?? ''),
     leadStockCode: String(r.f140 ?? ''),
   }));

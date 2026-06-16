@@ -3,20 +3,15 @@ import {
   Histogram,
   Memo,
   ChatDotRound,
-  Star,
   Wallet,
   DataAnalysis,
   Setting,
   Aim,
   TrendCharts,
-  Document,
-  Coin,
   Files,
   PieChart,
-  Connection,
   Opportunity,
   Cpu,
-  Delete,
   Compass,
   Odometer,
 } from '@element-plus/icons-vue';
@@ -48,10 +43,7 @@ const groups = [
     items: [
       { to: '/market', title: '大盘', desc: 'Market', icon: Histogram },
       { to: '/etf', title: 'ETF', desc: 'ETF', icon: PieChart },
-      { to: '/intel', title: '热点雷达', desc: 'Intel', icon: TrendCharts },
-      { to: '/themes', title: '市场主线', desc: 'Themes', icon: Connection },
-      { to: '/radar', title: '中线雷达', desc: 'Radar', icon: Aim },
-      { to: '/research', title: '研报', desc: 'Research', icon: Document },
+      { to: '/intel', title: '情报', desc: 'Intel', icon: TrendCharts },
     ],
   },
   {
@@ -69,8 +61,7 @@ const groups = [
     items: [
       { to: '/plan', title: '今日计划', desc: 'War Room', icon: Files },
       { to: '/watch', title: '实时盯盘', desc: 'Watch', icon: Aim },
-      { to: '/watchlist', title: '自选股', desc: 'Watchlist', icon: Star },
-      { to: '/positions', title: '真实持仓', desc: 'Positions', icon: Wallet },
+      { to: '/positions', title: '持仓与自选', desc: 'Account', icon: Wallet },
     ],
   },
   {
@@ -86,10 +77,7 @@ const groups = [
     desc: 'SYSTEM',
     items: [
       { to: '/core', title: '智能体中枢', desc: 'Core', icon: Cpu },
-      { to: '/datasource', title: '数据源', desc: 'Sources', icon: Connection },
-      { to: '/usage', title: '调用记录', desc: 'Usage', icon: Coin },
-      { to: '/ops', title: '运维', desc: 'Ops', icon: Delete },
-      { to: '/settings', title: '设置', desc: 'Config', icon: Setting },
+      { to: '/settings', title: '系统设置', desc: 'Config', icon: Setting },
     ],
   },
 ];

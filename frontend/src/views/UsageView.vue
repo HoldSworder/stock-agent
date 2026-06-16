@@ -23,6 +23,9 @@ const C = {
   palette: ['#f0b429', '#3b82f6', '#1fc77f', '#f6465d', '#a78bfa', '#22d3ee', '#fb923c', '#e879f9', '#94a3b8', '#34d399'],
 };
 
+// embedded：作为「智能体中枢」的 Tab 面板嵌入时隐藏自身 page-head。
+defineProps<{ embedded?: boolean }>();
+
 const days = ref(30);
 const summary = ref<UsageSummary | null>(null);
 const calls = ref<LlmCallRecord[]>([]);
@@ -189,8 +192,8 @@ const hasData = computed(() => (summary.value?.totals.calls ?? 0) > 0);
 </script>
 
 <template>
-  <div class="page" v-loading="loading">
-    <div class="page-head">
+  <div :class="{ page: !embedded }" v-loading="loading">
+    <div v-if="!embedded" class="page-head">
       <div class="page-title">调用记录</div>
       <div class="head-actions">
         <el-radio-group v-model="days" @change="load">
@@ -201,8 +204,17 @@ const hasData = computed(() => (summary.value?.totals.calls ?? 0) > 0);
         <el-button :icon="Refresh" @click="load">刷新</el-button>
       </div>
     </div>
-    <div class="page-sub">
+    <div v-if="!embedded" class="page-sub">
       统计本系统内所有 LLM 调用与 token 消耗，按用途区分（对话 / 复盘 / 盯盘 / 研报 / 定时任务等）
+    </div>
+    <div v-else class="embed-bar">
+      <span class="embed-sub">本系统内所有 LLM 调用与 token 消耗，按用途区分（对话 / 复盘 / 盯盘 / 研报 / 定时等）。</span>
+      <el-radio-group v-model="days" @change="load">
+        <el-radio-button :value="7">近 7 天</el-radio-button>
+        <el-radio-button :value="30">近 30 天</el-radio-button>
+        <el-radio-button :value="90">近 90 天</el-radio-button>
+      </el-radio-group>
+      <el-button :icon="Refresh" @click="load">刷新</el-button>
     </div>
 
     <!-- 总览卡片 -->
@@ -330,6 +342,17 @@ const hasData = computed(() => (summary.value?.totals.calls ?? 0) > 0);
   display: flex;
   align-items: center;
   gap: 10px;
+}
+.embed-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.embed-sub {
+  flex: 1;
+  font-size: 12.5px;
+  color: var(--text-2);
 }
 .page-sub {
   margin-top: 4px;

@@ -1,6 +1,7 @@
 import axios from 'axios';
 import type {
   AiAnalysisHistoryItem,
+  AiAnalysisKindInfo,
   ApiResult,
   AppSettings,
   AuthStatus,
@@ -10,6 +11,7 @@ import type {
   DailyPlanDetail,
   DailyPlanEvent,
   DailyPlanSummary,
+  OneClickRunState,
   PlanFulfillment,
   DataSourceConfigUpdate,
   DataSourceHealth,
@@ -23,7 +25,10 @@ import type {
   DecisionVerdictCache,
   EtfPoolItem,
   EtfOverview,
+  EtfRotationOverview,
   EtfSignalsResult,
+  SentimentOverview,
+  SentimentHistoryItem,
   RadarOverview,
   EtfStatus,
   HomeModule,
@@ -86,6 +91,7 @@ import type {
   TrendSummaryHistoryItem,
   TrendTopic,
   TrendsResult,
+  ClsTelegraph,
   WatchAlert,
   WatchConfig,
   WatchStats,
@@ -97,6 +103,7 @@ import type {
   WatchlistInput,
   WatchlistSyncResult,
   ScreenStrategy,
+  ScreenNlStrategy,
   ScreenRun,
   ScreenRunDetail,
   ScreenEngineInfo,
@@ -210,7 +217,18 @@ export const api = {
       unwrap<ThemesRefreshResult>(http.post('/themes/refresh', {}, { timeout: 60000 })),
     setStatus: (id: string, status: MarketThemeStatus) =>
       unwrap<MarketTheme>(http.put(`/themes/${id}`, { status })),
+    // 板块主线研判（agent 过滤层）：历史记录 + 按需触发
+    boardReviews: (limit?: number) =>
+      unwrap<ReviewHistoryItem[]>(http.get('/themes/board-reviews', { params: { limit } })),
+    boardReview: () =>
+      unwrap<{ runId: string; status: string; text: string }>(
+        http.post('/themes/board-review', {}, { timeout: 420000 }),
+      ),
   },
+
+  // 统一 AI 分析中心目录（全部 kind + 最新结论摘要；驾驶舱中心渲染）
+  analysisCatalog: () =>
+    unwrap<AiAnalysisKindInfo[]>(http.get('/analyses', { timeout: 20000 })),
 
   // 公共 AI 分析历史（按 kind + 可选 refKey 作用域；流式发起走 WS /ws/analyze）
   // all=true 时忽略 refKey，返回该 kind 全部历史（跨标的全局视图）
@@ -275,10 +293,6 @@ export const api = {
     unwrap<{ runId: string; status: string; text: string }>(
       http.post('/market/review', {}, { timeout: 300000 }),
     ),
-  marketReviewFuturesOverseas: () =>
-    unwrap<{ runId: string; status: string; text: string }>(
-      http.post('/market/review/futures-overseas', {}, { timeout: 300000 }),
-    ),
   listReviews: (limit?: number) =>
     unwrap<ReviewHistoryItem[]>(http.get('/reviews', { params: { limit } })),
 
@@ -294,6 +308,8 @@ export const api = {
       description?: string | null;
       skillEnabled?: boolean;
       autoSimEnabled?: boolean;
+      screenEngine?: string | null;
+      screenStrategyId?: string | null;
     },
   ) => unwrap<Strategy>(http.put(`/strategies/${id}`, body)),
   deleteStrategy: (id: string) => unwrap<void>(http.delete(`/strategies/${id}`)),
@@ -363,6 +379,12 @@ export const api = {
       ),
   },
 
+  // 财联社电报（签名直连，失效降级 AKShare 多源）：返回全量带 important，前端本地切换全部/重点
+  cls: {
+    telegraph: (limit = 50) =>
+      unwrap<ClsTelegraph[]>(http.get('/cls/telegraph', { params: { limit }, timeout: 30000 })),
+  },
+
   // 研报（东方财富研报中心）
   research: {
     status: () => unwrap<ResearchStatus>(http.get('/research/status', { timeout: 20000 })),
@@ -406,6 +428,7 @@ export const api = {
         defaultStrategyId: string;
         defaultTopN: number;
         recentRuns: ScreenRun[];
+        nlStrategies: ScreenNlStrategy[];
       }>(http.get('/screener/status', { timeout: 20000 })),
     saveConfig: (body: { strategyId?: string; topN?: number }) =>
       unwrap<{ strategyId: string; topN: number }>(http.put('/screener/config', body)),
@@ -453,6 +476,25 @@ export const api = {
   // 中线雷达（行业强弱 + 持仓趋势 + 候选池，确定性只读）
   radar: {
     overview: () => unwrap<RadarOverview>(http.get('/radar/overview', { timeout: 60000 })),
+  },
+
+  // M1 ETF 行业轮动（确定性轮动榜 + agent 过滤研判）
+  rotation: {
+    overview: () => unwrap<EtfRotationOverview>(http.get('/rotation/overview', { timeout: 60000 })),
+    reviews: (limit?: number) =>
+      unwrap<ReviewHistoryItem[]>(http.get('/rotation/reviews', { params: { limit } })),
+    review: () =>
+      unwrap<{ runId: string; status: string; text: string }>(
+        http.post('/rotation/review', {}, { timeout: 420000 }),
+      ),
+  },
+
+  // S1 市场情绪周期（确定性 0-100 情绪指数 + 周期阶段 + 历史趋势）
+  sentiment: {
+    overview: () =>
+      unwrap<SentimentOverview>(http.get('/sentiment/overview', { timeout: 60000 })),
+    history: (limit?: number) =>
+      unwrap<SentimentHistoryItem[]>(http.get('/sentiment/history', { params: { limit } })),
   },
 
   // 数据源中心（统一管理外部取数：健康/配置/启停/统计）
@@ -548,6 +590,15 @@ export const api = {
       unwrap<{ runId: string; status: string; text: string }>(
         http.post(`/plan/${date}/regenerate`, {}, { timeout: 600000 }),
       ),
+    reevaluate: () =>
+      unwrap<{ runId: string; status: string; text: string }>(
+        http.post('/plan/reevaluate', {}, { timeout: 600000 }),
+      ),
+    // 一键计划：后台串行刷新六源 + 生成计划，立即返回初始态，前端轮询 oneclickStatus 跟进
+    oneclickStart: () =>
+      unwrap<OneClickRunState>(http.post('/plan/oneclick', {}, { timeout: 20000 })),
+    oneclickStatus: () =>
+      unwrap<OneClickRunState>(http.get('/plan/oneclick', { timeout: 20000 })),
   },
 
   // 模块内定时（各模块自管，module 为 API 前缀：trendradar/review/research/market）

@@ -1,12 +1,19 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { useRouter } from 'vue-router';
 import dayjs from 'dayjs';
 import { ElMessage } from 'element-plus';
-import { Refresh, MagicStick, Setting } from '@element-plus/icons-vue';
+import { Refresh, MagicStick, Setting, TopRight } from '@element-plus/icons-vue';
 import { api } from '@/api';
+import { useCachedResource } from '@/composables/useCachedResource';
+import AiAnalysisDialog from '@/components/AiAnalysisDialog.vue';
 import ModuleScheduleDialog from '@/components/ModuleScheduleDialog.vue';
 import MarkdownView from '@/components/MarkdownView.vue';
 import StockLink from '@/components/StockLink.vue';
+import BoardReviewConclusion from '@/components/BoardReviewConclusion.vue';
+import BoardStrengthPanel from '@/components/BoardStrengthPanel.vue';
+import MarketThemesPanel from '@/components/MarketThemesPanel.vue';
+import SentimentPanel from '@/components/SentimentPanel.vue';
 import { useKlineStore } from '@/stores/kline';
 import type {
   FuturesItem,
@@ -14,25 +21,30 @@ import type {
   HomeModule,
   MarketIndex,
   MarketOverview,
-  RealPortfolio,
-  WatchlistEntry,
 } from '@stock-agent/shared';
 
 const kline = useKlineStore();
+const router = useRouter();
 const openIndexKline = (ix: MarketIndex) => kline.open(ix.code, ix.name, ix.secid);
 
-const ov = ref<MarketOverview | null>(null);
-const loading = ref(false);
+// 大盘快照走 SWR 缓存：重进页面瞬显上次结果，3s 轮询变为「按 TTL 的廉价新鲜度检查」（未过期不发请求）
+const {
+  data: ov,
+  loading,
+  refreshing,
+  load,
+  reload,
+} = useCachedResource<MarketOverview>('market:overview', () => api.getMarketOverview(), {
+  ttlMs: 60_000,
+});
 const sectorTab = ref<'industry' | 'concept'>('industry');
-// 顶层分块 Tab：A股大盘 / 期货价格 / 外盘
-const tab = ref<'astock' | 'futures' | 'overseas'>('astock');
+// 顶层分块 Tab：A股大盘 / 行业中线·市场主线 / 期货价格 / 外盘
+// （中线雷达、市场主线已合并为单一 Tab：共用「板块主线研判」agent 结论 + 主线卡片 + 中线强弱表双明细下钻）
+const tab = ref<'astock' | 'sentiment' | 'board' | 'futures' | 'overseas'>('astock');
 
-const reviewing = ref(false);
+// 大盘与板块研判（合并大盘复盘 + 板块主线）发起统一走 AiAnalysisDialog（kind=market-board），内嵌展示最新一条
+const reviewOpen = ref(false);
 const review = ref('');
-
-// 期货 + 外盘复盘（盘前），与大盘复盘分离
-const reviewingFO = ref(false);
-const reviewFO = ref('');
 
 // 模块显隐
 const modules = ref<HomeModule[]>([]);
@@ -41,21 +53,18 @@ const draft = ref<Record<string, boolean>>({});
 const savingModules = ref(false);
 const enabled = (id: string) => modules.value.find((m) => m.id === id)?.enabled ?? false;
 
-// mine 模块数据（自选股 + 真实持仓），按需懒加载
-const watch = ref<WatchlistEntry[] | null>(null);
-const portfolio = ref<RealPortfolio | null>(null);
-const mineLoading = ref(false);
+// 「我的标的」已迁移至「持仓与自选」页，此处去重，仅保留模块开关与入口提示
+function goAccount() {
+  void router.push('/positions');
+}
 
-async function load(silent = false) {
-  if (!silent) loading.value = true;
+// 刷新按钮：强制拉最新（无视 TTL）；失败弹提示。初次/轮询走缓存与静默刷新，不打扰。
+async function refresh() {
   try {
-    ov.value = await api.getMarketOverview();
+    await reload();
   } catch (e) {
-    if (!silent) ElMessage.error(e instanceof Error ? e.message : String(e));
-  } finally {
-    if (!silent) loading.value = false;
+    ElMessage.error(e instanceof Error ? e.message : String(e));
   }
-  if (enabled('mine')) void loadMine(silent);
 }
 
 async function loadModules() {
@@ -63,22 +72,6 @@ async function loadModules() {
     modules.value = await api.getMarketModules();
   } catch {
     /* 配置拉取失败时全部按默认显示，不阻塞盘面 */
-  }
-}
-
-async function loadMine(silent = false) {
-  if (mineLoading.value) return;
-  mineLoading.value = true;
-  try {
-    // 自选股走东财（轻量，可随 3s 轮询刷新）；真实持仓走同花顺，仅在非静默时刷新，避免高频打接口
-    const w = await api.listWatchlist().catch(() => null);
-    if (w) watch.value = w;
-    if (!silent) {
-      const p = await api.getRealPositions().catch(() => null);
-      if (p) portfolio.value = p;
-    }
-  } finally {
-    mineLoading.value = false;
   }
 }
 
@@ -93,7 +86,6 @@ async function saveModules() {
     modules.value = await api.updateMarketModules({ ...draft.value });
     drawer.value = false;
     ElMessage.success('模块配置已保存');
-    if (enabled('mine') && !watch.value && !portfolio.value) void loadMine();
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : String(e));
   } finally {
@@ -101,29 +93,18 @@ async function saveModules() {
   }
 }
 
-async function runReview() {
-  reviewing.value = true;
-  review.value = '';
-  try {
-    const r = await api.marketReview();
-    review.value = r.text || '（无输出）';
-  } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : String(e));
-  } finally {
-    reviewing.value = false;
-  }
+// 弹窗关闭后刷新内嵌最新复盘点评
+function onReviewDialog(open: boolean) {
+  reviewOpen.value = open;
+  if (!open) void loadLatestReview();
 }
 
-async function runReviewFO() {
-  reviewingFO.value = true;
-  reviewFO.value = '';
+async function loadLatestReview() {
   try {
-    const r = await api.marketReviewFuturesOverseas();
-    reviewFO.value = r.text || '（无输出）';
-  } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : String(e));
-  } finally {
-    reviewingFO.value = false;
+    const list = await api.listAnalyses('market-board', undefined, 1, true);
+    if (list.length > 0) review.value = list[0].content;
+  } catch {
+    /* 静默 */
   }
 }
 
@@ -169,8 +150,14 @@ const overseasGroups = computed<{ group: string; items: GlobalIndex[] }[]>(() =>
 let timer: ReturnType<typeof setInterval> | undefined;
 onMounted(async () => {
   await loadModules();
-  await load();
-  timer = setInterval(() => load(true), 3000);
+  try {
+    await load();
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : String(e));
+  }
+  void loadLatestReview();
+  // 轮询不强刷：仅按 TTL 检查新鲜度，未过期是纯内存命中（不发请求），过期则后台静默刷新一次
+  timer = setInterval(() => void load(), 3000);
 });
 onUnmounted(() => {
   if (timer) clearInterval(timer);
@@ -184,7 +171,8 @@ onUnmounted(() => {
       <div class="head-actions">
         <el-button :icon="Setting" @click="openDrawer">模块管理</el-button>
         <ModuleScheduleDialog module="market" />
-        <el-button :icon="Refresh" :loading="loading" @click="load()">刷新</el-button>
+        <ModuleScheduleDialog module="themes" />
+        <el-button :icon="Refresh" :loading="loading || refreshing" @click="refresh">刷新</el-button>
       </div>
     </div>
     <div class="page-sub">
@@ -199,8 +187,8 @@ onUnmounted(() => {
       <!-- ===== A股大盘 ===== -->
       <el-tab-pane label="A股大盘" name="astock">
         <div class="tab-actions">
-          <el-button :icon="MagicStick" type="primary" :loading="reviewing" @click="runReview">
-            一键 AI 大盘复盘点评
+          <el-button :icon="MagicStick" type="primary" @click="reviewOpen = true">
+            一键 AI 大盘与板块研判
           </el-button>
         </div>
 
@@ -260,14 +248,19 @@ onUnmounted(() => {
         </template>
       </div>
 
-      <!-- AI 复盘点评 -->
-      <div v-if="reviewing || review" class="review">
+      <!-- AI 大盘与板块研判（最新一条；发起 / 历史走统一弹窗） -->
+      <div v-if="review" class="review">
         <div class="review-head">
-          <el-icon><MagicStick /></el-icon> AI 复盘点评
+          <el-icon><MagicStick /></el-icon> AI 大盘与板块研判
         </div>
-        <div v-if="reviewing" class="review-loading">正在结合盘面生成点评…</div>
-        <MarkdownView v-else :source="review" />
+        <MarkdownView :source="review" />
       </div>
+      <AiAnalysisDialog
+        :model-value="reviewOpen"
+        kind="market-board"
+        title="大盘与板块研判"
+        @update:model-value="onReviewDialog"
+      />
 
       <!-- 涨停板梯队 -->
       <div v-if="enabled('ladder')" class="panel block">
@@ -407,45 +400,35 @@ onUnmounted(() => {
           </el-table>
         </div>
 
-        <!-- mine：自选股 / 真实持仓今日表现 -->
-        <div v-if="enabled('mine')" class="panel">
+        <!-- mine：已迁移至「持仓与自选」页，去重后仅保留入口提示（模块开关仍可在模块管理中关闭） -->
+        <div v-if="enabled('mine')" class="panel mine-moved" @click="goAccount">
           <div class="panel-head">
-            <span class="panel-title">我的标的 · 今日表现</span>
-            <el-button text size="small" :loading="mineLoading" @click="loadMine">刷新</el-button>
+            <span class="panel-title">我的标的</span>
           </div>
-          <div v-if="portfolio" class="mine-port">
-            <span>持仓市值 <b class="num">{{ fixed(portfolio.totalMarketValue) }}</b></span>
-            <span
-              >今日盈亏
-              <b class="num" :class="dir(portfolio.totalTodayProfit)">{{
-                fixed(portfolio.totalTodayProfit)
-              }}</b></span
-            >
+          <div class="mine-moved-body">
+            <span>持仓与自选已统一迁移至「持仓与自选」页，点此查看实时持仓 / 场外基金 / 自选分组</span>
+            <el-button type="primary" link :icon="TopRight" @click.stop="goAccount">去账户页</el-button>
           </div>
-          <div class="mine-cap">自选股</div>
-          <div v-for="w in watch ?? []" :key="w.code" class="flow-row">
-            <StockLink class="flow-name" :code="w.code" :name="w.name" />
-            <span v-if="w.quote" class="num" :class="dir(w.quote.pct)">{{ pct(w.quote.pct) }}</span>
-            <span v-else class="num muted">—</span>
-          </div>
-          <el-empty v-if="!watch?.length && !portfolio" :image-size="44" description="暂无自选/持仓" />
         </div>
       </div>
+      </el-tab-pane>
+
+      <!-- ===== 情绪周期（S1 短线择时总开关）===== -->
+      <el-tab-pane label="情绪周期" name="sentiment" lazy>
+        <SentimentPanel />
+      </el-tab-pane>
+
+      <!-- ===== 行业中线 / 市场主线（合并：中线雷达 + 市场主线）===== -->
+      <el-tab-pane label="行业中线 / 市场主线" name="board" lazy>
+        <BoardReviewConclusion />
+        <MarketThemesPanel />
+        <BoardStrengthPanel />
       </el-tab-pane>
 
       <!-- ===== 期货价格 ===== -->
       <el-tab-pane label="期货价格" name="futures">
         <div class="tab-actions">
-          <el-button :icon="MagicStick" type="primary" :loading="reviewingFO" @click="runReviewFO">
-            一键 AI 期货+外盘复盘点评
-          </el-button>
-          <span class="tab-tip">盘前定调：商品价格传导 + 隔夜外盘</span>
-        </div>
-
-        <div v-if="reviewingFO || reviewFO" class="review">
-          <div class="review-head"><el-icon><MagicStick /></el-icon> 期货 + 外盘复盘点评</div>
-          <div v-if="reviewingFO" class="review-loading">正在结合期货与外盘生成点评…</div>
-          <MarkdownView v-else :source="reviewFO" />
+          <span class="tab-tip">期货+外盘的 AI 传导研判已并入「大盘与板块研判」一键点评</span>
         </div>
 
         <template v-if="enabled('futures')">
@@ -471,16 +454,7 @@ onUnmounted(() => {
       <!-- ===== 外盘 ===== -->
       <el-tab-pane label="外盘" name="overseas">
         <div class="tab-actions">
-          <el-button :icon="MagicStick" type="primary" :loading="reviewingFO" @click="runReviewFO">
-            一键 AI 期货+外盘复盘点评
-          </el-button>
-          <span class="tab-tip">盘前定调：商品价格传导 + 隔夜外盘</span>
-        </div>
-
-        <div v-if="reviewingFO || reviewFO" class="review">
-          <div class="review-head"><el-icon><MagicStick /></el-icon> 期货 + 外盘复盘点评</div>
-          <div v-if="reviewingFO" class="review-loading">正在结合期货与外盘生成点评…</div>
-          <MarkdownView v-else :source="reviewFO" />
+          <span class="tab-tip">期货+外盘的 AI 传导研判已并入「大盘与板块研判」一键点评</span>
         </div>
 
         <template v-if="enabled('globalIndices')">
@@ -754,11 +728,21 @@ onUnmounted(() => {
   grid-template-columns: 1fr 1fr;
   gap: 14px;
 }
-.col-cap,
-.mine-cap {
+.col-cap {
   font-size: 12px;
   color: var(--text-2);
   margin-bottom: 6px;
+}
+.mine-moved {
+  cursor: pointer;
+}
+.mine-moved-body {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--text-2);
 }
 .flow-row {
   display: flex;
@@ -775,16 +759,6 @@ onUnmounted(() => {
 }
 .muted {
   color: var(--text-2);
-}
-.mine-port {
-  display: flex;
-  gap: 18px;
-  font-size: 13px;
-  color: var(--text-2);
-  margin-bottom: 10px;
-}
-.mine-cap {
-  margin-top: 4px;
 }
 .mod-list {
   display: flex;

@@ -38,7 +38,15 @@ import {
   triggerTask,
   catchUpMissedRuns,
 } from './scheduler';
-import { listRuns, listRunsByTaskIds, getRun, listReviews, reconcileOrphanRuns } from './repo';
+import {
+  listRuns,
+  listRunsByTaskIds,
+  getRun,
+  listReviews,
+  reconcileOrphanRuns,
+  cancelRunningRunsOnShutdown,
+} from './repo';
+import { sqlite } from './db/client';
 import { getUsageSummary, listLlmCalls } from './usage';
 import { fetchRealPositions } from './realPositions';
 import {
@@ -50,11 +58,12 @@ import {
 } from './market/eastmoney';
 import {
   buildOverview,
-  buildMarketReviewPrompt,
-  buildFuturesOverseasReviewPrompt,
+  buildMarketBoardPrompt,
+  MARKET_BOARD_TASK_NAME,
 } from './market/overview';
 import { getModules, setModules } from './market/modules';
 import { registerMarketSchedule } from './market/schedule';
+import { cached } from './lib/ttlCache';
 import { listWatch, addWatch, updateWatch, removeWatch, removeTagFromAll } from './watchlist';
 import { syncFavorites, pushTagsDiff, pushRemove, pushDeleteGroup } from './thsFavorites';
 import { pushToIdingpan } from './idingpan';
@@ -107,6 +116,7 @@ import { subscribe } from './ws';
 import { registerWatchModule, startWatchEngine } from './watch';
 import { registerTrendRadarModule } from './trendradar';
 import { registerResearchModule } from './research';
+import { registerClsModule } from './cls';
 import { registerPlanModule } from './plan';
 import { registerEtfModule } from './etf';
 import { registerDataSourceModule } from './datasource';
@@ -123,8 +133,9 @@ import { SafetyError } from './safety/guard';
 import { registerPositionsModule } from './positions';
 import { registerThemesModule } from './themes';
 import { registerRadarModule } from './radar';
+import { registerRotationModule } from './rotation';
+import { registerSentimentModule } from './sentiment';
 import { registerCockpitModule } from './cockpit';
-import { buildDeepReviewPrompt } from './review/service';
 import { catchUpModuleMissedRuns } from './scheduling/moduleScheduler';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -307,7 +318,11 @@ async function main() {
 
   // ===== 大盘看盘 =====
   // buildOverview / buildMarketReviewPrompt 已抽至 ./market/overview，供本处与定时复盘共用
-  app.get('/api/market/overview', async () => ({ ok: true, data: await buildOverview() }));
+  // 响应级 60s 缓存：聚合 ~13 个东财接口，重进页面/多端共享同一快照（定时/agent 直连 buildOverview 不受影响）
+  app.get('/api/market/overview', async () => ({
+    ok: true,
+    data: await cached('market:overview', 60_000, buildOverview),
+  }));
 
   // 复盘历史（成功的「一键复盘」运行）
   app.get<{ Querystring: { limit?: string } }>('/api/reviews', (req) => ({
@@ -322,47 +337,19 @@ async function main() {
     data: setModules(req.body ?? {}),
   }));
 
-  // 一键 AI 复盘点评：以当前盘面为上下文跑 agent
+  // 一键 AI 大盘与板块研判：以当前盘面为上下文跑 agent（合并大盘复盘 + 板块主线）
   app.post('/api/market/review', async (_req, reply) => {
     try {
       const ov = await buildOverview();
       const result = await runTask(
         {
           id: null,
-          name: '大盘复盘点评',
-          prompt: buildMarketReviewPrompt(ov),
-          modelConfig: { thinking: false, maxSteps: 10 },
+          name: MARKET_BOARD_TASK_NAME,
+          prompt: await buildMarketBoardPrompt(ov),
+          modelConfig: { thinking: false, maxSteps: 12, maxTokens: 14000 },
           notifyChannels: ['webui'],
-          timeoutSec: 300,
+          timeoutSec: 600,
           purpose: 'market-review',
-        },
-        'manual',
-      );
-      return {
-        ok: result.status === 'success',
-        data: { runId: result.runId, status: result.status, text: result.outputText },
-        error: result.status === 'success' ? undefined : `复盘点评未成功（${result.status}）`,
-      };
-    } catch (e) {
-      return reply
-        .code(502)
-        .send({ ok: false, error: e instanceof Error ? e.message : String(e) });
-    }
-  });
-
-  // 期货 + 外盘盘前复盘点评：聚焦商品期货与隔夜外盘对 A 股的传导
-  app.post('/api/market/review/futures-overseas', async (_req, reply) => {
-    try {
-      const ov = await buildOverview();
-      const result = await runTask(
-        {
-          id: null,
-          name: '期货+外盘复盘',
-          prompt: buildFuturesOverseasReviewPrompt(ov),
-          modelConfig: { thinking: false, maxSteps: 10 },
-          notifyChannels: ['webui'],
-          timeoutSec: 300,
-          purpose: 'futures-overseas-review',
         },
         'manual',
       );
@@ -431,6 +418,8 @@ async function main() {
       description?: string | null;
       skillEnabled?: boolean;
       autoSimEnabled?: boolean;
+      screenEngine?: string | null;
+      screenStrategyId?: string | null;
     };
   }>(
     '/api/strategies/:id',
@@ -995,52 +984,6 @@ async function main() {
     });
   });
 
-  // ===== WebSocket：一键复盘（流式）=====
-  // 以当前盘面快照 + 真实持仓为上下文跑 agent，强制输出结构化 JSON 供前端模块化渲染。
-  app.get('/ws/review', { websocket: true }, (socket) => {
-    socket.on('message', async (raw: Buffer) => {
-      let payload: { action?: string };
-      try {
-        payload = JSON.parse(raw.toString());
-      } catch {
-        socket.send(JSON.stringify({ type: 'error', message: '消息格式错误' }));
-        return;
-      }
-      if (payload.action !== 'generate') return;
-
-      const send = (e: StreamEvent) => {
-        try {
-          socket.send(JSON.stringify(e));
-        } catch {
-          /* socket 可能已关闭 */
-        }
-      };
-
-      // 上下文组装（盘面/持仓/自选/上次复盘）已抽至 ./review/service，供定时深度复盘共用
-      const prompt = await buildDeepReviewPrompt();
-
-      // 前端 run_finished 依赖先收到最终 message 才能解析结构化结果，故在此拦截 gateway 的
-      // run_finished，待补发 message 后再发，保证「message → run_finished」次序。
-      const onEvent = (e: StreamEvent) => {
-        if (e.type === 'run_finished') return;
-        send(e);
-      };
-      const result = await gateway.call({
-        mode: 'agent',
-        trigger: 'manual',
-        purpose: 'review',
-        taskName: '一键复盘',
-        prompt,
-        // 数据已预置，限制工具轮次以尽快收敛、避免超时；末步强制综合产出
-        modelConfig: { thinking: false, maxSteps: 8, maxTokens: 16000 },
-        timeoutSec: 420,
-        onEvent,
-      });
-      send({ type: 'message', role: 'assistant', content: result.outputText });
-      send({ type: 'run_finished', runId: result.runId ?? '', status: result.status });
-    });
-  });
-
   // ===== 静态前端（生产）=====
   const publicDir = resolve(__dirname, '../public');
   if (existsSync(publicDir)) {
@@ -1069,6 +1012,12 @@ async function main() {
   // 中线雷达模块（行业强弱+持仓趋势+候选池，确定性只读，独立，删除此行整模块下线）
   registerRadarModule(app);
 
+  // M1 ETF 行业轮动模块（确定性轮动榜 + agent 过滤研判，独立，删除此行整模块下线）
+  registerRotationModule(app);
+
+  // S1 市场情绪周期模块（确定性 0-100 情绪指数 + 周期阶段 + 收盘快照，纯只读，删除此行整模块下线）
+  registerSentimentModule(app);
+
   // 战法前向验证（收盘样本采集 + 前向统计 + 自动模拟总闸，自动买入默认关闭，删除此行整模块下线）
   registerStrategyForward(app);
 
@@ -1084,6 +1033,9 @@ async function main() {
 
   // 研报模块（独立，删除此行整模块下线）
   registerResearchModule(app);
+
+  // 财联社电报模块（独立，删除此行整模块下线）
+  registerClsModule(app);
 
   // 今日计划模块（独立，删除此行整模块下线）
   registerPlanModule(app);
@@ -1124,7 +1076,48 @@ async function main() {
   // 各模块定时注册完成后，做一次停机期间错过检查（仅提示不自动补跑）；不阻塞启动
   void catchUpModuleMissedRuns();
 
-  await app.listen({ port: config.port, host: '0.0.0.0' });
+  // 优雅关闭：开发热更新 / 手动重启发来的 SIGINT·SIGTERM，先关 HTTP 释放端口（根治新进程 EADDRINUSE），
+  // 再把在跑 run 标 canceled（区别真崩溃），最后 checkpoint 落库并退出。只执行一次。
+  let shuttingDown = false;
+  async function gracefulShutdown(signal: string): Promise<void> {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`[server] 收到 ${signal}，开始优雅关闭...`);
+    try {
+      await app.close();
+    } catch {
+      /* 关闭期异常忽略，继续后续清理 */
+    }
+    try {
+      const canceled = cancelRunningRunsOnShutdown();
+      if (canceled > 0) console.log(`[server] 已将 ${canceled} 个在跑运行标记为 canceled`);
+    } catch {
+      /* 标记失败不阻断退出 */
+    }
+    try {
+      sqlite.pragma('wal_checkpoint(TRUNCATE)');
+      sqlite.close();
+    } catch {
+      /* 关闭期异常忽略 */
+    }
+    process.exit(0);
+  }
+  for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(sig, () => void gracefulShutdown(sig));
+  }
+
+  try {
+    await app.listen({ port: config.port, host: '0.0.0.0' });
+  } catch (e) {
+    if ((e as { code?: string })?.code === 'EADDRINUSE') {
+      console.error(
+        `启动失败: 端口 ${config.port} 已被占用，可能有残留后端进程未退出。` +
+          `请先停掉旧进程（lsof -nP -iTCP:${config.port} -sTCP:LISTEN -t | xargs kill）后重试。`,
+      );
+      process.exit(1);
+    }
+    throw e;
+  }
   console.log(`[server] 监听 http://0.0.0.0:${config.port}`);
 }
 

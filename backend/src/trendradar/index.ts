@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import * as svc from './service';
 import { sendTelegram } from '../notify/telegram';
 import { defineModuleSchedules } from '../scheduling/defineModuleSchedules';
+import { cached } from '../lib/ttlCache';
 
 /** 生成热点研判并推送 Telegram（定时任务用） */
 async function runSummaryAndPush(type: 'daily' | 'weekly'): Promise<void> {
@@ -19,17 +20,13 @@ export function registerTrendRadarModule(app: FastifyInstance): void {
   const fail = (reply: FastifyReply, e: unknown) =>
     reply.code(502).send({ ok: false, error: e instanceof Error ? e.message : String(e) });
 
-  // 模块内定时（默认禁用，配置后到情报页启用）
+  // 模块内定时（默认禁用，配置后到情报页启用）。
+  // 合并：每日热点研判已并入「情报研判」（research 模块 8:00，研报+热点合一），此处下线 intel.daily 避免双跑；
+  // 仅保留周度热点研判（近一周底稿，周日推送），与每日情报研判不冲突。
   defineModuleSchedules({
     app,
     module: 'trendradar',
     jobs: [
-      {
-        id: 'intel.daily',
-        label: '每日热点 AI 研判',
-        defaultCron: '0 8 * * 1-5',
-        run: () => runSummaryAndPush('daily'),
-      },
       {
         id: 'intel.weekly',
         label: '周度热点 AI 研判',
@@ -50,7 +47,11 @@ export function registerTrendRadarModule(app: FastifyInstance): void {
       try {
         const top = Math.min(Math.max(Number(req.query?.top) || 10, 1), 50);
         const mode = req.query?.mode === 'daily' ? 'daily' : 'current';
-        return { ok: true, data: await svc.trending(top, mode) };
+        // 响应级 120s 缓存（key 含 mode+top）：热榜经 MCP 拉取，重进情报页免重复请求
+        const data = await cached(`trendradar:trending:${mode}:${top}`, 120_000, () =>
+          svc.trending(top, mode),
+        );
+        return { ok: true, data };
       } catch (e) {
         return fail(reply, e);
       }
@@ -65,7 +66,13 @@ export function registerTrendRadarModule(app: FastifyInstance): void {
         const platforms = req.query?.platforms
           ? req.query.platforms.split(',').map((s) => s.trim()).filter(Boolean)
           : undefined;
-        return { ok: true, data: await svc.latestNews(limit, platforms) };
+        // 响应级 120s 缓存（key 含 platforms+limit）：新闻流经 MCP 拉取，重进免重复请求
+        const data = await cached(
+          `trendradar:news:${platforms?.join(',') ?? 'all'}:${limit}`,
+          120_000,
+          () => svc.latestNews(limit, platforms),
+        );
+        return { ok: true, data };
       } catch (e) {
         return fail(reply, e);
       }
@@ -80,7 +87,13 @@ export function registerTrendRadarModule(app: FastifyInstance): void {
         const feeds = req.query?.feeds
           ? req.query.feeds.split(',').map((s) => s.trim()).filter(Boolean)
           : undefined;
-        return { ok: true, data: await svc.latestRss(days, feeds) };
+        // 响应级 120s 缓存（key 含 feeds+days）：RSS 经 MCP 拉取，重进免重复请求
+        const data = await cached(
+          `trendradar:rss:${feeds?.join(',') ?? 'all'}:${days}`,
+          120_000,
+          () => svc.latestRss(days, feeds),
+        );
+        return { ok: true, data };
       } catch (e) {
         return fail(reply, e);
       }

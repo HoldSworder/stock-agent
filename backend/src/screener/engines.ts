@@ -1,10 +1,23 @@
-import type { ScreenEngineInfo, ScreenPick, RunTrigger } from '@stock-agent/shared';
-import { fetchMarketSnapshot } from './snapshot';
-import { hardFilter } from './filter';
+import type {
+  ScreenEngineInfo,
+  ScreenPick,
+  RunTrigger,
+  ScreenProgressEvent,
+} from '@stock-agent/shared';
+import {
+  fetchMarketSnapshot,
+  isDegenerateSnapshot,
+  loadLastCloseSnapshot,
+  saveLastCloseSnapshot,
+  type SnapshotRow,
+} from './snapshot';
+import { hardFilter, type HardFilterMode } from './filter';
 import { buildThemeContext, scoreCandidates, type ScoredRow } from './scorer';
 import { rankCandidates } from './ranker';
 import { diversifyByIndustry, ruleRiskTags } from './risk';
-import { getStrategyDef } from './strategy';
+import { activeFactors, getStrategyDef } from './strategy';
+import { enrichTrendFactors } from './trend';
+import { nlEngine } from './nlEngine';
 
 // 选股链路（engine）注册表：选股页是「发现枢纽」，可承载多条选股链路。
 // 当前内置 multifactor（三层漏斗多因子）。新增链路时：实现一个 ScreenEngine 注册到 ENGINES，
@@ -32,6 +45,8 @@ export interface EngineRunInput {
   topN: number;
   useLlm: boolean;
   trigger: RunTrigger;
+  /** 进度回调（逐阶段上报；缺省即静默，cron/agent 调用不传） */
+  onProgress?: (e: ScreenProgressEvent) => void;
 }
 
 export interface ScreenEngine {
@@ -41,6 +56,28 @@ export interface ScreenEngine {
 
 /** LLM 横排候选池上限（控制 token；从打分 Top 截取） */
 const LLM_POOL_MAX = 40;
+
+/** 把运行模式说明拼到文案前缀（marketView/selectionLogic），便于前端识别降级来源 */
+function withModeNote(mode: string | null, text: string | null): string | null {
+  if (!mode) return text;
+  return text ? `（${mode}）${text}` : `（${mode}）`;
+}
+
+/**
+ * 逐级硬筛兜底：full → skipVolumePrice → tradableOnly。
+ * 返回首个非空结果及是否经过放宽（relaxed=true 表示未用 full 口径）。
+ */
+function applyHardFilterWithFallback(
+  snapshot: SnapshotRow[],
+  hardFilters: Parameters<typeof hardFilter>[1],
+): { filtered: SnapshotRow[]; relaxed: boolean } {
+  const modes: HardFilterMode[] = ['full', 'skipVolumePrice', 'tradableOnly'];
+  for (const mode of modes) {
+    const filtered = hardFilter(snapshot, hardFilters, mode);
+    if (filtered.length > 0) return { filtered, relaxed: mode !== 'full' };
+  }
+  return { filtered: [], relaxed: true };
+}
 
 /** multifactor：全市场快照 → 规则硬筛 → 多因子打分 → LLM 横排 → 组合去集中 → TopN */
 const multifactor: ScreenEngine = {
@@ -53,19 +90,76 @@ const multifactor: ScreenEngine = {
   },
   async produce(input) {
     const def = getStrategyDef(input.strategyId);
+    const emit = input.onProgress ?? (() => {});
 
-    const snapshot = await fetchMarketSnapshot();
+    emit({ stage: 'snapshot', label: '全市场快照', status: 'running' });
+    let snapshot = await fetchMarketSnapshot();
     if (snapshot.length === 0) throw new Error('全市场快照为空，选股中止');
 
-    const filtered = hardFilter(snapshot, def.hardFilters);
-    if (filtered.length === 0) throw new Error('硬筛后无候选，请放宽策略阈值或更换策略');
+    // 盘前退化处理：当日量价被东财置 0 时，优先复用最近一次有效行情缓存（通常即上一交易日收盘），
+    // 让硬筛/打分照常生效；非退化则把本次快照写入缓存，供下个盘前窗口使用。
+    let runMode: string | null = null;
+    if (isDegenerateSnapshot(snapshot)) {
+      const cached = loadLastCloseSnapshot();
+      if (cached) {
+        snapshot = cached;
+        runMode = '盘前模式：采用上一交易日收盘快照';
+      }
+    } else {
+      saveLastCloseSnapshot(snapshot);
+    }
+    emit({
+      stage: 'snapshot',
+      label: '全市场快照',
+      status: 'done',
+      marketCount: snapshot.length,
+      note: runMode ?? undefined,
+    });
 
+    // 逐级硬筛兜底：full → skipVolumePrice → tradableOnly，仍为空才判定全市场异常。
+    emit({ stage: 'filter', label: '规则硬筛', status: 'running' });
+    const { filtered, relaxed } = applyHardFilterWithFallback(snapshot, def.hardFilters);
+    if (filtered.length === 0) throw new Error('硬筛后无候选，请放宽策略阈值或更换策略');
+    if (relaxed) {
+      const relaxNote = '已自动放宽硬筛阈值';
+      runMode = runMode ? `${runMode}；${relaxNote}` : relaxNote;
+    }
+    emit({
+      stage: 'filter',
+      label: '规则硬筛',
+      status: 'done',
+      filteredCount: filtered.length,
+      note: relaxed ? '已自动放宽硬筛阈值' : undefined,
+    });
+
+    emit({ stage: 'score', label: '多因子打分', status: 'running' });
     const theme = await buildThemeContext(input.context);
     const scored = scoreCandidates(filtered, def, theme).sort(
       (a, b) => b.screenScore - a.screenScore,
     );
 
-    const pool = scored.slice(0, LLM_POOL_MAX);
+    let pool = scored.slice(0, LLM_POOL_MAX);
+    emit({ stage: 'score', label: '多因子打分', status: 'done', poolCount: pool.length });
+
+    // 二段增强：策略若启用 trend / fundFlow（逐只历史因子），仅对收窄后的候选池限量取
+    // K 线与资金流补分并重打分（避免对全市场逐只取数）。其它策略零额外取数、行为不变。
+    const needsTrend = activeFactors(def).some((k) => k === 'trend' || k === 'fundFlow');
+    if (needsTrend && pool.length > 0) {
+      emit({ stage: 'enrich', label: '趋势/资金二段增强', status: 'running', poolCount: pool.length });
+      const extra = await enrichTrendFactors(pool.map((c) => c.row.code)).catch(() => null);
+      if (extra && extra.size > 0) {
+        pool = scoreCandidates(
+          pool.map((c) => c.row),
+          def,
+          theme,
+          extra,
+        ).sort((a, b) => b.screenScore - a.screenScore);
+      }
+      emit({ stage: 'enrich', label: '趋势/资金二段增强', status: 'done', poolCount: pool.length });
+    }
+    if (input.useLlm) {
+      emit({ stage: 'rank', label: 'LLM 横向排序', status: 'running', poolCount: pool.length });
+    }
     const rank = input.useLlm
       ? await rankCandidates({
           def,
@@ -75,6 +169,9 @@ const multifactor: ScreenEngine = {
           trigger: input.trigger,
         })
       : null;
+    if (input.useLlm) {
+      emit({ stage: 'rank', label: 'LLM 横向排序', status: 'done', poolCount: pool.length });
+    }
 
     // 合并排序：LLM 顺序优先，未覆盖者按确定性分补齐
     let ordered: ScoredRow[] = pool;
@@ -117,8 +214,8 @@ const multifactor: ScreenEngine = {
       marketCount: snapshot.length,
       filteredCount: filtered.length,
       context: input.context || null,
-      marketView: rank?.marketView ?? null,
-      selectionLogic: rank?.selectionLogic ?? null,
+      marketView: withModeNote(runMode, rank?.marketView ?? null),
+      selectionLogic: withModeNote(runMode, rank?.selectionLogic ?? null),
       portfolioRisk: rank?.portfolioRisk ?? null,
       runId: rank?.runId ?? null,
       picks,
@@ -126,7 +223,7 @@ const multifactor: ScreenEngine = {
   },
 };
 
-const ENGINES: ScreenEngine[] = [multifactor];
+const ENGINES: ScreenEngine[] = [multifactor, nlEngine];
 const BY_ID = new Map(ENGINES.map((e) => [e.info.id, e]));
 
 /** 默认链路 id */

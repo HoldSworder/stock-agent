@@ -4,22 +4,29 @@ import { ElMessage } from 'element-plus';
 import { api, openWs } from '@/api';
 import AgentTrace from '@/components/AgentTrace.vue';
 import MarkdownView from '@/components/MarkdownView.vue';
+import ReviewResultView from '@/components/ReviewResultView.vue';
+import ResearchResultView from '@/components/ResearchResultView.vue';
 import { applyStepEvent, type Step } from '@/composables/agentTrace';
 import type { AiAnalysisHistoryItem, StreamEvent } from '@stock-agent/shared';
 
 // 公共 AI 分析弹窗：历史列表（仅最终正文）+ 发起分析实时流式轨迹。
 // 各模块按 kind 复用：注册后端 kind + 放置 <AiAnalysisDialog kind=... title=... :params=...>。
-const props = defineProps<{
-  modelValue: boolean;
-  /** 分析类型（对应后端注册的 kind，如 real-positions） */
-  kind: string;
-  /** 弹窗标题与按钮文案 */
-  title: string;
-  /** 发起分析时透传给后端的入参 */
-  params?: Record<string, unknown>;
-  /** 历史作用域键（如股票代码）；全局类不传 */
-  refKey?: string;
-}>();
+const props = withDefaults(
+  defineProps<{
+    modelValue: boolean;
+    /** 分析类型（对应后端注册的 kind，如 real-positions） */
+    kind: string;
+    /** 弹窗标题与按钮文案 */
+    title: string;
+    /** 发起分析时透传给后端的入参 */
+    params?: Record<string, unknown>;
+    /** 历史作用域键（如股票代码）；全局类不传 */
+    refKey?: string;
+    /** 结论渲染器：markdown（默认散文）/ review（一键复盘）/ research（研报机会）结构化富渲染 */
+    resultRenderer?: 'markdown' | 'review' | 'research';
+  }>(),
+  { resultRenderer: 'markdown' },
+);
 
 const emit = defineEmits<{ 'update:modelValue': [boolean] }>();
 
@@ -29,6 +36,17 @@ const loadingHistory = ref(false);
 const selected = ref<AiAnalysisHistoryItem | null>(null);
 const steps = ref<Step[]>([]);
 const busy = ref(false);
+// 刚跑完的最终正文（review 渲染器据此在收敛后切换到结构化富渲染）
+const liveFinalText = ref('');
+
+/** 从轨迹里取最后一段纯文本作为最终结论（默认 gateway 路径不单发 message，仅累积 token） */
+function finalTextFromSteps(): string {
+  for (let i = steps.value.length - 1; i >= 0; i--) {
+    const s = steps.value[i];
+    if (s.kind === 'text' && s.content.trim()) return s.content;
+  }
+  return '';
+}
 
 let ws: WebSocket | null = null;
 let runFinished = true;
@@ -66,6 +84,7 @@ function startAnalyze() {
   // 进入实时态：清空轨迹，取消历史选中
   steps.value = [];
   selected.value = null;
+  liveFinalText.value = '';
   busy.value = true;
   runFinished = false;
   closingByUser = false;
@@ -78,11 +97,16 @@ function startAnalyze() {
       busy.value = false;
       if (e.status === 'success' || e.status === 'timeout' || e.status === 'error') {
         // 完成/部分完成：保留刚跑完的实时轨迹（含结论），仅后台刷新历史列表（不自动选中，避免 refetch 竞态选到旧条目）
+        if (e.status === 'success') liveFinalText.value = finalTextFromSteps();
         loadHistory(false);
       } else if (e.status === 'canceled' && !steps.value.length) {
         steps.value.push({ kind: 'text', content: '(已停止)' });
       }
       teardownWs();
+    } else if (e.type === 'message' && e.role === 'assistant') {
+      // 自定义执行器（如热点 oneshot）直接回最终 message，作为结论正文
+      liveFinalText.value = e.content;
+      if (!steps.value.length) steps.value.push({ kind: 'text', content: e.content });
     } else if (e.type === 'error') {
       ElMessage.error(e.message);
       runFinished = true;
@@ -92,7 +116,8 @@ function startAnalyze() {
     }
   };
   ws.onclose = () => {
-    if (busy.value && !runFinished) {
+    // 仅在非主动关闭（真实网络中断）时提示；主动关闭弹窗时任务仍在后台跑完落库
+    if (!closingByUser && busy.value && !runFinished) {
       if (!steps.value.length) steps.value.push({ kind: 'text', content: '(连接中断，请重试)' });
       ElMessage.error('连接中断，分析未完成');
     }
@@ -125,7 +150,7 @@ watch(
       steps.value = [];
       loadHistory();
     } else {
-      stop();
+      // 关闭弹窗只断开实时流，不向后端发 stop；分析任务继续后台跑完落库
       teardownWs();
     }
   },
@@ -164,13 +189,36 @@ onUnmounted(teardownWs);
       </aside>
 
       <main class="ai-main">
+        <!-- 历史态：最终结论（review/research 走结构化富渲染，其余 Markdown） -->
+        <template v-if="selected">
+          <ReviewResultView
+            v-if="resultRenderer === 'review'"
+            :text="selected.content"
+            :viewing-history="true"
+          />
+          <ResearchResultView
+            v-else-if="resultRenderer === 'research'"
+            :text="selected.content"
+            :viewing-history="true"
+          />
+          <MarkdownView v-else :source="selected.content" />
+        </template>
+        <!-- 实时收敛后：结构化渲染器切换到富渲染 -->
+        <ReviewResultView
+          v-else-if="resultRenderer === 'review' && !busy && liveFinalText"
+          :text="liveFinalText"
+        />
+        <ResearchResultView
+          v-else-if="resultRenderer === 'research' && !busy && liveFinalText"
+          :text="liveFinalText"
+        />
         <!-- 实时态：流式轨迹 -->
-        <AgentTrace v-if="!selected" :steps="steps" :busy="busy" />
-        <div v-if="!selected && !busy && !steps.length" class="main-empty">
-          点击「发起分析」开始，或从左侧选择历史记录
-        </div>
-        <!-- 历史态：最终正文 -->
-        <MarkdownView v-else-if="selected" :source="selected.content" />
+        <template v-else>
+          <AgentTrace :steps="steps" :busy="busy" />
+          <div v-if="!busy && !steps.length" class="main-empty">
+            点击「发起分析」开始，或从左侧选择历史记录
+          </div>
+        </template>
       </main>
     </div>
   </el-dialog>

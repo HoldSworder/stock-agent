@@ -44,6 +44,8 @@ function rowToStrategy(row: StrategyRow): Strategy {
     syncedAt: row.syncedAt ?? null,
     skillEnabled: row.skillEnabled ?? false,
     autoSimEnabled: row.autoSimEnabled ?? false,
+    screenEngine: row.screenEngine ?? null,
+    screenStrategyId: row.screenStrategyId ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -105,6 +107,8 @@ export function createStrategy(input: StrategyInput): Strategy {
       syncedAt: null,
       skillEnabled: input.skillEnabled ?? false,
       autoSimEnabled: input.autoSimEnabled ?? false,
+      screenEngine: input.screenEngine ?? null,
+      screenStrategyId: input.screenStrategyId ?? null,
       createdAt: now,
       updatedAt: now,
     })
@@ -119,6 +123,8 @@ export function updateStrategy(
     description?: string | null;
     skillEnabled?: boolean;
     autoSimEnabled?: boolean;
+    screenEngine?: string | null;
+    screenStrategyId?: string | null;
   },
 ): Strategy | undefined {
   const existing = getStrategy(id);
@@ -132,6 +138,12 @@ export function updateStrategy(
         patch.skillEnabled !== undefined ? patch.skillEnabled : existing.skillEnabled,
       autoSimEnabled:
         patch.autoSimEnabled !== undefined ? patch.autoSimEnabled : existing.autoSimEnabled,
+      screenEngine:
+        patch.screenEngine !== undefined ? patch.screenEngine || null : existing.screenEngine,
+      screenStrategyId:
+        patch.screenStrategyId !== undefined
+          ? patch.screenStrategyId || null
+          : existing.screenStrategyId,
       updatedAt: nowIso(),
     })
     .where(eq(schema.strategies.id, id))

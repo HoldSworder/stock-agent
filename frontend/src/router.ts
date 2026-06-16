@@ -12,42 +12,39 @@ export const router = createRouter({
     },
     { path: '/', name: 'home', component: () => import('./views/CockpitView.vue') },
     { path: '/market', name: 'market', component: () => import('./views/MarketView.vue') },
+    // 情绪周期已并入大盘页（情绪周期 Tab），旧链接兜底跳转
+    { path: '/sentiment', redirect: { path: '/market', query: { tab: 'sentiment' } } },
     { path: '/screener', name: 'screener', component: () => import('./views/ScreenerView.vue') },
     { path: '/plan', name: 'plan', component: () => import('./views/PlanView.vue') },
     { path: '/watch', name: 'watch', component: () => import('./views/WatchView.vue') },
-    { path: '/intel', name: 'intel', component: () => import('./views/IntelView.vue') },
-    { path: '/themes', name: 'themes', component: () => import('./views/ThemesView.vue') },
-    { path: '/radar', name: 'radar', component: () => import('./views/RadarView.vue') },
-    { path: '/research', name: 'research', component: () => import('./views/ResearchView.vue') },
+    // 情报二合一：热点 + 研报合并为「情报」页
+    { path: '/intel', name: 'intel', component: () => import('./views/IntelHubView.vue') },
+    // 中线雷达 / 市场主线已折叠进大盘多 Tab，旧链接兜底跳转
+    { path: '/themes', redirect: '/market' },
+    { path: '/radar', redirect: '/market' },
+    // 研报已并入情报页（研报 Tab）
+    { path: '/research', redirect: { path: '/intel', query: { tab: 'research' } } },
     { path: '/etf', name: 'etf', component: () => import('./views/EtfView.vue') },
     { path: '/review', name: 'review', component: () => import('./views/ReviewView.vue') },
     { path: '/decision', name: 'decision', component: () => import('./views/DecisionView.vue') },
     { path: '/chat', name: 'chat', component: () => import('./views/ChatView.vue') },
-    {
-      path: '/watchlist',
-      name: 'watchlist',
-      component: () => import('./views/WatchlistView.vue'),
-    },
+    // 账户二合一：真实持仓 + 自选合并为「持仓与自选」页
     {
       path: '/positions',
       name: 'positions',
-      component: () => import('./views/PositionsView.vue'),
+      component: () => import('./views/AccountView.vue'),
     },
+    // 自选已并入账户页（自选 Tab）
+    { path: '/watchlist', redirect: { path: '/positions', query: { tab: 'watchlist' } } },
     {
       path: '/strategy',
       name: 'strategy',
       component: () => import('./views/StrategyView.vue'),
     },
-    {
-      path: '/usage',
-      name: 'usage',
-      component: () => import('./views/UsageView.vue'),
-    },
-    {
-      path: '/datasource',
-      name: 'datasource',
-      component: () => import('./views/DataSourceView.vue'),
-    },
+    // 调用记录已并入智能体中枢（调用记录 Tab）
+    { path: '/usage', redirect: { path: '/core', query: { tab: 'usage' } } },
+    // 数据源已并入系统设置（数据源 Tab）
+    { path: '/datasource', redirect: { path: '/settings', query: { tab: 'datasource' } } },
     {
       path: '/core',
       name: 'core',
@@ -55,11 +52,8 @@ export const router = createRouter({
     },
     // 旧入口兜底：工具页已并入智能体中枢
     { path: '/tools', redirect: '/core' },
-    {
-      path: '/ops',
-      name: 'ops',
-      component: () => import('./views/OpsView.vue'),
-    },
+    // 运维已并入系统设置（运维 Tab）
+    { path: '/ops', redirect: { path: '/settings', query: { tab: 'ops' } } },
     {
       path: '/settings',
       name: 'settings',

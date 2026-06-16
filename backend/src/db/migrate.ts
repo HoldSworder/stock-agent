@@ -110,6 +110,9 @@ CREATE TABLE IF NOT EXISTS strategies (
   archived INTEGER NOT NULL DEFAULT 0,
   synced_at TEXT,
   skill_enabled INTEGER NOT NULL DEFAULT 0,
+  auto_sim_enabled INTEGER NOT NULL DEFAULT 0,
+  screen_engine TEXT,
+  screen_strategy_id TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -249,7 +252,10 @@ CREATE TABLE IF NOT EXISTS daily_plan_items (
   stop_loss TEXT,
   take_profit TEXT,
   position_hint TEXT,
+  confirm_conditions TEXT NOT NULL DEFAULT '[]',
+  invalid_conditions TEXT NOT NULL DEFAULT '[]',
   source TEXT NOT NULL DEFAULT 'other',
+  confidence INTEGER,
   priority INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'pending',
   last_note TEXT,
@@ -282,6 +288,25 @@ CREATE TABLE IF NOT EXISTS trend_summaries (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_trend_summaries_created ON trend_summaries(created_at);
+
+CREATE TABLE IF NOT EXISTS news_catalysts (
+  id TEXT PRIMARY KEY,
+  theme TEXT NOT NULL,
+  catalyst_type TEXT,
+  direction TEXT,
+  codes TEXT NOT NULL DEFAULT '[]',
+  catalyst_window TEXT,
+  first_seen_date TEXT NOT NULL,
+  last_seen_date TEXT NOT NULL,
+  seen_count INTEGER NOT NULL DEFAULT 1,
+  fermented INTEGER NOT NULL DEFAULT 0,
+  realized_pct REAL,
+  note TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_news_catalysts_theme ON news_catalysts(theme);
+CREATE INDEX IF NOT EXISTS idx_news_catalysts_last_seen ON news_catalysts(last_seen_date);
 
 CREATE TABLE IF NOT EXISTS ai_analyses (
   id TEXT PRIMARY KEY,
@@ -414,6 +439,7 @@ CREATE TABLE IF NOT EXISTS market_themes (
   board_code TEXT,
   strength REAL NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'active',
+  phase TEXT NOT NULL DEFAULT '未知',
   sources TEXT NOT NULL DEFAULT '[]',
   evidence TEXT NOT NULL DEFAULT '[]',
   first_seen_date TEXT NOT NULL,
@@ -453,6 +479,20 @@ CREATE TABLE IF NOT EXISTS strategy_samples (
   created_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_strategy_samples_key ON strategy_samples(strategy_id, sample_date);
+
+CREATE TABLE IF NOT EXISTS sentiment_snapshots (
+  trade_date TEXT PRIMARY KEY,
+  index_score REAL NOT NULL,
+  level TEXT NOT NULL,
+  phase TEXT NOT NULL,
+  activity REAL,
+  max_streak INTEGER,
+  breakdown TEXT NOT NULL DEFAULT '{}',
+  components TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sentiment_snapshots_date ON sentiment_snapshots(trade_date);
 `;
 
 export function ensureSchema(): void {
@@ -466,6 +506,8 @@ export function ensureSchema(): void {
     "ALTER TABLE strategies ADD COLUMN synced_at TEXT",
     "ALTER TABLE strategies ADD COLUMN skill_enabled INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE strategies ADD COLUMN auto_sim_enabled INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE strategies ADD COLUMN screen_engine TEXT",
+    "ALTER TABLE strategies ADD COLUMN screen_strategy_id TEXT",
     "ALTER TABLE sim_trades ADD COLUMN ext_id TEXT",
     "ALTER TABLE watch_alerts ADD COLUMN trigger_price REAL NOT NULL DEFAULT 0",
     "ALTER TABLE watch_alerts ADD COLUMN outcome TEXT",
@@ -480,13 +522,50 @@ export function ensureSchema(): void {
     'ALTER TABLE daily_plan_items ADD COLUMN debate_verdict TEXT',
     'ALTER TABLE daily_plan_items ADD COLUMN debate_confidence INTEGER',
     'ALTER TABLE daily_plan_items ADD COLUMN debate_note TEXT',
+    "ALTER TABLE daily_plan_items ADD COLUMN confirm_conditions TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE daily_plan_items ADD COLUMN invalid_conditions TEXT NOT NULL DEFAULT '[]'",
+    'ALTER TABLE daily_plan_items ADD COLUMN confidence INTEGER',
     "ALTER TABLE screen_runs ADD COLUMN engine TEXT NOT NULL DEFAULT 'multifactor'",
+    "ALTER TABLE market_themes ADD COLUMN phase TEXT NOT NULL DEFAULT '未知'",
   ];
   for (const sql of addColumns) {
     try {
       sqlite.exec(sql);
     } catch {
       /* 列已存在 */
+    }
+  }
+
+  warnOnSchemaDrift();
+}
+
+/**
+ * 防漂移自检：校验若干「改 schema.ts 时最易漏补 migrate.ts」的关键列是否真的建出来了。
+ * 缺失只告警不阻断启动——提醒开发者「schema.ts 改了字段但 migrate.ts 未补对应 ALTER」，
+ * 避免再次出现 `no such column` 导致启动失败、整轮 agent run 被打断。
+ */
+function warnOnSchemaDrift(): void {
+  const required: Record<string, string[]> = {
+    scheduled_tasks: ['strategy_id'],
+    strategies: ['kind', 'screen_engine', 'screen_strategy_id'],
+    daily_plan_items: ['asset_type', 'confirm_conditions', 'invalid_conditions', 'confidence'],
+    watch_alerts: ['strategy_id', 'exec_status'],
+    screen_runs: ['engine'],
+    market_themes: ['phase'],
+  };
+  for (const [table, cols] of Object.entries(required)) {
+    try {
+      const rows = sqlite.prepare(`PRAGMA table_info(${table})`).all() as { name: string }[];
+      const have = new Set(rows.map((r) => r.name));
+      const missing = cols.filter((c) => !have.has(c));
+      if (missing.length > 0) {
+        console.warn(
+          `[migrate] schema 漂移：表 ${table} 缺少列 [${missing.join(', ')}]。` +
+            `schema.ts 改了字段但 migrate.ts 未补对应 ALTER，请同步更新 migrate.ts 的 addColumns。`,
+        );
+      }
+    } catch (e) {
+      console.warn(`[migrate] 校验表 ${table} 失败:`, e instanceof Error ? e.message : e);
     }
   }
 }

@@ -1,17 +1,23 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { onMounted, ref } from 'vue';
 import dayjs from 'dayjs';
 import { ElMessage } from 'element-plus';
-import { Refresh } from '@element-plus/icons-vue';
+import { Refresh, QuestionFilled } from '@element-plus/icons-vue';
 import { api } from '@/api';
+import StrengthMethodologyDrawer from '@/components/StrengthMethodologyDrawer.vue';
 import type { MarketTheme, ThemeSource } from '@stock-agent/shared';
+
+// 市场主线明细（确定性下钻）：以东财真实板块为主源沉淀的 market_themes，复盘/热点为证据 overlay。
+// 主线研判结论见顶部 BoardReviewConclusion；此处展示归并后的主线全集与多源证据，可手动归档噪声。
 
 const themes = ref<MarketTheme[]>([]);
 const loading = ref(false);
 const refreshing = ref(false);
 const showArchived = ref(false);
+const methodology = ref<InstanceType<typeof StrengthMethodologyDrawer>>();
 
 const SOURCE_LABEL: Record<ThemeSource, string> = {
+  board: '板块',
   review: '复盘',
   hotspot: '热点',
   research: '研报',
@@ -19,11 +25,10 @@ const SOURCE_LABEL: Record<ThemeSource, string> = {
 const STATUS_LABEL = { active: '活跃', fading: '退潮中', archived: '已归档' } as const;
 const statusTag = (s: MarketTheme['status']) =>
   s === 'active' ? 'success' : s === 'fading' ? 'warning' : 'info';
-
-// 强度色阶：≥80 强 / ≥60 中 / 其余弱
+// 复盘验证回流的生命周期阶段（「未知」不展示，避免噪声）
+const phaseTag = (p: MarketTheme['phase']) =>
+  p === '加速' ? 'danger' : p === '启动' ? 'success' : p === '分歧' ? 'warning' : 'info';
 const strengthClass = (v: number) => (v >= 80 ? 'hot' : v >= 60 ? 'mid' : 'low');
-
-const visible = computed(() => themes.value);
 
 async function load() {
   loading.value = true;
@@ -62,33 +67,66 @@ onMounted(load);
 </script>
 
 <template>
-  <div class="page">
-    <div class="page-head">
-      <div class="page-title">市场主线</div>
-      <div class="head-actions">
+  <div class="panel-block">
+    <div class="block-head">
+      <div class="block-title">市场主线明细</div>
+      <div class="block-actions">
+        <el-button :icon="QuestionFilled" text size="small" @click="methodology?.open('theme')">
+          方法论
+        </el-button>
         <el-checkbox v-model="showArchived" @change="load">含已归档</el-checkbox>
-        <el-button :icon="Refresh" type="primary" :loading="refreshing" @click="refresh">
+        <el-button :icon="Refresh" size="small" :loading="refreshing" @click="refresh">
           聚合刷新
         </el-button>
       </div>
     </div>
-    <div class="page-sub">
-      把复盘计划重点板块、热点雷达话题统一结构化为主线，多源叠加强度。研报来源后续接入。
+    <StrengthMethodologyDrawer ref="methodology" />
+    <div class="block-sub">
+      以东财行业 / 概念涨幅榜 + 主力净流入为主源，复盘重点板块、热点话题作为证据叠加，多源协同提升强度。
     </div>
 
     <div v-loading="loading" class="theme-grid">
-      <div v-for="t in visible" :key="t.id" class="theme-card" :class="t.status">
+      <div v-for="t in themes" :key="t.id" class="theme-card" :class="t.status">
         <div class="theme-top">
           <span class="theme-name">{{ t.theme }}</span>
-          <el-tag size="small" :type="statusTag(t.status)" effect="plain">
-            {{ STATUS_LABEL[t.status] }}
-          </el-tag>
+          <div class="theme-tags">
+            <el-tag
+              v-if="t.phase && t.phase !== '未知'"
+              size="small"
+              :type="phaseTag(t.phase)"
+              effect="light"
+              title="复盘验证阶段"
+            >
+              {{ t.phase }}
+            </el-tag>
+            <el-tag size="small" :type="statusTag(t.status)" effect="plain">
+              {{ STATUS_LABEL[t.status] }}
+            </el-tag>
+          </div>
         </div>
         <div class="theme-strength">
           <div class="bar">
-            <div class="bar-fill" :class="strengthClass(t.strength)" :style="{ width: `${t.strength}%` }" />
+            <div
+              class="bar-fill"
+              :class="strengthClass(t.strength)"
+              :style="{ width: `${t.strength}%` }"
+            />
           </div>
-          <span class="strength-num num">{{ Math.round(t.strength) }}</span>
+          <el-popover trigger="hover" :width="250" placement="top">
+            <template #reference>
+              <span class="strength-num num trigger">{{ Math.round(t.strength) }}</span>
+            </template>
+            <div class="str-pop">
+              <div class="str-pop-title">强度构成</div>
+              <p>强度 = 各来源最高强度提示 + 多源协同加成（每新增一个来源 +8）。</p>
+              <p>
+                命中来源
+                <b>{{ t.sources.map((s) => SOURCE_LABEL[s]).join(' · ') }}</b>
+                （{{ t.sources.length }} 源）
+              </p>
+              <p class="str-pop-note">板块涨幅排名越前、主力净流入越大、来源越多，强度越高。</p>
+            </div>
+          </el-popover>
         </div>
         <div class="theme-sources">
           <el-tag v-for="s in t.sources" :key="s" size="small" effect="dark" class="src-tag">
@@ -107,21 +145,39 @@ onMounted(load);
       </div>
     </div>
 
-    <el-empty v-if="!loading && visible.length === 0" description="暂无主线，点「聚合刷新」生成" />
+    <el-empty v-if="!loading && themes.length === 0" description="暂无主线，点「聚合刷新」生成" />
   </div>
 </template>
 
 <style scoped>
-.head-actions {
+.panel-block {
+  margin-top: 4px;
+}
+.block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 6px;
+}
+.block-title {
+  font-size: 15px;
+  font-weight: 600;
+}
+.block-actions {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+.block-sub {
+  font-size: 12px;
+  color: var(--text-2);
+  margin-bottom: 12px;
+  line-height: 1.5;
 }
 .theme-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
   gap: 14px;
-  margin-top: 16px;
   min-height: 80px;
 }
 .theme-card {
@@ -147,6 +203,11 @@ onMounted(load);
 .theme-name {
   font-size: 16px;
   font-weight: 600;
+}
+.theme-tags {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 .theme-strength {
   display: flex;
@@ -177,6 +238,24 @@ onMounted(load);
   font-size: 13px;
   width: 28px;
   text-align: right;
+  font-family: var(--font-mono);
+}
+.strength-num.trigger {
+  cursor: help;
+}
+.str-pop-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.str-pop p {
+  margin: 4px 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+.str-pop-note {
+  color: var(--text-2);
 }
 .theme-sources {
   display: flex;

@@ -1,11 +1,11 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { sendTelegram } from '../notify/telegram';
-import { defineModuleSchedules } from '../scheduling/defineModuleSchedules';
-import { buildRadarDigest, buildRadarOverview } from './service';
+import { buildRadarOverview } from './service';
+import { cached } from '../lib/ttlCache';
 
-// 挂载中线雷达模块：注册 /api/radar/* 与 /api/radar/schedules。
+// 中线雷达模块：注册 /api/radar/overview，作为大盘页「行业中线强弱」Tab 的确定性明细数据源。
 // server.ts 仅需 registerRadarModule(app) 一行接入，删除即整模块下线。
-// 纯确定性只读视图（复用 ETF 指标层），收盘后可推一条 Telegram 摘要；不下单、不落库、不跑 LLM。
+// 纯确定性只读视图（复用 ETF 指标层）；不下单、不落库、不跑 LLM。
+// 收盘后的研判/推送已统一收敛到「板块主线研判」agent 任务（themes 模块定时），此处不再单独定时，避免双跑。
 
 export function registerRadarModule(app: FastifyInstance): void {
   const fail = (reply: FastifyReply, e: unknown) =>
@@ -14,36 +14,10 @@ export function registerRadarModule(app: FastifyInstance): void {
   // 中线雷达总览（行业强弱 + 持仓趋势 + 候选池）
   app.get('/api/radar/overview', async (_req, reply) => {
     try {
-      return { ok: true, data: await buildRadarOverview() };
+      // 响应级 120s 缓存：复用 ETF 指标层的行业强弱聚合较重，中线视图慢变
+      return { ok: true, data: await cached('radar:overview', 120_000, buildRadarOverview) };
     } catch (e) {
       return fail(reply, e);
     }
-  });
-
-  // 收盘后中线雷达扫描：确定性计算 + Telegram 摘要（默认禁用，配置好行情/持仓后启用）
-  defineModuleSchedules({
-    app,
-    module: 'radar',
-    jobs: [
-      {
-        id: 'radar.refresh',
-        label: '收盘后中线雷达扫描（1540）',
-        defaultCron: '40 15 * * 1-5',
-        run: async () => {
-          const ov = await buildRadarOverview();
-          // 有强势行业或走弱持仓才推，避免无信号刷屏
-          const hasSignal =
-            ov.industries.some((i) => i.trend === 'multi_long' || i.trend === 'up') ||
-            ov.positions.some((p) => p.trend === 'down');
-          if (hasSignal) {
-            try {
-              await sendTelegram(buildRadarDigest(ov));
-            } catch (e) {
-              console.warn('[radar] 摘要推送失败:', e instanceof Error ? e.message : e);
-            }
-          }
-        },
-      },
-    ],
   });
 }

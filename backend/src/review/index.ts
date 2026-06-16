@@ -3,7 +3,12 @@ import { runTask } from '../runner';
 import { sendTelegram } from '../notify/telegram';
 import { computePlanFulfillment } from '../plan/service';
 import { defineModuleSchedules } from '../scheduling/defineModuleSchedules';
-import { buildDeepReviewPrompt, buildReviewDigest, DEEP_REVIEW_TASK_NAME } from './service';
+import {
+  buildDeepReviewPrompt,
+  buildReviewDigest,
+  DEEP_REVIEW_TASK_NAME,
+  onDeepReviewComplete,
+} from './service';
 
 // 挂载复盘模块定时：注册 /api/review/schedules。
 // server.ts 仅需 registerReviewModule(app) 一行接入，删除即整模块下线。
@@ -33,6 +38,8 @@ export function registerReviewModule(app: FastifyInstance): void {
             },
             'cron',
           );
+          // 复盘验证结论结构化回流共享主线（写 phase/强度/退潮态），best-effort。
+          if (result.status === 'success') onDeepReviewComplete(result.outputText);
           // 确定性 TG 摘要：结构化结果解析 + 计划兑现度纯统计，best-effort，不阻断复盘落库。
           if (result.status === 'success' && result.outputText) {
             try {

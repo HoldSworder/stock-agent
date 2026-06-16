@@ -156,6 +156,10 @@ export const strategies = sqliteTable('strategies', {
   skillEnabled: integer('skill_enabled', { mode: 'boolean' }).notNull().default(false),
   /** 是否纳入自动模拟白名单（默认 false；仍受全局 simAutoEnabled 总闸约束） */
   autoSimEnabled: integer('auto_sim_enabled', { mode: 'boolean' }).notNull().default(false),
+  /** 买入关联的选股链路 id（如 nl；为空表示不关联） */
+  screenEngine: text('screen_engine'),
+  /** 买入关联的选股预设/策略 id */
+  screenStrategyId: text('screen_strategy_id'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -339,7 +343,7 @@ export const dailyPlans = sqliteTable('daily_plans', {
   planDate: text('plan_date').notNull().unique(),
   /** draft 草稿 / active 生效 / closed 已收盘复盘 */
   status: text('status').notNull().default('active'),
-  /** 大盘研判 MarketStance JSON */
+  /** 大盘研判 MarketStance JSON（含 timingLevel 择时档位） */
   marketStance: text('market_stance'),
   /** 重点板块 PlanFocusSector[] JSON */
   focusSectors: text('focus_sectors').notNull().default('[]'),
@@ -378,8 +382,14 @@ export const dailyPlanItems = sqliteTable(
     takeProfit: text('take_profit'),
     /** 建议仓位 */
     positionHint: text('position_hint'),
-    /** 来源：research/hotspot/sector/position/watchlist/other（体现串联来源） */
+    /** 右侧确认条件 string[] JSON（突破确认 / 回踩转强等） */
+    confirmConditions: text('confirm_conditions').notNull().default('[]'),
+    /** 逻辑失效条件 string[] JSON（满足则当天取消/降级） */
+    invalidConditions: text('invalid_conditions').notNull().default('[]'),
+    /** 来源：research/hotspot/sector/screener/position/watchlist/other（体现串联来源） */
     source: text('source').notNull().default('other'),
+    /** 计划 agent 综合置信度 0-100（盘前打分，null=未给） */
+    confidence: integer('confidence'),
     priority: integer('priority').notNull().default(0),
     /** pending 待触发 / triggered 已触发 / done 已完成 / invalid 已失效 */
     status: text('status').notNull().default('pending'),
@@ -416,6 +426,45 @@ export const dailyPlanEvents = sqliteTable(
   },
   (t) => ({
     byPlan: index('idx_plan_events_plan').on(t.planId),
+  }),
+);
+
+/**
+ * 消息催化结构化记录（情报研判落库 → 今日计划读取）：按题材去重，
+ * 追踪「首次出现 / 重复次数 / 是否已发酵 / 已兑现涨幅」，供选股识别「起爆前·未发酵」催化。
+ */
+export const newsCatalysts = sqliteTable(
+  'news_catalysts',
+  {
+    id: text('id').primaryKey(),
+    /** 题材/板块名（去重键，唯一） */
+    theme: text('theme').notNull(),
+    /** 催化类型：政策/订单/事件/业绩/资金等 */
+    catalystType: text('catalyst_type'),
+    /** 受益方向描述 */
+    direction: text('direction'),
+    /** 相关标的 string[] JSON（代码或名称） */
+    codes: text('codes').notNull().default('[]'),
+    /** 预计兑现/发酵时间窗描述 */
+    catalystWindow: text('catalyst_window'),
+    /** 首次出现日 YYYY-MM-DD（Asia/Shanghai） */
+    firstSeenDate: text('first_seen_date').notNull(),
+    /** 最近出现日 YYYY-MM-DD */
+    lastSeenDate: text('last_seen_date').notNull(),
+    /** 累计出现次数（重复上报递增） */
+    seenCount: integer('seen_count').notNull().default(1),
+    /** 是否已发酵/高位（true=追高风险；false=起爆前未发酵） */
+    fermented: integer('fermented', { mode: 'boolean' }).notNull().default(false),
+    /** 已兑现涨幅 %（agent 估算，供发酵程度判断） */
+    realizedPct: real('realized_pct'),
+    /** 备注/催化要点 */
+    note: text('note'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => ({
+    byTheme: uniqueIndex('idx_news_catalysts_theme').on(t.theme),
+    bySeen: index('idx_news_catalysts_last_seen').on(t.lastSeenDate),
   }),
 );
 
@@ -681,6 +730,8 @@ export const marketThemes = sqliteTable(
     strength: real('strength').notNull().default(0),
     /** active / fading / archived */
     status: text('status').notNull().default('active'),
+    /** 生命周期阶段（启动/加速/分歧/退潮/未知，复盘验证回流写入） */
+    phase: text('phase').notNull().default('未知'),
     /** 来源集合 JSON（ThemeSource[]） */
     sources: text('sources').notNull().default('[]'),
     /** 证据要点 JSON（ThemeEvidence[]） */
@@ -728,6 +779,35 @@ export const decisionVerdicts = sqliteTable(
     byKey: uniqueIndex('idx_decision_verdicts_key').on(t.code, t.scenario, t.horizon),
     byExpiry: index('idx_decision_verdicts_expiry').on(t.expiresAt),
   }),
+);
+
+/**
+ * 市场情绪周期日快照（S1）：每交易日收盘记录一次 0-100 情绪指数 + 水位档 + 周期阶段 + 原始构成，
+ * 一天一行（trade_date 唯一），供「恢复 vs 退潮」方向判定与历史趋势图。纯只读统计，不参与交易。
+ */
+export const sentimentSnapshots = sqliteTable(
+  'sentiment_snapshots',
+  {
+    /** 交易日 YYYY-MM-DD（Asia/Shanghai），唯一主键 */
+    tradeDate: text('trade_date').primaryKey(),
+    /** 综合情绪指数 0-100 */
+    indexScore: real('index_score').notNull(),
+    /** 水位档位（冰点/低迷/平稳/活跃/高潮） */
+    level: text('level').notNull(),
+    /** 周期阶段（冰点/恢复/高潮/退潮/震荡） */
+    phase: text('phase').notNull(),
+    /** 乐咕活跃度 %（直读，冗余便于查询） */
+    activity: real('activity'),
+    /** 最高连板高度（冗余） */
+    maxStreak: integer('max_streak'),
+    /** 指数构成拆解 StrengthBreakdown JSON */
+    breakdown: text('breakdown').notNull().default('{}'),
+    /** 原始构成指标 SentimentComponents JSON */
+    components: text('components').notNull().default('{}'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => ({ byDate: index('idx_sentiment_snapshots_date').on(t.tradeDate) }),
 );
 
 /** 真实持仓纪律事件流（确定性体检命中止损/止盈/超配/超期等时落库，供历史与智能推送去重） */

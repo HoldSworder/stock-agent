@@ -18,6 +18,8 @@ export interface EtfQuoteRaw {
   pct: number | null;
   /** IOPV 参考净值（取不到或字段异常为 null） */
   iopv: number | null;
+  /** 折溢价率 %（正=溢价）。优先取集思录权威 discount_rt，缺失则为 null 交上层用 IOPV 兜底计算 */
+  premiumPct: number | null;
 }
 
 /**
@@ -37,10 +39,12 @@ export async function fetchEtfQuote(code: string): Promise<EtfQuoteRaw> {
   } else {
     iopv = null;
   }
-  // 东财 IOPV 缺失且集思录已启用 → best-effort 用集思录补充（失败静默回退 null）
-  if (iopv == null && isSourceEnabled('jisilu')) {
+  // 集思录已启用 → best-effort 补充：优先采用其权威折溢价率 discount_rt，并补全东财缺失的 IOPV（失败静默回退 null）
+  let premiumPct: number | null = null;
+  if (isSourceEnabled('jisilu')) {
     const p = await getEtfPremiumJisilu(code);
-    if (p?.iopv != null) iopv = p.iopv;
+    if (p?.premiumRate != null) premiumPct = p.premiumRate;
+    if (iopv == null && p?.iopv != null) iopv = p.iopv;
   }
   return {
     code,
@@ -49,6 +53,7 @@ export async function fetchEtfQuote(code: string): Promise<EtfQuoteRaw> {
     prevClose: num(d.f60),
     pct: num(d.f170),
     iopv,
+    premiumPct,
   };
 }
 
@@ -66,6 +71,8 @@ export interface EtfMetrics {
   ret20: number | null;
   /** 60 日收益 % */
   ret60: number | null;
+  /** 120 日收益 %（中线轮动用） */
+  ret120: number | null;
   /** 动量打分（0.4*ret20 + 0.6*ret60） */
   momentum: number | null;
   /** 绝对动量为正（ret60>0） */
@@ -133,6 +140,7 @@ export async function computeMetrics(
     price != null && n > k && closes[n - 1 - k] > 0 ? (price / closes[n - 1 - k] - 1) * 100 : null;
   const ret20 = refAgo(20);
   const ret60 = refAgo(60);
+  const ret120 = refAgo(120);
   const momentum =
     ret20 != null && ret60 != null ? 0.4 * ret20 + 0.6 * ret60 : (ret60 ?? ret20);
   const absMomentumPositive = ret60 != null ? ret60 > 0 : false;
@@ -173,6 +181,7 @@ export async function computeMetrics(
     pricePercentile,
     ret20,
     ret60,
+    ret120,
     momentum,
     absMomentumPositive,
     volatility,

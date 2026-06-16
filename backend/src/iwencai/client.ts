@@ -8,7 +8,6 @@ import { requestJson } from '../datasource/httpClient';
 // apiKey 优先读设置页（iwencaiApiKey），回退进程环境变量 IWENCAI_API_KEY。
 
 const QUERY_PATH = '/v1/query2data';
-const SKILL_ID = 'hithink-etf-selector';
 const SKILL_VERSION = '1.0.0';
 
 type Json = Record<string, unknown>;
@@ -29,13 +28,13 @@ function apiKey(): string {
   return key;
 }
 
-/** 装配符合问财网关规范的请求头（Bearer + X-Claw-*，Trace-Id 每次新生成） */
-function buildHeaders(callType: 'normal' | 'retry'): Record<string, string> {
+/** 装配符合问财网关规范的请求头（Bearer + X-Claw-*，Trace-Id 每次新生成；skillId 由调用方传入） */
+function buildHeaders(callType: 'normal' | 'retry', skillId: string): Record<string, string> {
   return {
     Authorization: `Bearer ${apiKey()}`,
     'Content-Type': 'application/json',
     'X-Claw-Call-Type': callType,
-    'X-Claw-Skill-Id': SKILL_ID,
+    'X-Claw-Skill-Id': skillId,
     'X-Claw-Skill-Version': SKILL_VERSION,
     'X-Claw-Plugin-Id': 'none',
     'X-Claw-Plugin-Version': 'none',
@@ -43,22 +42,27 @@ function buildHeaders(callType: 'normal' | 'retry'): Record<string, string> {
   };
 }
 
-export interface QueryEtfOptions {
+export interface QueryOptions {
   /** 分页，正整数字符串，默认 '1' */
   page?: string;
   /** 每页条数，正整数字符串，默认 '10' */
   limit?: string;
   /** 调用类型：normal 正常 / retry 放宽条件重试 */
   callType?: 'normal' | 'retry';
+  /** 调用统计归属源 id（ETF=iwencai，个股=iwencai-stock） */
+  sourceId?: string;
   signal?: AbortSignal;
 }
 
+/** 兼容旧命名 */
+export type QueryEtfOptions = QueryOptions;
+
 /**
- * ETF 数据查询：自然语言条件查询符合的 ETF。
+ * 通用自然语言数据查询：POST /v1/query2data，skillId 决定网关侧能力路由/计量。
  * 返回网关原始信封（含 datas / code_count / chunks_info 等）；
- * 无 datas 的 dict 通常为网关错误（额度不足 / 次数超限），由调用方判定。
+ * 无 datas 的 dict 通常为网关错误（额度不足 / 次数超限 / skill 未开通），由调用方判定。
  */
-export function queryEtf(query: string, opts: QueryEtfOptions = {}): Promise<Json> {
+export function query2data(query: string, skillId: string, opts: QueryOptions = {}): Promise<Json> {
   const body = {
     query,
     page: opts.page ?? '1',
@@ -67,10 +71,10 @@ export function queryEtf(query: string, opts: QueryEtfOptions = {}): Promise<Jso
     expand_index: 'true',
   };
   return requestJson({
-    sourceId: 'iwencai',
+    sourceId: opts.sourceId ?? 'iwencai',
     url: `${baseUrl()}${QUERY_PATH}`,
     method: 'POST',
-    headers: buildHeaders(opts.callType ?? 'normal'),
+    headers: buildHeaders(opts.callType ?? 'normal', skillId),
     body: JSON.stringify(body),
     signal: opts.signal,
     timeoutMs: 30000,
@@ -83,21 +87,42 @@ export function queryEtf(query: string, opts: QueryEtfOptions = {}): Promise<Jso
   });
 }
 
-export const iwencai = { queryEtf };
+/** ETF 智能选股：自然语言条件查询符合的 ETF（skill 取设置 iwencaiSkillId） */
+export function queryEtf(query: string, opts: QueryOptions = {}): Promise<Json> {
+  const skill = getValue('iwencaiSkillId') || 'hithink-etf-selector';
+  return query2data(query, skill, { sourceId: 'iwencai', ...opts });
+}
+
+/** 个股智能选股：自然语言条件查询符合的 A 股（skill 取设置 iwencaiStockSkillId） */
+export function queryStock(query: string, opts: QueryOptions = {}): Promise<Json> {
+  const skill = getValue('iwencaiStockSkillId') || 'hithink-stock-selector';
+  return query2data(query, skill, { sourceId: 'iwencai-stock', ...opts });
+}
+
+export const iwencai = { queryEtf, queryStock, query2data };
 
 export type IwencaiClient = typeof iwencai;
+
+/** 网关信封校验：无 datas 视为业务错误，抛出携带 detail 的 IwencaiError */
+function assertEnvelope(json: Json | null): void {
+  if (!json || !('datas' in json)) {
+    const msg =
+      (json && typeof json.message === 'string' && json.message) ||
+      (json && typeof json.msg === 'string' && json.msg) ||
+      '问财网关返回异常（无 datas，疑似额度/鉴权/skill 未开通问题）';
+    throw new IwencaiError(String(msg));
+  }
+}
 
 /**
  * 健康探测：最小一次 ETF 查询（limit=1）验证网关连通与 apiKey 有效。
  * apiKey 未配置或鉴权失效会抛错；返回不含 datas（网关业务错误）也抛错暴露 detail。
  */
 export async function pingIwencai(signal?: AbortSignal): Promise<void> {
-  const json = await queryEtf('沪深300ETF', { limit: '1', signal });
-  if (!json || !('datas' in json)) {
-    const msg =
-      (json && typeof json.message === 'string' && json.message) ||
-      (json && typeof json.msg === 'string' && json.msg) ||
-      '问财网关返回异常（无 datas，疑似额度/鉴权问题）';
-    throw new IwencaiError(String(msg));
-  }
+  assertEnvelope(await queryEtf('沪深300ETF', { limit: '1', signal }));
+}
+
+/** 健康探测：最小一次个股查询（limit=1）验证个股 skill 已开通且网关连通 */
+export async function pingIwencaiStock(signal?: AbortSignal): Promise<void> {
+  assertEnvelope(await queryStock('贵州茅台 最新价', { limit: '1', signal }));
 }

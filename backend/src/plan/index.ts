@@ -2,6 +2,7 @@ import type { FastifyInstance, FastifyReply } from 'fastify';
 import { runTask } from '../runner';
 import { defineModuleSchedules } from '../scheduling/defineModuleSchedules';
 import * as svc from './service';
+import { startOneClickPlan, getOneClickState } from './oneclick';
 
 // 挂载今日计划模块：注册 /api/plan/* 与 /api/plan/schedules（模块内定时）。
 // server.ts 仅需 registerPlanModule(app) 一行接入，删除即整模块下线。
@@ -20,19 +21,32 @@ export function registerPlanModule(app: FastifyInstance): void {
         label: '盘前生成今日计划',
         defaultCron: '30 8 * * 1-5',
         run: async () => {
-          const result = await runTask(
+          // 定时：等待辩论增强完成，保证落库即完整
+          await svc.runPlanGeneration({
+            trigger: 'cron',
+            channels: ['webui', 'telegram'],
+            maxSteps: 22,
+            awaitDebate: true,
+          });
+        },
+      },
+      {
+        id: 'plan.reevaluate',
+        label: '盘中计划重评估',
+        // 上午 10:30 与下午 14:00 各一次：盘中据实时盘面把失效项标 invalid、确认项标 triggered
+        defaultCron: '30 10,14 * * 1-5',
+        run: async () => {
+          await runTask(
             {
               id: null,
-              name: svc.PLAN_GEN_TASK_NAME,
-              prompt: svc.PLAN_GEN_PROMPT,
-              modelConfig: { thinking: false, maxSteps: 22 },
-              notifyChannels: ['webui', 'telegram'],
-              timeoutSec: 900,
+              name: svc.PLAN_REEVAL_TASK_NAME,
+              prompt: svc.PLAN_REEVAL_PROMPT,
+              modelConfig: { thinking: false, maxSteps: 16 },
+              notifyChannels: ['webui'],
+              timeoutSec: 600,
             },
             'cron',
           );
-          // 落库后增强：对计划内个股逐只跑多 agent 辩论并回写结论（始终自动）
-          if (result.status === 'success') await svc.enrichTodayPlanWithDebate(result.runId);
         },
       },
       {
@@ -90,26 +104,15 @@ export function registerPlanModule(app: FastifyInstance): void {
     return { ok: true, data: detail?.events ?? [] };
   });
 
-  // 手动生成/重新生成今日计划（跑 agent，落结构化计划）
+  // 手动生成/重新生成今日计划（跑 agent，落结构化计划）。辩论增强后台执行不阻塞响应。
   const generate = async (reply: FastifyReply) => {
     try {
-      const result = await runTask(
-        {
-          id: null,
-          name: svc.PLAN_GEN_TASK_NAME,
-          prompt: svc.PLAN_GEN_PROMPT,
-          modelConfig: { thinking: false, maxSteps: 20 },
-          notifyChannels: ['webui'],
-          timeoutSec: 900,
-        },
-        'manual',
-      );
-      // 落库后增强：个股逐只多 agent 辩论回写结论。后台执行不阻塞响应，前端稍后刷新可见。
-      if (result.status === 'success') {
-        void svc
-          .enrichTodayPlanWithDebate(result.runId)
-          .catch((e) => console.warn('[plan] 候选辩论增强失败:', e instanceof Error ? e.message : e));
-      }
+      const result = await svc.runPlanGeneration({
+        trigger: 'manual',
+        channels: ['webui'],
+        maxSteps: 20,
+        awaitDebate: false,
+      });
       return {
         ok: result.status === 'success',
         data: { runId: result.runId, status: result.status, text: result.outputText },
@@ -120,8 +123,47 @@ export function registerPlanModule(app: FastifyInstance): void {
     }
   };
 
+  // 手动触发盘中重评估（按实时盘面把失效项标 invalid、确认项标 triggered，不新增标的）
+  app.post('/api/plan/reevaluate', async (_req, reply) => {
+    try {
+      const result = await runTask(
+        {
+          id: null,
+          name: svc.PLAN_REEVAL_TASK_NAME,
+          prompt: svc.PLAN_REEVAL_PROMPT,
+          modelConfig: { thinking: false, maxSteps: 16 },
+          notifyChannels: ['webui'],
+          timeoutSec: 600,
+        },
+        'manual',
+      );
+      return {
+        ok: result.status === 'success',
+        data: { runId: result.runId, status: result.status, text: result.outputText },
+        error: result.status === 'success' ? undefined : `盘中重评估未成功（${result.status}）`,
+      };
+    } catch (e) {
+      return fail(reply, e);
+    }
+  });
+
   app.post('/api/plan/generate', (_req, reply) => generate(reply));
   app.post<{ Params: { date: string } }>('/api/plan/:date/regenerate', (_req, reply) =>
     generate(reply),
   );
+
+  // 一键计划：后台按依赖顺序串行刷新上游六源 + 生成今日计划，立即返回初始状态供前端轮询
+  app.post('/api/plan/oneclick', (_req, reply) => {
+    try {
+      return { ok: true, data: startOneClickPlan() };
+    } catch (e) {
+      // 已在运行：返回 409 + 当前状态，前端据此续接轮询
+      return reply
+        .code(409)
+        .send({ ok: false, error: e instanceof Error ? e.message : String(e), data: getOneClickState() });
+    }
+  });
+
+  // 一键计划运行态（前端轮询渲染管线进度）
+  app.get('/api/plan/oneclick', () => ({ ok: true, data: getOneClickState() }));
 }

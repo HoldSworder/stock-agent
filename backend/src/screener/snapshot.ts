@@ -1,5 +1,6 @@
 import { getJson } from '../market/eastmoney';
 import { num, numOrNull } from '../datasource/codes';
+import { getMeta, setMeta } from '../settings';
 
 // 选股引擎唯一净新增取数：东方财富 clist/get 分页拉全市场沪深 A 股快照。
 // 复用 market/eastmoney 的 getJson（重试 + 缓存 + push2delay 兜底 + 调用统计归 eastmoney）。
@@ -104,4 +105,57 @@ export async function fetchMarketSnapshot(signal?: AbortSignal): Promise<Snapsho
     if (rows.length < PAGE_SIZE) break; // 末页
   }
   return out;
+}
+
+// ===== 盘前退化检测 + 收盘快照缓存 =====
+// 盘前（新交易日开盘前）东财 clist 把成交额(f6)/换手(f8)/涨跌幅(f3) 置 0/'-'，价=昨收仍 >0。
+// 此时按当日量价硬筛会剔空全市场，故检测退化后改用「最近一次有效行情」缓存（通常即上一交易日收盘）。
+
+/** 收盘快照缓存的本地 kv 键（仅本模块读写，不在 SettingKey 枚举内） */
+const META_LAST_CLOSE_SNAPSHOT = 'screener_last_close_snapshot';
+/** 量价退化判定阈值：amount===0 行占比超过此值视为盘前退化 */
+const DEGENERATE_AMOUNT_ZERO_RATIO = 0.9;
+
+/** 缓存载体：capturedAt 标记抓取时刻，rows 为当次有效全市场快照 */
+interface CachedSnapshot {
+  capturedAt: string;
+  rows: SnapshotRow[];
+}
+
+/**
+ * 快照是否盘前退化：非空且 amount===0 的行占比超阈值。
+ * 真实交易/收盘后几乎无 amount=0 个股，仅「新交易日开盘前」窗口会整体退化。
+ */
+export function isDegenerateSnapshot(rows: SnapshotRow[]): boolean {
+  if (rows.length === 0) return false;
+  const zero = rows.reduce((n, r) => (r.amount === 0 ? n + 1 : n), 0);
+  return zero / rows.length > DEGENERATE_AMOUNT_ZERO_RATIO;
+}
+
+/**
+ * 写入收盘快照缓存（仅应在快照非退化时调用，即一次有效行情，
+ * 语义为「最近一次有效行情」，盘前作为上一交易日量价基准）。
+ * best-effort：序列化/落库失败不抛错，不阻断选股主流程。
+ */
+export function saveLastCloseSnapshot(rows: SnapshotRow[]): void {
+  if (rows.length === 0) return;
+  try {
+    const payload: CachedSnapshot = { capturedAt: new Date().toISOString(), rows };
+    setMeta(META_LAST_CLOSE_SNAPSHOT, JSON.stringify(payload));
+  } catch {
+    /* 缓存写入失败：忽略，下次再写 */
+  }
+}
+
+/** 读取收盘快照缓存；无缓存/解析失败返回 null */
+export function loadLastCloseSnapshot(): SnapshotRow[] | null {
+  const raw = getMeta(META_LAST_CLOSE_SNAPSHOT);
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as CachedSnapshot;
+    const rows = parsed?.rows;
+    return Array.isArray(rows) && rows.length > 0 ? rows : null;
+  } catch {
+    return null;
+  }
 }

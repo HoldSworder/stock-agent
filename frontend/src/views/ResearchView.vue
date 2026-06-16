@@ -14,6 +14,9 @@ import type {
   ResearchStatus,
 } from '@stock-agent/shared';
 
+// embedded：作为「情报」父页的 Tab 面板嵌入时隐藏自身 page-head。
+defineProps<{ embedded?: boolean }>();
+
 const msg = (e: unknown) => (e instanceof Error ? e.message : '请求失败');
 
 const TABS: { name: ResearchReportType; label: string }[] = [
@@ -125,8 +128,8 @@ onMounted(() => {
 </script>
 
 <template>
-  <div class="page">
-    <div class="page-head">
+  <div :class="{ page: !embedded }">
+    <div v-if="!embedded" class="page-head">
       <div class="page-title">研报</div>
       <div class="head-actions">
         <span class="st-chip" :class="{ live: status?.online }">
@@ -139,6 +142,17 @@ onMounted(() => {
           @click="loadList"
         >刷新</el-button>
       </div>
+    </div>
+    <div v-else class="embed-bar">
+      <span class="st-chip" :class="{ live: status?.online }">
+        <span class="dot" />
+        {{ statusText() }}
+      </span>
+      <el-button
+        v-if="view === 'library' && libTab === 'reports'"
+        :icon="Refresh"
+        @click="loadList"
+      >刷新</el-button>
     </div>
 
     <el-radio-group v-model="view" class="mode-switch">
@@ -296,6 +310,13 @@ onMounted(() => {
   display: flex;
   align-items: center;
   gap: 12px;
+}
+.embed-bar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-bottom: 4px;
 }
 .st-chip {
   display: inline-flex;

@@ -8,6 +8,9 @@ import AiAnalysisDialog from '@/components/AiAnalysisDialog.vue';
 import StockLink from '@/components/StockLink.vue';
 import type { DisciplineReport, DisciplineStatus, RealPortfolio } from '@stock-agent/shared';
 
+// embedded：作为「持仓与自选」父页的 Tab 面板嵌入时隐藏自身 page-head。
+defineProps<{ embedded?: boolean }>();
+
 const pf = ref<RealPortfolio | null>(null);
 const loading = ref(false);
 const error = ref('');
@@ -98,8 +101,8 @@ onMounted(load);
 </script>
 
 <template>
-  <div class="page">
-    <div class="page-head">
+  <div :class="{ page: !embedded }">
+    <div v-if="!embedded" class="page-head">
       <div class="page-title">真实持仓</div>
       <div class="head-actions">
         <el-button :loading="discLoading" @click="loadDiscipline">纪律体检</el-button>
@@ -109,8 +112,13 @@ onMounted(load);
         <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
       </div>
     </div>
-    <div class="page-sub">
+    <div v-if="!embedded" class="page-sub">
       来源：同花顺投资账本接口（股票实时报价 + 场外基金账本净值，红涨绿跌）
+    </div>
+    <div v-else class="embed-bar">
+      <span class="embed-sub">来源：同花顺投资账本接口（股票实时报价 + 场外基金账本净值，红涨绿跌）</span>
+      <el-button :loading="discLoading" @click="loadDiscipline">纪律体检</el-button>
+      <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
     </div>
 
     <template v-if="pf">
@@ -319,7 +327,7 @@ onMounted(load);
 
     <el-empty v-else-if="!loading" :description="error || '暂无持仓快照'" />
 
-    <AiAnalysisDialog v-model="analysisOpen" kind="real-positions" title="实时持仓分析" />
+    <AiAnalysisDialog v-if="!embedded" v-model="analysisOpen" kind="real-positions" title="实时持仓分析" />
   </div>
 </template>
 
@@ -327,6 +335,17 @@ onMounted(load);
 .head-actions {
   display: flex;
   gap: 8px;
+}
+.embed-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.embed-sub {
+  flex: 1;
+  font-size: 12.5px;
+  color: var(--text-2);
 }
 .meta {
   font-family: var(--font-mono);

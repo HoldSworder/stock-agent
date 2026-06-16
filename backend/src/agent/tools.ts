@@ -2,6 +2,7 @@ import type OpenAI from 'openai';
 import { miaoxiang } from '../miaoxiang/client';
 import { sendTelegram } from '../notify/telegram';
 import { fetchRealPositions } from '../realPositions';
+import { evaluateDiscipline } from '../positions/discipline';
 import { syncFavorites } from '../thsFavorites';
 import {
   executeSimTrade,
@@ -21,7 +22,10 @@ import * as plan from '../plan/service';
 import { buildPlanContext } from '../plan/context';
 import * as etf from '../etf/service';
 import * as etfRepo from '../etf/repo';
+import * as rotation from '../rotation/service';
 import * as screener from '../screener/service';
+import * as radar from '../radar/service';
+import * as themes from '../themes/service';
 import {
   getIndices,
   getGlobalIndices,
@@ -36,10 +40,13 @@ import {
 } from '../market/eastmoney';
 import { getDragonTiger, getFinancialStatements, getLockupAndHolders } from '../market/datacenter';
 import { callAkshare } from '../market/akshare';
+import { queryStock as iwencaiQueryStock } from '../iwencai/client';
+import { buildSentimentOverview, formatForAgent as formatSentiment } from '../sentiment/service';
 import { listReviews } from '../repo';
 import type { MarketReviewResult } from '@stock-agent/shared';
 import type {
   MarketStance,
+  NewsCatalystInput,
   PlanFocusSector,
   PlanItemStatus,
   PlanTrigger,
@@ -69,6 +76,12 @@ export interface ToolDef {
 
 function asString(v: unknown, fallback = ''): string {
   return typeof v === 'string' ? v : fallback;
+}
+
+/** 解析字符串数组参数（条件清单），过滤非字符串与空串 */
+function asStringArray(v: unknown): string[] {
+  if (!Array.isArray(v)) return [];
+  return v.filter((x): x is string => typeof x === 'string' && x.trim().length > 0);
 }
 
 /**
@@ -247,6 +260,42 @@ export const tools: ToolDef[] = [
             `当日${p.todayProfit.toFixed(0)}(${(p.todayRate * 100).toFixed(2)}%) 仓位${(p.positionRate * 100).toFixed(1)}%`,
         ),
       ];
+      return preview(lines.join('\n'));
+    },
+  },
+  {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'get_position_discipline',
+        description:
+          '对【真实持仓】做确定性纪律体检（只读，硬规则不经 AI 估算）：逐票判定破止损 / 达止盈 / 临近止损 / 超期持有 / 单票超配，并给账户级总仓位/集中度告警与直白可执行建议。生成今日计划、盘中卖点检查时调用，把破纪律持仓优先纳入计划（减仓/卖出）。',
+        parameters: { type: 'object', properties: {} },
+      },
+    },
+    run: async () => {
+      const rep = await evaluateDiscipline();
+      const flagged = rep.items.filter((it) => it.status !== 'healthy');
+      const lines = [
+        `纪律体检（${rep.asOf}）：止损 ${rep.counts.stopLoss} / 止盈 ${rep.counts.takeProfit} / 超配 ${rep.counts.overweight} / 超期 ${rep.counts.overHold} / 健康 ${rep.counts.healthy}`,
+        `阈值：止损 ${rep.config.stopLossPct}% · 止盈 ${rep.config.takeProfitPct}% · 最长持有 ${rep.config.maxHoldDays ?? '不限'} 日 · 单票上限 ${rep.config.singleMaxWeightPct}% · 总仓上限 ${rep.config.totalMaxPositionPct}%`,
+        `账户：总仓位 ${(rep.account.totalPositionRate * 100).toFixed(1)}%${rep.account.overTotal ? '（超总仓上限）' : ''} · 现金 ${(rep.account.cashRate * 100).toFixed(1)}%` +
+          (rep.account.topConcentration
+            ? ` · 最大单一 ${rep.account.topConcentration.name}(${rep.account.topConcentration.code}) ${(rep.account.topConcentration.rate * 100).toFixed(1)}%`
+            : ''),
+      ];
+      if (rep.account.warnings.length) lines.push('账户告警：' + rep.account.warnings.join('；'));
+      if (flagged.length) {
+        lines.push(`破纪律持仓 ${flagged.length} 只：`);
+        for (const it of flagged) {
+          lines.push(
+            `- ${it.name}(${it.code}) [${it.status}] 现价${it.price} 成本${it.avgCost} ` +
+              `盈亏${(it.holdRate * 100).toFixed(2)}% 仓位${(it.positionRate * 100).toFixed(1)}% 持有${it.holdDays}日 → ${it.advice}`,
+          );
+        }
+      } else {
+        lines.push('全部持仓纪律健康，无破线项。');
+      }
       return preview(lines.join('\n'));
     },
   },
@@ -757,13 +806,28 @@ export const tools: ToolDef[] = [
     definition: {
       type: 'function',
       function: {
-        name: 'get_plan_context',
+        name: 'market_sentiment',
         description:
-          '一次性读取热点雷达/研报/大盘/复盘四个模块【最新一次持久化的 AI 分析】，作为生成今日计划的基准：①热点研判（每日热点 AI 研判）②研报机会（研报模块每日结构化分析）③大盘复盘点评（大盘模块定时点评）④一键复盘（综合方向/外围/主线/次日策略）。各源缺失或非当日产出会显式标注时效。盘前生成今日计划时优先调用它取基准，不要再现场重跑热点 summary / 研报 discover。',
+          '读取 A 股市场情绪周期（S1 短线择时总开关）：确定性合成的 0-100 情绪指数 + 水位档位（冰点/低迷/平稳/活跃/高潮）+ 周期阶段（冰点/恢复/高潮/退潮/震荡）+ 较上一交易日方向 + 白话仓位倾向，附构成拆解（赚钱效应广度/活跃度/涨停强度/连板高度/炸板率/跌停恐慌）。判断「敢不敢做、做多大仓」、短线择时、生成今日计划与复盘定调时调用。数据源乐咕乐股活跃度 + 东财涨停池，纯规则、不含主观预测。',
         parameters: { type: 'object', properties: {} },
       },
     },
-    run: async () => preview(buildPlanContext(), 12000),
+    run: async () => {
+      const ov = await buildSentimentOverview();
+      return formatSentiment(ov);
+    },
+  },
+  {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'get_plan_context',
+        description:
+          '一次性读取五源【最新一次持久化的 AI 分析】，作为生成今日计划的基准：①情报研判（研报机会 + 全网热点 合并）②大盘与板块研判（大盘复盘 + 板块主线 + 期货外盘 合并）③一键复盘（综合方向/外围/主线/次日策略）④ETF 综合研判（操作信号 + 中线赛道轮动 合并）⑤上一计划收盘复盘（含次日预案草稿，闭环反哺）。各源缺失或非当日产出会显式标注时效。盘前生成今日计划时优先调用它取基准，不要再现场重跑情报 / 大盘板块 / ETF 研判。',
+        parameters: { type: 'object', properties: {} },
+      },
+    },
+    run: async () => preview(await buildPlanContext(), 12000),
   },
   {
     definition: {
@@ -872,9 +936,24 @@ export const tools: ToolDef[] = [
     definition: {
       type: 'function',
       function: {
+        name: 'etf_rotation_strength',
+        description:
+          'ETF 行业轮动确定性榜（本系统基于东方财富行情/历史 K 线本地计算）：对「跟踪池 + 主题赛道代表 ETF」算' +
+          '相对沪深300强弱(RS)、20/60/120 日动量、周线均线趋势、主力净流入与综合轮动强度，并按确定性规则给出' +
+          '5 态（上升/回踩/加速/过热/破位）。做「ETF行业轮动研判」「今日计划的中线赛道基准」时调用，' +
+          '据此判断该进攻(上升/加速且RS强)、该等回踩(回踩态)、该回避(过热/破位)的赛道。涨幅靠后≠该卖、过热≠还能涨。',
+        parameters: { type: 'object', properties: {} },
+      },
+    },
+    run: async () => preview(rotation.formatForAgent(await rotation.buildRotationOverview()), 12000),
+  },
+  {
+    definition: {
+      type: 'function',
+      function: {
         name: 'save_today_plan',
         description:
-          '保存今日【作战计划】（盘前生成任务调用，一天一份，重复调用覆盖当日计划）。把研报/热点/板块/持仓/大盘综合成结构化计划落库，供盘中盯盘程序化对照与前端作战室展示。触发价务必基于已校验的真实价位。',
+          '保存今日【作战计划】（盘前生成任务调用，一天一份，重复调用覆盖当日计划）。把研报/热点/板块/选股/持仓/大盘综合成结构化计划落库，供盘中盯盘程序化对照与前端作战室展示。务必给 marketStance.timingLevel 择时档位（防守档新开仓 buy 会被后端自动降级为 watch）；每只标的务必给 confidence 置信度(0-100) 与 source 来源（screen_stocks 选出的标 screener）；触发价务必基于已校验的真实价位；尽量给每只标的右侧确认条件 confirmConditions 与逻辑失效条件 invalidConditions。',
         parameters: {
           type: 'object',
           properties: {
@@ -883,10 +962,16 @@ export const tools: ToolDef[] = [
               description: '大盘研判',
               properties: {
                 bias: { type: 'string', enum: ['bull', 'bear', 'neutral'] },
-                positionPct: { type: 'number', description: '建议仓位 %（0-100）' },
+                timingLevel: {
+                  type: 'string',
+                  enum: ['attack', 'balanced', 'defense'],
+                  description:
+                    '今日择时档位（前提闸门）：attack 进攻可正常 buy / balanced 均衡精选 / defense 防守禁新开多。防守档新开仓 buy 会被后端自动降级为 watch。',
+                },
+                positionPct: { type: 'number', description: '建议仓位 %（0-100，须与择时档位一致）' },
                 support: { type: 'string', description: '关键支撑位' },
                 resistance: { type: 'string', description: '关键压力位' },
-                summary: { type: 'string', description: '一句话定调' },
+                summary: { type: 'string', description: '一句话定调（含择时档位与理由）' },
               },
             },
             focusSectors: {
@@ -924,10 +1009,28 @@ export const tools: ToolDef[] = [
                   thesis: { type: 'string', description: '操作逻辑' },
                   source: {
                     type: 'string',
-                    enum: ['research', 'hotspot', 'sector', 'position', 'watchlist', 'other'],
-                    description: '线索来源（体现串联）',
+                    enum: ['research', 'hotspot', 'sector', 'screener', 'position', 'watchlist', 'other'],
+                    description:
+                      '线索来源（体现串联）：来自 screen_stocks 选股引擎的个股标 screener；研报 research / 热点 hotspot / 板块 sector / 持仓 position / 自选 watchlist。',
+                  },
+                  confidence: {
+                    type: 'number',
+                    description:
+                      '综合置信度 0-100：据短线四要素/右侧确认强度/辩论结论打分。仅高置信度才宜 buy，中等宜 watch+确认条件。',
                   },
                   positionHint: { type: 'string', description: '建议仓位，如 20%' },
+                  confirmConditions: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description:
+                      '右侧确认条件（个股放量突破平台/创阶段新高确认、ETF 回踩不破均线后再放量转强等），盘中据此判断是否真正介入',
+                  },
+                  invalidConditions: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description:
+                      '逻辑失效条件（满足则当天取消/降级，如大盘跌破支撑且缩量、板块跌出资金流入榜、个股跌破昨高或平台下沿），供盘中纠偏与收盘复盘对照',
+                  },
                   priority: { type: 'number', description: '优先级（越大越靠前）' },
                   buyTrigger: TRIGGER_SCHEMA,
                   sellTrigger: TRIGGER_SCHEMA,
@@ -958,10 +1061,17 @@ export const tools: ToolDef[] = [
             | 'research'
             | 'hotspot'
             | 'sector'
+            | 'screener'
             | 'position'
             | 'watchlist'
             | 'other',
+          confidence:
+            typeof it.confidence === 'number'
+              ? Math.min(Math.max(Math.round(it.confidence), 0), 100)
+              : null,
           positionHint: asString(it.positionHint),
+          confirmConditions: asStringArray(it.confirmConditions),
+          invalidConditions: asStringArray(it.invalidConditions),
           priority: typeof it.priority === 'number' ? it.priority : 0,
           buyTrigger: asTrigger(it.buyTrigger),
           sellTrigger: asTrigger(it.sellTrigger),
@@ -1058,16 +1168,121 @@ export const tools: ToolDef[] = [
     definition: {
       type: 'function',
       function: {
+        name: 'record_catalysts',
+        description:
+          '把识别出的「消息催化主线」结构化入库（情报研判调用，一次传数组 catalysts）。按 theme 去重 upsert：系统自动累计跨日出现次数 seenCount 与首现日期 firstSeenDate，并合并标的。fermented=false 表示起爆前未发酵（埋伏候选），true 表示已发酵/高位（追高风险）。供今日计划识别「反复出现但未发酵」的潜伏主线。',
+        parameters: {
+          type: 'object',
+          properties: {
+            catalysts: {
+              type: 'array',
+              description: '催化记录数组',
+              items: {
+                type: 'object',
+                properties: {
+                  theme: { type: 'string', description: '题材/板块名（去重键，必填）' },
+                  catalystType: { type: 'string', description: '催化类型：政策/订单/事件/业绩/资金等' },
+                  direction: { type: 'string', description: '受益方向描述' },
+                  codes: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description: '相关标的代码或名称',
+                  },
+                  catalystWindow: { type: 'string', description: '预计兑现/发酵时间窗' },
+                  fermented: { type: 'boolean', description: '是否已发酵/高位（起爆前未发酵传 false）' },
+                  realizedPct: { type: 'number', description: '已兑现涨幅 %（可选）' },
+                  note: { type: 'string', description: '催化要点/备注' },
+                },
+                required: ['theme'],
+              },
+            },
+          },
+          required: ['catalysts'],
+        },
+      },
+    },
+    run: async (args) => {
+      const raw = Array.isArray(args.catalysts) ? (args.catalysts as Record<string, unknown>[]) : [];
+      const inputs: NewsCatalystInput[] = raw
+        .map((c) => ({
+          theme: asString(c.theme),
+          catalystType: c.catalystType != null ? asString(c.catalystType) : undefined,
+          direction: c.direction != null ? asString(c.direction) : undefined,
+          codes: asStringArray(c.codes),
+          catalystWindow: c.catalystWindow != null ? asString(c.catalystWindow) : undefined,
+          fermented: typeof c.fermented === 'boolean' ? c.fermented : undefined,
+          realizedPct: typeof c.realizedPct === 'number' ? c.realizedPct : undefined,
+          note: c.note != null ? asString(c.note) : undefined,
+        }))
+        .filter((c) => c.theme.trim().length > 0);
+      if (inputs.length === 0) return '未提供有效催化记录（每条至少需要 theme）';
+      const saved = inputs.map((i) => research.upsertCatalyst(i));
+      return preview(
+        `已入库 ${saved.length} 条催化：` +
+          saved
+            .map((c) => `${c.theme}(出现${c.seenCount}次/首现${c.firstSeenDate}/${c.fermented ? '已发酵' : '未发酵'})`)
+            .join('、'),
+      );
+    },
+  },
+  {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'list_catalysts',
+        description:
+          '读取近期结构化「消息催化主线」（今日计划调用，作为起爆前选股的候选来源）。默认返回近 7 天、按最近出现倒序。unfermentedOnly=true 仅返回未发酵（起爆前埋伏）；记录含首现日期/累计出现次数，反复出现但未发酵者为重点潜伏主线。',
+        parameters: {
+          type: 'object',
+          properties: {
+            unfermentedOnly: { type: 'boolean', description: '仅未发酵（起爆前埋伏候选），缺省 false 返回全部' },
+            withinDays: { type: 'number', description: '近 N 天内有更新的，缺省 7' },
+            limit: { type: 'number', description: '返回条数，1-100，缺省 30' },
+          },
+        },
+      },
+    },
+    run: async (args) => {
+      const list = research.listCatalysts({
+        unfermentedOnly: args.unfermentedOnly === true,
+        withinDays: args.withinDays != null ? Number(args.withinDays) : undefined,
+        limit: args.limit != null ? Number(args.limit) : undefined,
+      });
+      if (list.length === 0) return '近期暂无结构化催化记录（情报研判尚未入库或已超期）。';
+      return preview(
+        JSON.stringify(
+          list.map((c) => ({
+            theme: c.theme,
+            catalystType: c.catalystType,
+            direction: c.direction,
+            codes: c.codes,
+            catalystWindow: c.catalystWindow,
+            firstSeenDate: c.firstSeenDate,
+            lastSeenDate: c.lastSeenDate,
+            seenCount: c.seenCount,
+            fermented: c.fermented,
+            note: c.note,
+          })),
+          null,
+          2,
+        ),
+      );
+    },
+  },
+  {
+    definition: {
+      type: 'function',
+      function: {
         name: 'screen_stocks',
         description:
-          '本系统原生多因子选股引擎：全市场快照→规则硬筛(剔科创/北交/ST、量价估值阈值)→多因子打分(估值/流动性/市值/动量/活跃度/题材热度)→LLM横向排序→组合去集中，产出 TopN 候选(含因子分、选股逻辑、风险标签)。与 mx_screener(妙想自然语言选股) 互补：此工具确定性可解释、内置短线题材策略。',
+          '本系统原生多因子选股引擎：全市场快照→规则硬筛(剔科创/北交/ST、量价估值阈值)→多因子打分(估值/流动性/市值/动量/活跃度/题材热度)→LLM横向排序→组合去集中，产出 TopN 候选(含因子分、选股逻辑、风险标签)。pre_breakout_catalyst 策略会对收窄后的候选池逐只补「趋势(多头排列/临近20日新高/量能放大)」与「资金流(主力净流入持续性)」因子。与 mx_screener(妙想自然语言选股) 互补：此工具确定性可解释、内置短线题材策略。',
         parameters: {
           type: 'object',
           properties: {
             strategyId: {
               type: 'string',
               description:
-                '策略 id：theme_momentum 题材动量 / volume_breakout 放量突破 / balanced_alpha 均衡阿尔法 / dual_low 双低价值。缺省用默认策略。',
+                '策略 id：theme_momentum 题材动量 / volume_breakout 放量突破 / pre_breakout_catalyst 起爆前·趋势资金(逐只补趋势与主力资金持续性，适合起爆前埋伏/右侧确认) / balanced_alpha 均衡阿尔法 / dual_low 双低价值。缺省用默认策略。',
             },
             context: {
               type: 'string',
@@ -1156,6 +1371,89 @@ export const tools: ToolDef[] = [
       } catch (e) {
         return `AKShare 调用失败：${e instanceof Error ? e.message : String(e)}`;
       }
+    },
+  },
+  {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'iwencai_stock_pick',
+        description:
+          '同花顺问财个股智能选股（自然语言）：用一句话筛选 A 股，如「连续3天主力净流入且站上20日线的半导体股」「ROE大于15%且市盈率小于20的科技股」。' +
+          '返回符合条件的个股结构化字段（代码/名称/现价/涨跌幅/相关指标）。' +
+          'ETF 锁定赛道后「赛道内下钻选龙头」、做条件选股/题材选股时调用。需账号开通问财个股 skill（数据源页「同花顺问财个股选股」启用并配置）。',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: '自然语言选股条件，如「主力净流入且站上20日线的半导体股」' },
+            limit: { type: 'number', description: '返回条数，默认 20，最大 50' },
+          },
+          required: ['query'],
+        },
+      },
+    },
+    run: async (args, ctx) => {
+      const query = asString(args.query).trim();
+      if (!query) return 'iwencai_stock_pick 需提供 query（自然语言选股条件）';
+      const n = Number(args.limit);
+      const limit = Number.isFinite(n) && n > 0 ? Math.min(Math.floor(n), 50) : 20;
+      try {
+        const json = await iwencaiQueryStock(query, { limit: String(limit), signal: ctx.signal });
+        if (!json || !('datas' in json)) {
+          const m =
+            (json && typeof json.message === 'string' && json.message) ||
+            (json && typeof json.msg === 'string' && json.msg) ||
+            '问财网关返回异常（无 datas，疑似额度/鉴权/个股 skill 未开通）';
+          return `问财个股选股失败：${m}`;
+        }
+        return preview(json.datas);
+      } catch (e) {
+        return `问财个股选股失败：${e instanceof Error ? e.message : String(e)}`;
+      }
+    },
+  },
+  {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'market_board_strength',
+        description:
+          '板块中线强弱 + 市场主线聚合（确定性取数，东财行业/概念涨幅榜 + 主力净流入 + 日K 均线/动量）。' +
+          '返回两部分：①行业/概念按【中线强度】（均线排列/动量口径，非当日涨幅）排序的强弱榜；' +
+          '②按真实板块归并的市场主线（多源叠加强度、含资金/领涨/状态）。' +
+          '做「板块主线研判」「今日计划的板块/中线基准」时调用，据此判断主线方向、值得中线跟踪的行业、应剔除的退潮板块。',
+        parameters: { type: 'object', properties: {} },
+      },
+    },
+    run: async () => {
+      // 先刷新一次主线聚合（确保板块主源为当日最新），失败不阻断
+      await themes.refreshThemes().catch(() => {});
+      const [industries, themeList] = await Promise.all([
+        radar.computeIndustryRadar().catch(() => []),
+        Promise.resolve(themes.listThemes(false)),
+      ]);
+      const trendText: Record<string, string> = {
+        multi_long: '多头排列',
+        up: '趋势向上',
+        range: '震荡',
+        down: '走弱',
+      };
+      const indLines = industries.slice(0, 18).map((it, i) => {
+        const kind = it.boardKind === 'concept' ? '概念' : '行业';
+        const pct = it.pct != null ? `${it.pct >= 0 ? '+' : ''}${it.pct.toFixed(2)}%` : '—';
+        const mom = it.metrics.momentum != null ? `动量${it.metrics.momentum >= 0 ? '+' : ''}${it.metrics.momentum.toFixed(1)}` : '';
+        return `${i + 1}. ${it.name}[${kind}] 强度${it.strengthScore}·${trendText[it.trend] ?? it.trend}·当日${pct}${mom ? '·' + mom : ''}${it.leadStock ? '·领涨' + it.leadStock : ''}`;
+      });
+      const themeLines = themeList.slice(0, 12).map((t, i) => {
+        const ev = t.evidence[0]?.text ?? '';
+        return `${i + 1}. ${t.theme} 强度${Math.round(t.strength)}·${t.status}·${t.sources.length}源${ev ? '｜' + ev : ''}`;
+      });
+      const text =
+        '【板块中线强弱（行业+概念，按中线强度排序，非当日涨幅）】\n' +
+        (indLines.join('\n') || '暂无板块数据') +
+        '\n\n【市场主线聚合（真实板块为主源，复盘/热点为证据 overlay）】\n' +
+        (themeLines.join('\n') || '暂无主线数据');
+      return preview(text, 12000);
     },
   },
 ];
@@ -1342,14 +1640,20 @@ const TOOL_GROUP: Record<string, string> = {
   mx_cancel: '妙想',
   stock_quotes: '行情持仓',
   real_positions: '行情持仓',
+  get_position_discipline: '行情持仓',
   market_snapshot: '行情持仓',
+  market_sentiment: '行情持仓',
+  market_board_strength: '行情持仓',
   sync_ths_watchlist: '行情持仓',
   eastmoney_datacenter: '行情持仓',
   akshare_call: 'AKShare',
   screen_stocks: '选股',
+  iwencai_stock_pick: '选股',
   decision_debate: '决策',
   research_reports: '研报热点',
   trendradar_hotspots: '研报热点',
+  record_catalysts: '研报热点',
+  list_catalysts: '研报热点',
   save_today_plan: '计划复盘',
   get_today_plan: '计划复盘',
   update_plan_item: '计划复盘',
@@ -1357,6 +1661,7 @@ const TOOL_GROUP: Record<string, string> = {
   get_plan_context: '计划复盘',
   get_latest_review_stance: '计划复盘',
   etf_signals: 'ETF',
+  etf_rotation_strength: 'ETF',
   sim_positions: '战法',
   sim_trade: '战法',
   propose_skill_update: '战法',

@@ -3,8 +3,10 @@ import { buildOverview } from '../market/overview';
 import { getQuotes } from '../market/eastmoney';
 import { fetchRealPositions } from '../realPositions';
 import { listWatch } from '../watchlist';
-import { listReviews } from '../repo';
+import { listMarketBoardReviews, listReviews } from '../repo';
 import { miaoxiang } from '../miaoxiang/client';
+import { ingestFromReview, listThemes, refreshThemes } from '../themes/service';
+import { computePlanFulfillment } from '../plan/service';
 
 // 妙想原始响应压缩：超长时保留头部，避免注入 prompt 撑爆 token。
 function mxPreview(value: unknown, max = 3000): string {
@@ -69,6 +71,21 @@ export function buildReviewDigest(jsonText: string, fulfillment: PlanFulfillment
   return `📊 收盘复盘摘要\n${lines.join('\n')}`;
 }
 
+/**
+ * 深度复盘成功完成后的统一回调：把复盘 mainThemes 的验证结论结构化回流共享主线
+ * （写 phase / 调整强度与退潮态），闭合阶段 B「复盘验证 → 主线回流」。
+ * best-effort，绝不抛错阻断复盘落库；供 review.eod 定时与 /ws/review 手动流式共用。
+ */
+export function onDeepReviewComplete(jsonText: string | null): void {
+  if (!jsonText) return;
+  try {
+    const n = ingestFromReview(jsonText);
+    if (n > 0) console.log(`[review] 复盘验证回流共享主线 ${n} 条`);
+  } catch (e) {
+    console.warn('[review] 复盘主线回流失败:', e instanceof Error ? e.message : e);
+  }
+}
+
 /** 组装深度复盘 prompt（含盘面/持仓/自选/上次复盘上下文，best-effort 降级） */
 export async function buildDeepReviewPrompt(): Promise<string> {
   // 盘面快照（必备）+ 真实持仓（best-effort，未配置 Cookie 时降级）
@@ -125,6 +142,39 @@ export async function buildDeepReviewPrompt(): Promise<string> {
     }
   } catch {
     /* 历史解析失败忽略 */
+  }
+
+  // 共享市场主线（待验证）：先刷新当日板块主线，再取活跃主线清单 + 最新板块研判结论，
+  // 让复盘逐条对照验证（延续/加速/分歧/退潮/证伪），结论经 ingestFromReview 回流 themes。
+  let sharedThemesNote = '暂无共享市场主线（板块聚合未产出）。';
+  try {
+    await refreshThemes().catch(() => {});
+    const themeLines = listThemes(false)
+      .slice(0, 10)
+      .map(
+        (t) =>
+          `- ${t.theme}｜强度${Math.round(t.strength)}｜${t.status}/${t.phase}｜来源${t.sources.length}` +
+          `${t.evidence[0]?.text ? `｜${t.evidence[0].text}` : ''}`,
+      );
+    const board = listMarketBoardReviews(1)[0];
+    const boardNote = board?.outputText ? `\n[最新大盘与板块研判]\n${board.outputText.slice(0, 1200)}` : '';
+    if (themeLines.length) sharedThemesNote = `${themeLines.join('\n')}${boardNote}`;
+  } catch {
+    /* 主线源异常忽略，复盘照常 */
+  }
+
+  // 计划兑现度（纯代码统计，不调模型）：供复盘点评今日计划命中率，闭合「兑现度入复盘」。
+  let fulfillmentNote = '暂无今日计划兑现度数据。';
+  try {
+    const f = computePlanFulfillment();
+    if (f && f.total > 0) {
+      const rate = f.hitRate != null ? `${Math.round(f.hitRate * 100)}%` : '—';
+      fulfillmentNote =
+        `计划项${f.total}（含触发价${f.withTrigger}）：命中${f.triggered}（${rate}）` +
+        ` 失效${f.invalid} 待触发${f.pending}`;
+    }
+  } catch {
+    /* 兑现度异常忽略 */
   }
 
   // 妙想确定性取数（全部 best-effort 降级，并行预取，不占 agent step）：
@@ -205,7 +255,9 @@ export async function buildDeepReviewPrompt(): Promise<string> {
     '③情绪周期定位（启动/发酵/高潮/退潮/冰点 + 赚钱/亏钱效应）；④资金面深度（北向、主力、两融、量能、风格切换）；' +
     '⑤连板梯队质量（晋级率、炸板率、最高板高度、高度板分歧、涨停溢价率 limitUpPremium，溢价率优先取【妙想情绪量化】）；' +
     '⑥当前主线题材判断（结合梯队/资金流/概念，主线名称+强度阶段+依据，可多条按强度排序）；' +
-    '⑦热门板块与细分概念；⑧热门个股；⑨逐只持仓复盘（今日表现+去留建议）；⑩我的今日操作复盘（针对今日新开仓标的评估对错）；' +
+    '【主线验证】请逐条对照下方【共享市场主线（待验证）】清单，对每条主线给出 verdict（延续/加速/分歧/退潮/证伪），' +
+    '不得凭空另起清单外的主线（确有新主线时在 reason 注明「新增」）；' +
+    '⑦热门板块与细分概念；⑧热门个股；⑨逐只持仓复盘（今日表现+去留建议）；⑩我的今日操作复盘（针对今日新开仓标的评估对错，并结合下方【计划兑现度】点评今日计划命中得失）；' +
     '⑪自选股池复盘（强弱定性+点评）；⑫风险警示（外围/监管/获利盘/退潮信号）；⑬明日策略（重点关注、应对预案、仓位建议）；' +
     '⑭与近日对比（主线延续还是切换、情绪趋势）；⑮操作建议；' +
     '⑯外围市场综述（基于 globalIndices 美股/亚太/汇率/A50 走势，逐个给走势定性与对 A 股影响）；' +
@@ -223,7 +275,7 @@ export async function buildDeepReviewPrompt(): Promise<string> {
     '"ladderQuality":{"promotionRate":"string","brokenRate":"string","maxHeight":"string","divergence":"string","limitUpPremium":"string"},' +
     '"dragonTiger":[{"code":"string","name":"string","netBuy":"string","note":"string"}],' +
     '"sentimentBenchmark":[{"type":"弱转强|强转弱|空间龙|主线龙头","code":"string","name":"string","note":"string"}],' +
-    '"mainThemes":[{"name":"string","strength":"string","reason":"string"}],' +
+    '"mainThemes":[{"name":"string","strength":"string","reason":"string","verdict":"延续|加速|分歧|退潮|证伪"}],' +
     '"hotSectors":[{"name":"string","kind":"行业|概念","note":"string"}],' +
     '"hotStocks":[{"code":"string","name":"string","note":"string"}],' +
     '"strongSectors":[{"name":"string","reason":"string","leader":"string"}],' +
@@ -247,6 +299,10 @@ export async function buildDeepReviewPrompt(): Promise<string> {
     watchNote +
     '\n\n=== 上次复盘 ===\n' +
     prevReviewNote +
+    '\n\n=== 共享市场主线（待验证，逐条给 mainThemes[].verdict）===\n' +
+    sharedThemesNote +
+    '\n\n=== 计划兑现度（今日计划命中统计，用于操作复盘点评）===\n' +
+    fulfillmentNote +
     '\n\n=== 妙想综合研判（权威源，情绪周期/资金风格/主线/明日方向优先采信）===\n' +
     mxJudgeNote +
     '\n\n=== 妙想强势板块/个股（原始数据，用于 strongSectors/strongStocks 归纳）===\n' +

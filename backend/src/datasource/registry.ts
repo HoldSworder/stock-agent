@@ -20,7 +20,9 @@ import { miaoxiang } from '../miaoxiang/client';
 import { fetchList } from '../research/client';
 import { callTool } from '../trendradar/mcpClient';
 import { pingHtsc } from '../htsc/client';
-import { pingIwencai } from '../iwencai/client';
+import { pingIwencai, pingIwencaiStock } from '../iwencai/client';
+import { callAkshare } from '../market/akshare';
+import { ping as pingCls } from '../cls/service';
 import { sqlite } from '../db/client';
 
 // 数据源注册中心：所有外部取数的单一元数据真相。
@@ -109,7 +111,7 @@ const SOURCES: SourceDef[] = [
     category: '行情',
     protocol: 'http-rest',
     baseUrl: 'www.jisilu.cn',
-    description: 'ETF/可转债 折溢价与 IOPV 补充源（best-effort）。启用后，东财 IOPV 缺失时补充折溢价；公开端点偶发需 cookie，默认关闭。',
+    description: 'ETF/可转债 折溢价与 IOPV 权威源。默认开启用于补 ETF 折溢价（优先采用其 discount_rt）；公开端点偶发需 cookie，被限流时填。',
     enabledKey: 'jisiluEnabled',
     fields: [
       { key: 'jisiluCookie', label: 'Cookie', secret: true, required: false, placeholder: '可选：jisilu.cn 登录 Cookie（公开端点被限流时填）' },
@@ -121,12 +123,12 @@ const SOURCES: SourceDef[] = [
     name: 'AKShare（aktools）',
     category: '行情',
     protocol: 'http-rest',
-    baseUrl: 'router.qzran.cn:8091 → aktools /api/public',
+    baseUrl: 'aktools 反代地址 → /api/public',
     description:
-      'AKShare 全量开源财经接口（行情/财务/宏观/板块/资讯…），经群晖 aktools HTTP 服务透传，Agent 通过 akshare_call 工具按函数名调用。aktools 容器仅绑本机 9117，经群晖 nginx 反代（8091→9117）暴露，Base URL 填反代 HTTPS 地址，勿直连 8080。',
+      'AKShare 全量开源财经接口（行情/财务/宏观/板块/资讯…），经 aktools HTTP 服务透传，Agent 通过 akshare_call 工具按函数名调用。建议 aktools 容器仅绑本机端口，经反向代理以 HTTPS 暴露，Base URL 填反代地址。',
     enabledKey: 'akshareEnabled',
     fields: [
-      { key: 'akshareBaseUrl', label: 'Base URL', secret: false, required: true, placeholder: 'https://router.qzran.cn:8091' },
+      { key: 'akshareBaseUrl', label: 'Base URL', secret: false, required: true, placeholder: 'https://<aktools 反代地址>' },
     ],
     healthCheck: () => pingAkshare(),
   },
@@ -201,6 +203,46 @@ const SOURCES: SourceDef[] = [
       { key: 'iwencaiBaseUrl', label: 'Base URL', secret: false, required: false, placeholder: 'https://openapi.iwencai.com' },
     ],
     healthCheck: () => pingIwencai(),
+  },
+  {
+    id: 'iwencai-stock',
+    name: '同花顺问财个股选股',
+    category: '选股',
+    protocol: 'http-rest',
+    baseUrl: 'openapi.iwencai.com /v1/query2data',
+    description:
+      '同花顺问财 OpenAPI 个股版：自然语言 A 股智能选股 / 个股数据查询。与 ETF 选股复用同一 apiKey/Base URL（数据源页「同花顺问财 ETF 选股」处配置），仅 skill id 不同（X-Claw-Skill-Id）。默认禁用，需账号开通对应 skill 后填 skill id 并启用。',
+    enabledKey: 'iwencaiStockEnabled',
+    fields: [
+      { key: 'iwencaiStockSkillId', label: '个股 Skill ID', secret: false, required: true, placeholder: 'hithink-stock-selector（账号开通的个股选股 skill）' },
+    ],
+    healthCheck: () => pingIwencaiStock(),
+  },
+  {
+    id: 'xueqiu',
+    name: '雪球',
+    category: '资讯',
+    protocol: 'http-rest',
+    baseUrl: 'xueqiu.com（经 AKShare 透传）',
+    description:
+      '雪球财经数据，经 AKShare(aktools) 透传：个股关注/讨论热度（stock_hot_follow_xq / stock_hot_tweet_xq）、公司概况（stock_individual_basic_info_xq）。依赖 AKShare 数据源连通，Agent 经 akshare_call 调用对应函数补充情绪/舆情面。',
+    enabledKey: 'xueqiuEnabled',
+    fields: [],
+    healthCheck: async () => {
+      await callAkshare('stock_hot_follow_xq', {}, undefined, 'xueqiu');
+    },
+  },
+  {
+    id: 'cls',
+    name: '财联社电报',
+    category: '资讯',
+    protocol: 'http-rest',
+    baseUrl: 'cls.cn/telegraph（经 AKShare 透传）',
+    description:
+      '财经快讯/电报，经 AKShare(aktools) 透传，免鉴权。首选财联社电报（stock_info_global_cls），不可用时按序降级到同花顺/富途/东财/新浪全球快讯；在情报页「财联社电报」Tab 展示。依赖 AKShare 数据源连通；财联社源需较新版 akshare。',
+    enabledKey: 'clsEnabled',
+    fields: [],
+    healthCheck: () => pingCls(),
   },
   {
     id: 'research',

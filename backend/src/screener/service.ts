@@ -1,6 +1,18 @@
-import type { ScreenEngineInfo, ScreenRunDetail, ScreenStrategy, RunTrigger } from '@stock-agent/shared';
+import type {
+  ScreenEngineInfo,
+  ScreenNlStrategy,
+  ScreenRunDetail,
+  ScreenStrategy,
+  RunTrigger,
+  ScreenProgressEvent,
+} from '@stock-agent/shared';
 import { getMeta, setMeta } from '../settings';
 import { DEFAULT_STRATEGY_ID, hasStrategy, listStrategies } from './strategy';
+import {
+  DEFAULT_NL_STRATEGY_ID,
+  hasNlStrategy,
+  listNlStrategies,
+} from './nlStrategies';
 import { DEFAULT_ENGINE, getEngine, hasEngine, listEngines } from './engines';
 import { getRunDetail, getPickRowsForEval, listRuns, saveRun, updatePickEval } from './repo';
 import { fetchMarketSnapshot } from './snapshot';
@@ -35,6 +47,12 @@ function resolveStrategyId(id: string | null | undefined): string {
   return v && hasStrategy(v) ? v : defaultStrategyId();
 }
 
+/** 自然语言选股链路的预设解析（与多因子策略口径互不相干） */
+function resolveNlStrategyId(id: string | null | undefined): string {
+  const v = (id ?? '').trim();
+  return v && hasNlStrategy(v) ? v : DEFAULT_NL_STRATEGY_ID;
+}
+
 /** 读取页内默认配置（选股页展示与定时任务共用） */
 export function getDefaults(): { strategyId: string; topN: number } {
   return { strategyId: defaultStrategyId(), topN: defaultTopN() };
@@ -64,6 +82,8 @@ export interface RunScreenOptions {
   useLlm?: boolean;
   trigger: RunTrigger;
   taskName?: string | null;
+  /** 进度回调（WS 手动选股传入；cron/agent 缺省即静默） */
+  onProgress?: (e: ScreenProgressEvent) => void;
 }
 
 /** 执行一次选股：按 engine 分发到具体链路产出候选，统一落库并返回详情 */
@@ -72,12 +92,19 @@ export async function runScreen(opts: RunScreenOptions): Promise<ScreenRunDetail
   if (!hasEngine(engineId)) throw new Error(`未知或未启用的选股链路：${engineId}`);
   const engine = getEngine(engineId);
 
+  // 自然语言链路按 NL 预设解析 strategyId；其它链路按多因子策略解析
+  const resolvedStrategyId =
+    engine.info.id === 'nl'
+      ? resolveNlStrategyId(opts.strategyId)
+      : resolveStrategyId(opts.strategyId);
+
   const out = await engine.produce({
-    strategyId: resolveStrategyId(opts.strategyId),
+    strategyId: resolvedStrategyId,
     context: (opts.context ?? '').trim(),
     topN: opts.topN != null ? clampTopN(opts.topN) : defaultTopN(),
     useLlm: opts.useLlm !== false,
     trigger: opts.trigger,
+    onProgress: opts.onProgress,
   });
 
   const id = saveRun(
@@ -125,6 +152,7 @@ export function status(): {
   engines: ScreenEngineInfo[];
   defaultEngine: string;
   strategies: ScreenStrategy[];
+  nlStrategies: ScreenNlStrategy[];
   defaultStrategyId: string;
   defaultTopN: number;
   recentRuns: ReturnType<typeof listRuns>;
@@ -134,10 +162,11 @@ export function status(): {
     engines: listEngines(),
     defaultEngine: DEFAULT_ENGINE,
     strategies: listStrategies(),
+    nlStrategies: listNlStrategies(),
     defaultStrategyId: d.strategyId,
     defaultTopN: d.topN,
     recentRuns: listRuns(10),
   };
 }
 
-export { listRuns, getRunDetail, listStrategies, listEngines };
+export { listRuns, getRunDetail, listStrategies, listNlStrategies, listEngines };

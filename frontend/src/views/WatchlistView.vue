@@ -7,6 +7,9 @@ import MarkdownView from '@/components/MarkdownView.vue';
 import StockLink from '@/components/StockLink.vue';
 import type { WatchlistEntry } from '@stock-agent/shared';
 
+// embedded：作为「持仓与自选」父页的 Tab 面板嵌入时隐藏自身 page-head。
+defineProps<{ embedded?: boolean }>();
+
 const items = ref<WatchlistEntry[]>([]);
 const loading = ref(false);
 
@@ -298,8 +301,8 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="page">
-    <div class="page-head">
+  <div :class="{ page: !embedded }">
+    <div v-if="!embedded" class="page-head">
       <div class="page-title">自选股</div>
       <div class="head-actions">
         <el-button
@@ -317,7 +320,18 @@ onUnmounted(() => {
         <el-button :icon="Refresh" :loading="loading" @click="load()">刷新</el-button>
       </div>
     </div>
-    <div class="page-sub">添加 A 股主板 / 创业板标的跟踪（东方财富实时行情，红涨绿跌）</div>
+    <div v-if="!embedded" class="page-sub">添加 A 股主板 / 创业板标的跟踪（东方财富实时行情，红涨绿跌）</div>
+    <div v-else class="embed-bar">
+      <span class="embed-sub">添加 A 股主板 / 创业板标的跟踪（东方财富实时行情，红涨绿跌）</span>
+      <el-button :icon="MagicStick" type="primary" :loading="reviewing" @click="analyzeAll">
+        一键 AI 分析
+      </el-button>
+      <el-button :icon="Plus" @click="createGroup">新建分组</el-button>
+      <el-button :icon="Files" @click="bulkVisible = true">批量添加</el-button>
+      <el-button :icon="Sort" :loading="syncing" @click="syncThs">同步同花顺</el-button>
+      <el-button :icon="Upload" :loading="pushing" @click="pushIdp">推送到爱盯盘</el-button>
+      <el-button :icon="Refresh" :loading="loading" @click="load()">刷新</el-button>
+    </div>
 
     <!-- 搜索添加：点击候选加入当前分组 -->
     <div class="add-bar">
@@ -469,6 +483,19 @@ onUnmounted(() => {
 .head-actions {
   display: flex;
   gap: 8px;
+}
+.embed-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.embed-sub {
+  flex: 1;
+  min-width: 200px;
+  font-size: 12.5px;
+  color: var(--text-2);
 }
 .add-bar {
   display: flex;

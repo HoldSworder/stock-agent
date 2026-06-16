@@ -4,14 +4,22 @@ import dayjs from 'dayjs';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { Refresh, MagicStick, Plus, Delete, Setting } from '@element-plus/icons-vue';
 import { api } from '@/api';
+import { useCachedResource } from '@/composables/useCachedResource';
 import ModuleScheduleDialog from '@/components/ModuleScheduleDialog.vue';
-import MarkdownView from '@/components/MarkdownView.vue';
+import AiAnalysisDialog from '@/components/AiAnalysisDialog.vue';
+import BoardReviewConclusion from '@/components/BoardReviewConclusion.vue';
+import ScoreBreakdownPopover from '@/components/ScoreBreakdownPopover.vue';
+import StrengthMethodologyDrawer from '@/components/StrengthMethodologyDrawer.vue';
+import { QuestionFilled } from '@element-plus/icons-vue';
 import { useKlineStore } from '@/stores/kline';
 import type {
   EtfAction,
   EtfListItem,
   EtfOverview,
   EtfPoolItem,
+  EtfRotationItem,
+  EtfRotationOverview,
+  EtfRotationState,
   EtfSignal,
   EtfStatus,
   EtfTrigger,
@@ -22,14 +30,20 @@ const msg = (e: unknown) => (e instanceof Error ? e.message : '请求失败');
 const kline = useKlineStore();
 const openKline = (it: EtfListItem) => kline.open(it.code, it.name, it.secid);
 
-const tab = ref<'overview' | 'pool'>('overview');
+const tab = ref<'overview' | 'pool' | 'rotation'>('overview');
 const status = ref<EtfStatus | null>(null);
 
 // ===== Tab1 市场总览 =====
-const ov = ref<EtfOverview | null>(null);
-const ovLoading = ref(false);
-const reviewing = ref(false);
-const review = ref('');
+// SWR 缓存：重进/切 Tab 瞬显，3s 轮询变为按 TTL 的廉价新鲜度检查
+const {
+  data: ov,
+  loading: ovLoading,
+  refreshing: ovRefreshing,
+  load: loadOverviewRes,
+  reload: reloadOverview,
+} = useCachedResource<EtfOverview>('etf:overview', () => api.etf.overview(), { ttlMs: 60_000 });
+// 统一 AI 分析弹窗开关（ETF 综合研判，原市场点评 + 综合研判已合并为单一 kind）
+const analyzeOpen = ref(false);
 // 面板显隐
 const modules = ref<HomeModule[]>([]);
 const drawer = ref(false);
@@ -45,9 +59,38 @@ const loading = ref(false);
 const newCode = ref('');
 const newTags = ref('');
 const adding = ref(false);
-const analyzeDialog = ref(false);
-const analyzeText = ref('');
-const analyzing = ref(false);
+
+// ===== Tab3 行业轮动（中线赛道层）=====
+// SWR 缓存（120s，中线慢变）：切到轮动 Tab 命中即瞬显，不再每次重拉
+const {
+  data: rot,
+  loading: rotLoading,
+  load: loadRotationRes,
+  reload: reloadRotation,
+} = useCachedResource<EtfRotationOverview>('rotation:overview', () => api.rotation.overview(), {
+  ttlMs: 120_000,
+});
+const methodology = ref<InstanceType<typeof StrengthMethodologyDrawer>>();
+
+// 5 态彩色标签：进攻态偏暖、回避态偏冷
+const STATE_TAG: Record<EtfRotationState, 'danger' | 'warning' | 'success' | 'info'> = {
+  加速: 'danger',
+  上升: 'success',
+  回踩: 'warning',
+  过热: 'info',
+  破位: 'info',
+};
+const rsClass = (v: number | null) => (v == null ? '' : v > 0 ? 'up' : v < 0 ? 'down' : '');
+
+async function loadRotation(force = false) {
+  try {
+    await (force ? reloadRotation() : loadRotationRes());
+  } catch (e) {
+    ElMessage.error(msg(e));
+  }
+}
+
+const openRotKline = (it: EtfRotationItem) => kline.open(it.code, it.name);
 
 const ACTION_LABEL: Record<EtfAction, string> = {
   buy: '买入',
@@ -77,14 +120,12 @@ const statusText = () => {
 };
 
 // ===== Tab1 加载 =====
-async function loadOverview(silent = false) {
-  if (!silent) ovLoading.value = true;
+// force=true 强制拉最新（刷新按钮）；否则按缓存/TTL（初次/轮询），后台静默刷新不打扰
+async function loadOverview(force = false) {
   try {
-    ov.value = await api.etf.overview();
+    await (force ? reloadOverview() : loadOverviewRes());
   } catch (e) {
-    if (!silent) ElMessage.error(msg(e));
-  } finally {
-    if (!silent) ovLoading.value = false;
+    ElMessage.error(msg(e));
   }
 }
 
@@ -111,19 +152,6 @@ async function saveModules() {
     ElMessage.error(msg(e));
   } finally {
     savingModules.value = false;
-  }
-}
-
-async function runReview() {
-  reviewing.value = true;
-  review.value = '';
-  try {
-    const r = await api.etf.review();
-    review.value = r.text || '（无输出）';
-  } catch (e) {
-    ElMessage.error(msg(e));
-  } finally {
-    reviewing.value = false;
   }
 }
 
@@ -200,29 +228,14 @@ async function removePool(item: EtfPoolItem) {
   }
 }
 
-async function runAnalyze() {
-  analyzing.value = true;
-  analyzeDialog.value = true;
-  analyzeText.value = '';
-  try {
-    const r = await api.etf.analyze();
-    analyzeText.value = r.text || '（无输出）';
-  } catch (e) {
-    analyzeText.value = '';
-    ElMessage.error(msg(e));
-    analyzeDialog.value = false;
-  } finally {
-    analyzing.value = false;
-  }
-}
-
 let timer: ReturnType<typeof setInterval> | undefined;
 onMounted(async () => {
   await Promise.all([loadStatus(), loadModules()]);
   await Promise.all([loadOverview(), refreshPool()]);
   // 交易时段静默轮询市场总览（仅当前在总览 Tab 时刷新，省请求）
+  // 轮询不强刷：仅按 TTL 检查，未过期为纯内存命中（不发请求），过期则后台静默刷新一次
   timer = setInterval(() => {
-    if (tab.value === 'overview') void loadOverview(true);
+    if (tab.value === 'overview') void loadOverview();
   }, 3000);
 });
 onUnmounted(() => {
@@ -240,23 +253,32 @@ onUnmounted(() => {
           {{ statusText() }}
         </span>
         <template v-if="tab === 'overview'">
-          <el-button :icon="MagicStick" type="primary" :loading="reviewing" @click="runReview">
-            一键 AI 点评
+          <el-button :icon="MagicStick" type="primary" @click="analyzeOpen = true">
+            AI 综合研判
           </el-button>
           <el-button :icon="Setting" @click="openDrawer">模块管理</el-button>
-          <el-button :icon="Refresh" :loading="ovLoading" @click="loadOverview()">刷新</el-button>
+          <el-button :icon="Refresh" :loading="ovLoading || ovRefreshing" @click="loadOverview(true)">刷新</el-button>
         </template>
-        <template v-else>
-          <el-button :icon="MagicStick" type="primary" :loading="analyzing" @click="runAnalyze">
+        <template v-else-if="tab === 'pool'">
+          <el-button :icon="MagicStick" type="primary" @click="analyzeOpen = true">
             AI 综合研判
           </el-button>
           <ModuleScheduleDialog module="etf" />
           <el-button :icon="Refresh" :loading="loading" @click="refreshPool">刷新信号</el-button>
         </template>
+        <template v-else>
+          <el-button :icon="QuestionFilled" text @click="methodology?.open('rotation')">
+            方法论
+          </el-button>
+          <ModuleScheduleDialog module="etf" />
+          <el-button :icon="Refresh" :loading="rotLoading" @click="loadRotation(true)">
+            刷新轮动榜
+          </el-button>
+        </template>
       </div>
     </div>
 
-    <el-tabs v-model="tab" class="etf-tabs">
+    <el-tabs v-model="tab" class="etf-tabs" @tab-change="tab === 'rotation' && loadRotation()">
       <!-- ===================== Tab1 市场总览 ===================== -->
       <el-tab-pane label="ETF 市场总览" name="overview">
         <div class="page-sub">
@@ -327,13 +349,6 @@ onUnmounted(() => {
               <div class="idx-point num" :class="dir(it.pct)">{{ fixed(it.price, 3) }}</div>
               <div class="idx-pct num" :class="dir(it.pct)">{{ pct(it.pct) }}</div>
             </div>
-          </div>
-
-          <!-- AI 点评 -->
-          <div v-if="reviewing || review" class="review">
-            <div class="review-head"><el-icon><MagicStick /></el-icon> AI 市场点评</div>
-            <div v-if="reviewing" class="review-loading">正在结合 ETF 盘面生成点评…</div>
-            <MarkdownView v-else :source="review" />
           </div>
 
           <div class="grid">
@@ -485,7 +500,9 @@ onUnmounted(() => {
             </el-table-column>
             <el-table-column label="标的" min-width="150" fixed>
               <template #default="{ row }">
-                <span>{{ row.name }}<span class="muted">({{ row.code }})</span></span>
+                <span class="link" role="button" @click="kline.open(row.code, row.name)"
+                  >{{ row.name }}<span class="muted">({{ row.code }})</span></span
+                >
               </template>
             </el-table-column>
             <el-table-column label="现价" width="90">
@@ -568,7 +585,98 @@ onUnmounted(() => {
           <el-empty v-else description="跟踪池为空，添加 ETF 后刷新信号" />
         </div>
       </el-tab-pane>
+
+      <!-- ===================== Tab3 行业轮动 ===================== -->
+      <el-tab-pane label="行业轮动" name="rotation" lazy>
+        <div class="page-sub">
+          中线赛道层：跟踪池 + 主题赛道代表 ETF 的相对强弱(RS)/趋势/资金流确定性轮动榜 + 5 态，仅供研判，不自动下单
+          <span v-if="rot"> · 更新 {{ dayjs(rot.asOf).format('HH:mm:ss') }}</span>
+        </div>
+
+        <!-- agent 过滤结论（复用板块研判范式，指向 rotation API） -->
+        <BoardReviewConclusion source="rotation" />
+
+        <div v-loading="rotLoading" class="panel rot-panel">
+          <el-table v-if="rot && rot.items.length" :data="rot.items" size="small" @row-click="openRotKline">
+            <el-table-column type="index" label="#" width="44" />
+            <el-table-column label="ETF" min-width="170">
+              <template #default="{ row }">
+                <span class="link">{{ row.name }}<span class="muted">({{ row.code }})</span></span>
+                <span v-if="row.track" class="muted track">[{{ row.track }}]</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="80">
+              <template #default="{ row }">
+                <el-tag :type="STATE_TAG[row.state as EtfRotationState]" effect="dark" size="small">
+                  {{ row.state }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="强度" width="120">
+              <template #default="{ row }">
+                <ScoreBreakdownPopover
+                  :title="`${row.name} 轮动强度构成`"
+                  :parts="row.breakdown.parts"
+                  :total="row.breakdown.total"
+                >
+                  <span class="num strength">{{ row.score }}</span>
+                </ScoreBreakdownPopover>
+              </template>
+            </el-table-column>
+            <el-table-column label="RS(对300)" width="100" align="right">
+              <template #default="{ row }">
+                <span class="num" :class="rsClass(row.rs)">
+                  {{ row.rs == null ? '—' : `${row.rs >= 0 ? '+' : ''}${row.rs}%` }}
+                </span>
+              </template>
+            </el-table-column>
+            <el-table-column label="20/60/120日" min-width="150" align="right">
+              <template #default="{ row }">
+                <span class="num small">
+                  <span :class="dir(row.ret20)">{{ pct(row.ret20) }}</span> /
+                  <span :class="dir(row.ret60)">{{ pct(row.ret60) }}</span> /
+                  <span :class="dir(row.ret120)">{{ pct(row.ret120) }}</span>
+                </span>
+              </template>
+            </el-table-column>
+            <el-table-column label="年线偏离" width="92" align="right">
+              <template #default="{ row }">
+                <span class="num" :class="dir(row.maDeviation)">{{ pct(row.maDeviation) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="分位" width="72" align="right">
+              <template #default="{ row }">
+                {{ row.pricePercentile == null ? '—' : row.pricePercentile + '%' }}
+              </template>
+            </el-table-column>
+            <el-table-column label="折溢价" width="84" align="right">
+              <template #default="{ row }">
+                <span class="num" :class="dir(row.premiumPct)">{{ pct(row.premiumPct) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="周线" width="80" align="center">
+              <template #default="{ row }">
+                <span v-if="row.weekMaTrend === true" class="up">多头</span>
+                <span v-else-if="row.weekMaTrend === false" class="muted">未多头</span>
+                <span v-else class="muted">—</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="净流入" width="92" align="right">
+              <template #default="{ row }">
+                <span v-if="row.flowNetIn == null" class="muted">—</span>
+                <span v-else class="num" :class="rsClass(row.flowNetIn)">{{ fixed(row.flowNetIn) }}亿</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="研判" min-width="240">
+              <template #default="{ row }"><span class="muted note">{{ row.note }}</span></template>
+            </el-table-column>
+          </el-table>
+          <el-empty v-else-if="!rotLoading" description="暂无轮动数据，点右上角刷新轮动榜重试" />
+        </div>
+      </el-tab-pane>
     </el-tabs>
+
+    <StrengthMethodologyDrawer ref="methodology" />
 
     <!-- 模块管理抽屉 -->
     <el-drawer v-model="drawer" title="模块管理" size="320px">
@@ -584,12 +692,8 @@ onUnmounted(() => {
       </template>
     </el-drawer>
 
-    <el-dialog v-model="analyzeDialog" title="ETF 综合研判" width="720px" top="6vh">
-      <div v-loading="analyzing" class="analyze-box">
-        <MarkdownView v-if="analyzeText" :source="analyzeText" />
-        <p v-else class="muted">研判中…</p>
-      </div>
-    </el-dialog>
+    <!-- 统一 AI 分析弹窗（ETF 综合研判） -->
+    <AiAnalysisDialog v-model="analyzeOpen" kind="etf-analyze" title="ETF 综合研判" />
   </div>
 </template>
 
@@ -717,25 +821,6 @@ onUnmounted(() => {
   margin-top: 2px;
   color: var(--text-2);
 }
-.review {
-  background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 14px 16px;
-  margin-bottom: 18px;
-}
-.review-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-weight: 600;
-  color: var(--brand);
-  margin-bottom: 10px;
-}
-.review-loading {
-  color: var(--text-2);
-  font-size: 13px;
-}
 .grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -843,10 +928,5 @@ onUnmounted(() => {
 }
 .notes li {
   line-height: 1.7;
-}
-.analyze-box {
-  min-height: 120px;
-  max-height: 70vh;
-  overflow: auto;
 }
 </style>

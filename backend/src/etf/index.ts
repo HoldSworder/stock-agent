@@ -5,6 +5,7 @@ import { fetchEtfQuote } from './data';
 import * as repo from './repo';
 import * as svc from './service';
 import { getModules, setModules } from './modules';
+import { cached } from '../lib/ttlCache';
 
 // 挂载 ETF 模块：注册 /api/etf/*。server.ts 仅需 registerEtfModule(app) 一行接入，删除即整模块下线。
 // 自包含范式（仿 research/plan）：确定性指标层 + LLM 综合，跟踪池独立维护，信号经 agent 工具 etf_signals
@@ -108,6 +109,27 @@ export function registerEtfModule(app: FastifyInstance): void {
         defaultCron: '0 16 * * 1-5',
         run: cronJob('ETF-1600-持仓日终监控', PROMPT_DAYEND),
       },
+      {
+        // 合并后的单一 ETF AI 分析（量化信号 + 中线轮动 + 持仓/消息），落 taskRun 供今日计划 ETF 基准源。
+        // 收盘后 15:45，承接原 rotation.review 轮动定时（已下线），避免双跑。
+        id: 'etf.analyze',
+        label: 'ETF 综合研判（收盘后 1545）',
+        defaultCron: '45 15 * * 1-5',
+        run: async () => {
+          await runTask(
+            {
+              id: null,
+              name: svc.ETF_ANALYZE_TASK_NAME,
+              prompt: svc.ETF_ANALYZE_PROMPT,
+              modelConfig: { thinking: false, maxSteps: 14, maxTokens: 14000 },
+              notifyChannels: ['webui', 'telegram'],
+              timeoutSec: 600,
+              purpose: 'analyze',
+            },
+            'cron',
+          );
+        },
+      },
     ],
   });
 
@@ -166,7 +188,8 @@ export function registerEtfModule(app: FastifyInstance): void {
   // ETF 市场总览快照（仿大盘页，多榜单 + 概览 + 主题分类）
   app.get('/api/etf/overview', async (_req, reply) => {
     try {
-      return { ok: true, data: await svc.buildOverview() };
+      // 响应级 60s 缓存：多榜单聚合，重进 ETF 页共享同一快照（review/analyze 直连 buildOverview 不受影响）
+      return { ok: true, data: await cached('etf:overview', 60_000, svc.buildOverview) };
     } catch (e) {
       return fail(reply, e);
     }
@@ -186,7 +209,7 @@ export function registerEtfModule(app: FastifyInstance): void {
       const result = await runTask(
         {
           id: null,
-          name: 'ETF 市场点评',
+          name: svc.ETF_REVIEW_TASK_NAME,
           prompt: svc.buildEtfReviewPrompt(ov),
           modelConfig: { thinking: false, maxSteps: 10 },
           notifyChannels: ['webui'],
@@ -217,21 +240,7 @@ export function registerEtfModule(app: FastifyInstance): void {
   // 一键 ETF AI 综合研判（跑 agent，包成 run 纳入全局运行抽屉）
   app.post('/api/etf/analyze', async (_req, reply) => {
     try {
-      const result = await runTask(
-        {
-          id: null,
-          name: 'ETF 综合研判',
-          prompt:
-            '对 ETF 跟踪池做一次综合研判。第1步 用 etf_signals(action=signals) 取全池量化信号（估值分位/折溢价/动量排名/网格水位/操作建议与触发价）。' +
-            '第2步 用 real_positions 识别已持有 ETF，结合持仓成本/盈亏。第3步 对动量排名靠前或处于买入区的候选，用 mx_finance_data 补折溢价/份额、mx_search 补板块消息。' +
-            '第4步 输出：当前最值得加仓/建仓的 ETF（附依据与挂单价）、需减仓/规避的 ETF、以及轮动方向小结。结论精炼、分点、给依据，禁止 Markdown 表格。',
-          modelConfig: { thinking: false, maxSteps: 12 },
-          notifyChannels: ['webui'],
-          timeoutSec: 300,
-          purpose: 'analyze',
-        },
-        'manual',
-      );
+      const result = await svc.runEtfAnalyze({ trigger: 'manual', channels: ['webui'] });
       return {
         ok: result.status === 'success',
         data: { runId: result.runId, status: result.status, text: result.outputText },

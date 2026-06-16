@@ -1,13 +1,32 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import ToolsPanel from '@/components/core/ToolsPanel.vue';
 import PromptsPanel from '@/components/core/PromptsPanel.vue';
 import SchedulesPanel from '@/components/core/SchedulesPanel.vue';
 import DecisionAgentsPanel from '@/components/core/DecisionAgentsPanel.vue';
+import UsageView from './UsageView.vue';
 
-// 智能体中枢：把「约束 agent 的核心输入面」收拢为单页四 Tab ——
-// 能调什么（工具）/ 怎么被指挥（提示词）/ 多 agent 角色（智能体）/ 谁来唤起（调度）。
-const tab = ref('tools');
+// 智能体中枢：把「约束 agent 的核心输入面」收拢为单页五 Tab ——
+// 能调什么（工具）/ 怎么被指挥（提示词）/ 多 agent 角色（智能体）/ 谁来唤起（调度）/ 调用记录。
+const VALID_TABS = ['tools', 'prompts', 'agents', 'schedules', 'usage'] as const;
+type CoreTab = (typeof VALID_TABS)[number];
+function normalizeTab(v: unknown): CoreTab {
+  return VALID_TABS.includes(v as CoreTab) ? (v as CoreTab) : 'tools';
+}
+
+const route = useRoute();
+const router = useRouter();
+const tab = ref<CoreTab>(normalizeTab(route.query.tab));
+watch(
+  () => route.query.tab,
+  (v) => {
+    tab.value = normalizeTab(v);
+  },
+);
+watch(tab, (v) => {
+  if (route.query.tab !== v) router.replace({ query: { ...route.query, tab: v } });
+});
 </script>
 
 <template>
@@ -31,6 +50,9 @@ const tab = ref('tools');
       </el-tab-pane>
       <el-tab-pane label="调度" name="schedules" lazy>
         <SchedulesPanel />
+      </el-tab-pane>
+      <el-tab-pane label="调用记录" name="usage" lazy>
+        <UsageView embedded />
       </el-tab-pane>
     </el-tabs>
   </div>

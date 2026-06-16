@@ -1,20 +1,28 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, onBeforeUnmount, ref } from 'vue';
 import dayjs from 'dayjs';
 import { ElMessage } from 'element-plus';
-import { Compass, MagicStick, Refresh, TrendCharts } from '@element-plus/icons-vue';
-import { api } from '@/api';
+import { Compass, MagicStick, QuestionFilled, Refresh, TrendCharts } from '@element-plus/icons-vue';
+import { api, openWs } from '@/api';
 import ModuleScheduleDialog from '@/components/ModuleScheduleDialog.vue';
+import ScoreBreakdownPopover from '@/components/ScoreBreakdownPopover.vue';
+import ScreenerProgress from '@/components/ScreenerProgress.vue';
+import StrengthMethodologyDrawer from '@/components/StrengthMethodologyDrawer.vue';
 import { useKlineStore } from '@/stores/kline';
 import { SCREEN_FACTOR_LABELS } from '@stock-agent/shared';
 import type {
   ScreenEngineInfo,
   ScreenFactorKey,
+  ScorePart,
   ScreenPick,
+  ScreenProgressEvent,
   ScreenRun,
   ScreenRunDetail,
   ScreenStrategy,
+  ScreenNlStrategy,
 } from '@stock-agent/shared';
+
+const methodology = ref<InstanceType<typeof StrengthMethodologyDrawer>>();
 
 const kline = useKlineStore();
 const msg = (e: unknown) => (e instanceof Error ? e.message : '请求失败');
@@ -33,6 +41,7 @@ const engineId = ref('');
 
 // ===== 选股配置 =====
 const strategies = ref<ScreenStrategy[]>([]);
+const nlStrategies = ref<ScreenNlStrategy[]>([]);
 const strategyId = ref('');
 const context = ref('');
 const topN = ref(10);
@@ -42,12 +51,45 @@ const savingDefault = ref(false);
 // 仅首次加载用页内默认值初始化策略/数量，避免运行后刷新覆盖用户当前选择
 const touchedTopN = ref(false);
 
-const currentStrategy = computed(() =>
-  strategies.value.find((s) => s.id === strategyId.value) ?? null,
+// 自然语言选股链路：策略下拉改用 nl 预设，不走多因子量化口径
+const isNl = computed(() => engineId.value === 'nl');
+const strategyOptions = computed<Array<{ id: string; name: string; description: string }>>(() =>
+  isNl.value ? nlStrategies.value : strategies.value,
 );
 
+const currentStrategy = computed(() =>
+  strategyOptions.value.find((s) => s.id === strategyId.value) ?? null,
+);
+// 当前 nl 预设的自然语言选股口径（仅 nl 链路展示）
+const currentKeyword = computed(() =>
+  isNl.value ? nlStrategies.value.find((s) => s.id === strategyId.value)?.keyword ?? '' : '',
+);
+
+// 多因子策略画像（仅 multifactor 链路展示）：把后端 criteria 拆为 L1/L2a 两区。
+// 依赖后端 buildCriteria 文案约定——理想点条目含「理想」二字，其余为 L1 硬筛阈值。
+const multifactorStrategy = computed(() =>
+  isNl.value ? null : (currentStrategy.value as ScreenStrategy | null),
+);
+// L1 硬筛门槛：成交额/换手/涨幅/市值/PE/PB，不达标即剔除（决定去留）
+const critL1 = computed(() => multifactorStrategy.value?.criteria?.filter((c) => !c.includes('理想')) ?? []);
+// L2a 理想点：动量/活跃理想点曲线，距理想值越近分越高（参与打分）
+const critL2a = computed(() => multifactorStrategy.value?.criteria?.filter((c) => c.includes('理想')) ?? []);
+// L2a 因子权重画像：归一为百分比后按权重降序，体现策略侧重哪些因子
+const weightParts = computed(() => {
+  const w = multifactorStrategy.value?.factorWeights ?? {};
+  const sum = Object.values(w).reduce((s, v) => s + (v ?? 0), 0) || 1;
+  return (Object.entries(w) as [ScreenFactorKey, number][])
+    .filter(([, v]) => v > 0)
+    .map(([k, v]) => ({ key: k, label: SCREEN_FACTOR_LABELS[k], pct: Math.round((v / sum) * 100) }))
+    .sort((a, b) => b.pct - a.pct);
+});
+
 function selectEngine(e: ScreenEngineInfo) {
-  if (e.enabled) engineId.value = e.id;
+  if (!e.enabled || e.id === engineId.value) return;
+  engineId.value = e.id;
+  // 切换链路时把策略重置为该链路的首个选项，避免跨链路 id 不匹配
+  const opts = e.id === 'nl' ? nlStrategies.value : strategies.value;
+  strategyId.value = opts[0]?.id ?? '';
 }
 
 // ===== 结果 / 历史 =====
@@ -70,12 +112,23 @@ function factorBar(p: ScreenPick, key: ScreenFactorKey): number {
 function pickFactorKeys(p: ScreenPick): ScreenFactorKey[] {
   return p.factors.map((f) => f.key);
 }
+// 综合分构成：各因子对加权总分的贡献（weight = score × 归一权重），按贡献降序
+function factorParts(p: ScreenPick): ScorePart[] {
+  return p.factors
+    .map((f) => ({ label: SCREEN_FACTOR_LABELS[f.key], value: f.weight }))
+    .sort((a, b) => b.value - a.value);
+}
+// 当前结果所用策略（取其 criteria 口径展示）
+const detailStrategy = computed(() =>
+  detail.value ? strategies.value.find((s) => s.id === detail.value!.strategyId) ?? null : null,
+);
 
 async function loadStatus() {
   try {
     const s = await api.screener.status();
     engines.value = s.engines;
     strategies.value = s.strategies;
+    nlStrategies.value = s.nlStrategies ?? [];
     recentRuns.value = s.recentRuns;
     if (!engineId.value) engineId.value = s.defaultEngine || s.engines.find((e) => e.enabled)?.id || '';
     if (!strategyId.value) strategyId.value = s.defaultStrategyId || s.strategies[0]?.id || '';
@@ -85,25 +138,80 @@ async function loadStatus() {
   }
 }
 
+// ===== 实时进度（WebSocket）=====
+const progressEvents = ref<ScreenProgressEvent[]>([]);
+// 进度条阶段模板按发起时的链路/参数固定，避免运行中切换链路影响展示
+const runEngine = ref('');
+const runUseLlm = ref(true);
+let progressWs: WebSocket | null = null;
+
+function closeProgressWs() {
+  if (progressWs) {
+    progressWs.onopen = progressWs.onmessage = progressWs.onclose = progressWs.onerror = null;
+    try {
+      progressWs.close();
+    } catch {
+      /* 忽略关闭异常 */
+    }
+    progressWs = null;
+  }
+}
+
 async function run() {
   if (!strategyId.value) return;
   running.value = true;
-  try {
-    detail.value = await api.screener.screen({
-      engine: engineId.value,
-      strategyId: strategyId.value,
-      context: context.value.trim() || undefined,
-      topN: topN.value,
-      useLlm: useLlm.value,
-    });
-    await loadStatus();
-    ElMessage.success(`选出 ${detail.value.picks.length} 只候选`);
-  } catch (e) {
-    ElMessage.error(msg(e));
-  } finally {
-    running.value = false;
-  }
+  progressEvents.value = [];
+  runEngine.value = engineId.value;
+  runUseLlm.value = useLlm.value;
+  closeProgressWs();
+
+  const ws = openWs('/ws/screener');
+  progressWs = ws;
+  ws.onopen = () => {
+    ws.send(
+      JSON.stringify({
+        action: 'run',
+        params: {
+          engine: engineId.value,
+          strategyId: strategyId.value,
+          context: context.value.trim() || undefined,
+          topN: topN.value,
+          useLlm: useLlm.value,
+        },
+      }),
+    );
+  };
+  ws.onmessage = (ev) => {
+    let m: { type?: string; detail?: ScreenRunDetail; message?: string } & Partial<ScreenProgressEvent>;
+    try {
+      m = JSON.parse(ev.data);
+    } catch {
+      return;
+    }
+    if (m.type === 'progress' && m.stage && m.label && m.status) {
+      progressEvents.value = [...progressEvents.value, m as ScreenProgressEvent];
+    } else if (m.type === 'done' && m.detail) {
+      detail.value = m.detail;
+      running.value = false;
+      void loadStatus();
+      ElMessage.success(`选出 ${m.detail.picks.length} 只候选`);
+      closeProgressWs();
+    } else if (m.type === 'error') {
+      running.value = false;
+      ElMessage.error(m.message || '选股失败');
+      closeProgressWs();
+    }
+  };
+  ws.onclose = () => {
+    if (running.value) {
+      running.value = false;
+      ElMessage.error('选股连接已断开');
+    }
+  };
+  ws.onerror = () => ws.close();
 }
+
+onBeforeUnmount(closeProgressWs);
 
 async function saveDefault() {
   if (!strategyId.value) return;
@@ -154,10 +262,12 @@ onMounted(loadStatus);
         </div>
       </div>
       <div class="head-actions">
+        <el-button :icon="QuestionFilled" text @click="methodology?.open('short')">方法论</el-button>
         <ModuleScheduleDialog module="screener" />
         <el-button :icon="Refresh" circle @click="loadStatus" />
       </div>
     </header>
+    <StrengthMethodologyDrawer ref="methodology" />
 
     <!-- 发现枢纽快捷链路 -->
     <div class="hub">
@@ -182,12 +292,12 @@ onMounted(loadStatus);
       </div>
       <div class="config-row">
         <div class="field">
-          <label>策略</label>
+          <label>{{ isNl ? '选股预设' : '策略' }}</label>
           <el-select v-model="strategyId" style="width: 180px">
-            <el-option v-for="s in strategies" :key="s.id" :label="s.name" :value="s.id" />
+            <el-option v-for="s in strategyOptions" :key="s.id" :label="s.name" :value="s.id" />
           </el-select>
         </div>
-        <div class="field grow">
+        <div v-if="!isNl" class="field grow">
           <label>题材上下文（可选）</label>
           <el-input
             v-model="context"
@@ -206,28 +316,88 @@ onMounted(loadStatus);
             @change="touchedTopN = true"
           />
         </div>
-        <div class="field">
+        <div v-if="!isNl" class="field">
           <label>LLM 横排</label>
           <el-switch v-model="useLlm" />
         </div>
         <el-button type="primary" :icon="MagicStick" :loading="running" @click="run">
           开始选股
         </el-button>
-        <el-button :loading="savingDefault" @click="saveDefault">存为定时默认</el-button>
+        <el-button v-if="!isNl" :loading="savingDefault" @click="saveDefault">存为定时默认</el-button>
       </div>
       <p v-if="currentStrategy" class="strategy-desc">{{ currentStrategy.description }}</p>
+      <div v-if="isNl && currentKeyword" class="criteria">
+        <span class="crit-label">选股口径：</span>
+        <span class="keyword-text">{{ currentKeyword }}</span>
+      </div>
+      <div v-else-if="multifactorStrategy?.criteria?.length" class="profile">
+        <!-- L1 硬筛门槛：一票否决，决定去留 -->
+        <div class="profile-group">
+          <div class="pg-head">
+            <span class="pg-title">硬筛门槛</span>
+            <span class="pg-note">不达标即剔除 · 决定去留</span>
+          </div>
+          <div class="pg-tags">
+            <el-tag v-for="c in critL1" :key="c" size="small" effect="plain" class="crit-tag">
+              {{ c }}
+            </el-tag>
+          </div>
+        </div>
+        <!-- L2a 打分偏好：因子权重 + 理想点，决定排名 -->
+        <div class="profile-group">
+          <div class="pg-head">
+            <span class="pg-title">打分偏好</span>
+            <span class="pg-note">按因子权重加权 · 决定排名</span>
+          </div>
+          <div class="weights">
+            <div v-for="p in weightParts" :key="p.key" class="weight" :title="`${p.label} 权重 ${p.pct}%`">
+              <span class="wk">{{ p.label }}</span>
+              <span class="wbar"><i :style="{ width: p.pct + '%' }" /></span>
+              <span class="wv">{{ p.pct }}%</span>
+            </div>
+          </div>
+          <div v-if="critL2a.length" class="pg-tags ideal">
+            <el-tag v-for="c in critL2a" :key="c" size="small" effect="plain" type="info" class="crit-tag">
+              {{ c }}
+            </el-tag>
+          </div>
+        </div>
+      </div>
     </el-card>
 
     <div class="body">
       <!-- 结果 -->
       <el-card shadow="never" class="result">
-        <template v-if="detail">
+        <ScreenerProgress
+          v-if="running"
+          :events="progressEvents"
+          :engine="runEngine"
+          :use-llm="runUseLlm"
+        />
+        <template v-else-if="detail">
           <div class="result-head">
             <div>
               <h3>{{ detail.strategyName }} · Top{{ detail.picks.length }}</h3>
               <p class="meta">
-                全市场 {{ detail.marketCount }} → 硬筛 {{ detail.filteredCount }} ·
-                {{ fmtTime(detail.createdAt) }}
+                全市场 {{ detail.marketCount }} →
+                <el-popover
+                  v-if="detailStrategy?.criteria?.length"
+                  trigger="hover"
+                  :width="260"
+                  placement="bottom-start"
+                >
+                  <template #reference>
+                    <span class="filter-trigger">硬筛 {{ detail.filteredCount }}</span>
+                  </template>
+                  <div class="crit-pop">
+                    <div class="crit-pop-title">{{ detailStrategy.name }} · 硬筛口径</div>
+                    <div class="crit-pop-list">
+                      <span v-for="c in detailStrategy.criteria" :key="c">{{ c }}</span>
+                    </div>
+                  </div>
+                </el-popover>
+                <span v-else>硬筛 {{ detail.filteredCount }}</span>
+                · {{ fmtTime(detail.createdAt) }}
                 <span v-if="detail.context"> · 题材：{{ detail.context }}</span>
               </p>
             </div>
@@ -264,7 +434,15 @@ onMounted(loadStatus);
             </el-table-column>
             <el-table-column label="综合分" width="78">
               <template #default="{ row }">
-                <b>{{ row.screenScore }}</b>
+                <ScoreBreakdownPopover
+                  :title="`${row.name} 综合分构成`"
+                  :parts="factorParts(row)"
+                  :total="row.screenScore"
+                  :width="280"
+                >
+                  <b class="score-trigger">{{ row.screenScore }}</b>
+                  <template #extra>各项为「因子分 × 归一权重」的贡献，合计 ≈ 综合分。</template>
+                </ScoreBreakdownPopover>
               </template>
             </el-table-column>
             <el-table-column label="因子" min-width="170">
@@ -430,6 +608,114 @@ onMounted(loadStatus);
   margin: 10px 0 0;
   font-size: 12px;
   color: var(--el-text-color-secondary);
+}
+.criteria {
+  margin: 8px 0 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.crit-label {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.keyword-text {
+  font-size: 12px;
+  color: var(--el-text-color-regular);
+  line-height: 1.6;
+}
+.crit-tag {
+  margin: 0;
+}
+.profile {
+  margin: 10px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.profile-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pg-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.pg-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+}
+.pg-note {
+  font-size: 11px;
+  color: var(--el-text-color-secondary);
+}
+.pg-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.pg-tags.ideal {
+  margin-top: 2px;
+}
+.weights {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  max-width: 460px;
+}
+.weight {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.weight .wk {
+  flex: 0 0 56px;
+  font-size: 11.5px;
+  color: var(--el-text-color-regular);
+}
+.weight .wbar {
+  flex: 1;
+  height: 8px;
+  background: var(--el-fill-color);
+  border-radius: 4px;
+  overflow: hidden;
+}
+.weight .wbar i {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+  background: var(--el-color-primary);
+}
+.weight .wv {
+  flex: 0 0 36px;
+  text-align: right;
+  font-size: 11.5px;
+  font-family: var(--font-mono, monospace);
+  color: var(--el-text-color-secondary);
+}
+.score-trigger {
+  cursor: help;
+  border-bottom: 1px dashed var(--el-border-color);
+}
+.filter-trigger {
+  cursor: help;
+  border-bottom: 1px dashed var(--el-border-color);
+}
+.crit-pop-title {
+  font-size: 12.5px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.crit-pop-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--el-text-color-regular);
 }
 .body {
   display: grid;

@@ -19,6 +19,13 @@ const MIAOXIANG_NAME = '妙想东财模拟盘';
 const LOCAL_NAME = '尾盘动能套利';
 const INITIAL_CAPITAL = 1_000_000;
 
+// 两个种子战法买入关联的「自然语言选股」预设（选股模块 nl 链路），使买入标准与选股模块同源。
+const SCREEN_ENGINE = 'nl';
+const SEED_SCREEN_STRATEGY: Record<string, string> = {
+  [LOCAL_NAME]: 'weipan_momentum',
+  [MIAOXIANG_NAME]: 'miaoxiang_quant',
+};
+
 // 妙想 MX_APIKEY（取自 openclaw，使镜像同步开箱可用；用户可在设置页覆盖）
 const SEED_MX_APIKEY = 'mkt_54_Wc6-5-Pw4uDFTCKu5TZEsIiGfyEFdHIlwSEe8Q5Y';
 
@@ -40,7 +47,7 @@ const SKILL_BASELINE: Record<string, Record<SkillDimension, string>> = {
       '- 属当日强势主线板块，且非一字/天量加速末端；\n' +
       '- 排除明显的高位连板分歧票与基本面爆雷标的。',
     buy:
-      '尾盘对选出标的执行模拟买入：\n' +
+      '买入标的来自选股模块关联选股（自然语言选股·尾盘动能套利预设），不在该口径外自行扩选：\n' +
       '- 数量为 100 股整数倍，单票仓位不超过总资产的 30%；\n' +
       '- 涨停不可买、资金充足；优先按现价小仓位试探；\n' +
       '- 给出明确买点理由（动能、主线、量价）并记录到 reason。',
@@ -56,8 +63,8 @@ const SKILL_BASELINE: Record<string, Record<SkillDimension, string>> = {
       '- 涨幅 2%~7%、量比 > 1.2、成交额 > 3 亿、流通市值 50~800 亿；\n' +
       '- MACD > 0、价格在 20 日均线上；二次过滤后给不超过 3 只买入候选。',
     buy:
-      '对候选标的开盘买入：含现价与买点理由，数量 100 股整数倍，\n' +
-      '涨停不可买、资金充足，单票仓位适度分散。',
+      '买入标的来自选股模块关联选股（自然语言选股·妙想量化预设），不在该口径外自行扩选：\n' +
+      '含现价与买点理由，数量 100 股整数倍，涨停不可买、资金充足，单票仓位适度分散。',
     sell:
       '盘中分两次卖点检查：\n' +
       '- 10:15 第一次：可止损/止盈，允许补仓；\n' +
@@ -76,7 +83,25 @@ function ensureStrategy(name: string, kind: 'local' | 'miaoxiang') {
     description: SEED_DESCRIPTIONS[name] ?? null,
     initialCapital: INITIAL_CAPITAL,
     skillEnabled: true,
+    screenEngine: SCREEN_ENGINE,
+    screenStrategyId: SEED_SCREEN_STRATEGY[name] ?? null,
   });
+}
+
+/**
+ * 自愈回填：给已存在但未配置「买入关联选股」的两个种子战法补上 nl 预设关联。
+ * 无视种子标志、幂等；仅在 screenStrategyId 为空时写入，避免覆盖用户自定义。
+ */
+function backfillSeedScreenLinks(): void {
+  for (const name of [MIAOXIANG_NAME, LOCAL_NAME]) {
+    const s = listStrategies(true).find((x) => x.name === name);
+    if (!s || s.screenStrategyId) continue;
+    updateStrategy(s.id, {
+      screenEngine: SCREEN_ENGINE,
+      screenStrategyId: SEED_SCREEN_STRATEGY[name] ?? null,
+    });
+    console.log(`[seed] 已为战法「${name}」回填买入关联选股`);
+  }
 }
 
 /**
@@ -153,6 +178,9 @@ export async function seedStrategiesAndBind(): Promise<void> {
 
   // 0.1 自愈回填：给已 seeded 但缺简介的种子战法补上「总计介绍」（无视 flag、幂等）
   backfillSeedDescriptions();
+
+  // 0.2 自愈回填：给已 seeded 但未关联选股的种子战法补上 nl 预设关联（无视 flag、幂等）
+  backfillSeedScreenLinks();
 
   // 原子声明种子标志：INSERT ... ON CONFLICT DO NOTHING 跨进程原子，
   // 并发启动只有成功插入（changes===1）的赢家继续创建，其余直接返回，杜绝重复。

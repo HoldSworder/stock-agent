@@ -1,6 +1,19 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue';
-import { init, dispose, registerIndicator, CandleType, LineType, type Chart, type KLineData } from 'klinecharts';
+import {
+  init,
+  dispose,
+  registerIndicator,
+  CandleType,
+  LineType,
+  TooltipShowRule,
+  TooltipShowType,
+  CandleTooltipRectPosition,
+  type Chart,
+  type KLineData,
+  type TooltipLegend,
+  type CandleTooltipCustomCallbackData,
+} from 'klinecharts';
 import { storeToRefs } from 'pinia';
 import { api } from '@/api';
 import { useKlineStore } from '@/stores/kline';
@@ -86,6 +99,59 @@ function startPoll(): void {
   }, POLL_MS);
 }
 
+// A股红涨绿跌配色（图表 + tooltip 共用）
+const UP_COLOR = '#f0454a';
+const DOWN_COLOR = '#12b886';
+const FLAT_COLOR = '#cfd3dc';
+const colorOf = (n: number): string => (n > 0 ? UP_COLOR : n < 0 ? DOWN_COLOR : FLAT_COLOR);
+
+/** 悬浮明细 tooltip：中文字段 + 该 K 线至今收益（取图表最新收盘价计算），红涨绿跌着色 */
+function candleTooltip(data: CandleTooltipCustomCallbackData): TooltipLegend[] {
+  const c = data.current;
+  const time = c.timestamp
+    ? new Date(c.timestamp).toLocaleString('zh-CN', {
+        timeZone: 'Asia/Shanghai',
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        ...(tab.value === 'trend' || MINUTE_TABS.includes(tab.value)
+          ? { hour: '2-digit', minute: '2-digit' }
+          : {}),
+      })
+    : '--';
+  const grey = '#8a909c';
+  const row = (title: string, text: string, color = FLAT_COLOR): TooltipLegend => ({
+    title: { text: title, color: grey },
+    value: { text, color },
+  });
+
+  if (tab.value === 'trend') {
+    const base = (c as TrendKLineData).base;
+    const avg = (c as TrendKLineData).avg;
+    const chg = base > 0 ? ((c.close - base) / base) * 100 : 0;
+    return [
+      row('时间', time),
+      row('价格', fmtPrice(c.close), colorOf(c.close - base)),
+      row('均价', avg > 0 ? fmtPrice(avg) : '--'),
+      row('涨幅', base > 0 ? fmtPct(chg) : '--', colorOf(chg)),
+    ];
+  }
+
+  const dayChg = c.open > 0 ? ((c.close - c.open) / c.open) * 100 : 0;
+  const latest = chart?.getDataList().at(-1)?.close ?? c.close;
+  const hold = c.close > 0 ? ((latest - c.close) / c.close) * 100 : 0;
+  return [
+    row('时间', time),
+    row('开盘', fmtPrice(c.open), colorOf(c.open - (data.prev?.close ?? c.open))),
+    row('最高', fmtPrice(c.high), UP_COLOR),
+    row('最低', fmtPrice(c.low), DOWN_COLOR),
+    row('收盘', fmtPrice(c.close), colorOf(c.close - c.open)),
+    row('涨跌幅', fmtPct(dayChg), colorOf(dayChg)),
+    row('成交量', fmtVol(c.volume ?? 0)),
+    row('此K线至今收益', fmtPct(hold), colorOf(hold)),
+  ];
+}
+
 // A股红涨绿跌 + 深色主题样式
 const STYLES = {
   grid: {
@@ -115,9 +181,28 @@ const STYLES = {
       low: { color: '#cfd3dc' },
       last: { text: { color: '#ffffff' } },
     },
-    tooltip: { text: { color: '#cfd3dc' } },
+    tooltip: {
+      showRule: TooltipShowRule.FollowCross,
+      showType: TooltipShowType.Rect,
+      custom: candleTooltip,
+      rect: {
+        position: CandleTooltipRectPosition.Pointer,
+        color: 'rgba(20,24,33,0.92)',
+        borderColor: 'rgba(255,255,255,0.14)',
+        borderRadius: 6,
+      },
+      text: { color: '#cfd3dc' },
+    },
   },
   indicator: {
+    // MACD 水上(正值)红、水下(负值)绿；VOL 同理红涨绿跌
+    bars: [
+      {
+        upColor: UP_COLOR,
+        downColor: DOWN_COLOR,
+        noChangeColor: FLAT_COLOR,
+      },
+    ],
     tooltip: { text: { color: '#cfd3dc' } },
   },
   xAxis: { axisLine: { color: '#3a3f4b' }, tickLine: { color: '#3a3f4b' }, tickText: { color: '#8a909c' } },
@@ -393,6 +478,10 @@ watch([code, secid], () => {
         <el-radio-button value="week">周K</el-radio-button>
         <el-radio-button value="month">月K</el-radio-button>
       </el-radio-group>
+      <span class="kline-legend">
+        <i class="kline-legend__dot is-up" />红涨
+        <i class="kline-legend__dot is-down" />绿跌
+      </span>
       <span class="kline-tip">{{ tipText }}</span>
     </div>
     <div v-if="showStats" class="kline-quote">
@@ -428,6 +517,29 @@ watch([code, secid], () => {
 .kline-code {
   color: var(--text-2);
   font-size: 13px;
+}
+.kline-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--text-2);
+  font-size: 12px;
+}
+.kline-legend__dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  margin-left: 8px;
+}
+.kline-legend__dot:first-child {
+  margin-left: 0;
+}
+.kline-legend__dot.is-up {
+  background: #f0454a;
+}
+.kline-legend__dot.is-down {
+  background: #12b886;
 }
 .kline-tip {
   margin-left: auto;

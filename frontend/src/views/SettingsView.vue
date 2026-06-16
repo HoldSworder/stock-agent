@@ -1,11 +1,31 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue';
-import { useRouter } from 'vue-router';
+import { computed, onMounted, reactive, ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { api, clearToken } from '@/api';
 import type { AppSettings } from '@stock-agent/shared';
+import DataSourceView from './DataSourceView.vue';
+import OpsView from './OpsView.vue';
 
 const router = useRouter();
+const route = useRoute();
+
+// 系统设置三合一：数据源 / 模型与推送&密码 / 运维。三者后端接口各自独立不变。
+const VALID_TABS = ['datasource', 'general', 'ops'] as const;
+type SettingsTab = (typeof VALID_TABS)[number];
+function normalizeTab(v: unknown): SettingsTab {
+  return VALID_TABS.includes(v as SettingsTab) ? (v as SettingsTab) : 'datasource';
+}
+const tab = ref<SettingsTab>(normalizeTab(route.query.tab));
+watch(
+  () => route.query.tab,
+  (v) => {
+    tab.value = normalizeTab(v);
+  },
+);
+watch(tab, (v) => {
+  if (route.query.tab !== v) router.replace({ query: { ...route.query, tab: v } });
+});
 
 const loading = ref(false);
 const testing = ref(false);
@@ -101,11 +121,18 @@ onMounted(load);
 
 <template>
   <div class="page">
-    <div class="page-head"><div class="page-title">设置</div></div>
+    <div class="page-head"><div class="page-title">系统设置</div></div>
     <div class="page-sub">
-      系统级配置（模型 / Telegram / 访问密码）。各数据源凭据与启停已迁移至「数据源」页统一管理。
+      数据源凭据 / 模型与推送 / 数据库运维统一收口于此。三类配置后端接口各自独立。
     </div>
-    <el-form v-if="settings" label-position="top" class="s-form">
+
+    <el-tabs v-model="tab" class="settings-tabs">
+      <el-tab-pane label="数据源" name="datasource" lazy>
+        <DataSourceView embedded />
+      </el-tab-pane>
+
+      <el-tab-pane label="模型与推送" name="general">
+        <el-form v-if="settings" label-position="top" class="s-form">
       <section class="s-card">
         <div class="s-card-head">
           <div class="s-card-title">模型</div>
@@ -185,15 +212,24 @@ onMounted(load);
         </div>
       </section>
 
-      <div class="s-actions">
-        <el-button type="primary" :loading="loading" @click="save">保存</el-button>
-        <el-button :loading="testing" @click="test">测试模型连通性</el-button>
-      </div>
-    </el-form>
+          <div class="s-actions">
+            <el-button type="primary" :loading="loading" @click="save">保存</el-button>
+            <el-button :loading="testing" @click="test">测试模型连通性</el-button>
+          </div>
+        </el-form>
+      </el-tab-pane>
+
+      <el-tab-pane label="运维" name="ops" lazy>
+        <OpsView embedded />
+      </el-tab-pane>
+    </el-tabs>
   </div>
 </template>
 
 <style scoped>
+.settings-tabs {
+  margin-top: 4px;
+}
 .s-form {
   max-width: 880px;
 }

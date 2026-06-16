@@ -11,6 +11,8 @@ export const useAgentsStore = defineStore('agents', () => {
 
   const running = computed(() => runs.value.filter((r) => r.status === 'running'));
   const runningCount = computed(() => running.value.length);
+  // 历史运行：已结束（成功/失败/超时等）的运行，store.runs 已按 startedAt 倒序，直接过滤即可
+  const history = computed(() => runs.value.filter((r) => r.status !== 'running'));
 
   let ws: WebSocket | null = null;
   let reconnectTimer: number | null = null;
@@ -81,6 +83,7 @@ export const useAgentsStore = defineStore('agents', () => {
     connected,
     running,
     runningCount,
+    history,
     connect,
     disconnect,
     refresh: loadRuns,
