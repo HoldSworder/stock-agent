@@ -35,6 +35,8 @@ function toRun(r: RunRow): ScreenRun {
     selectionLogic: r.selectionLogic,
     portfolioRisk: r.portfolioRisk,
     runId: r.runId,
+    horizon: (r.horizon as ScreenRun['horizon']) ?? 'short',
+    universeNote: r.universeNote ?? null,
     createdAt: r.createdAt,
   };
 }
@@ -83,6 +85,8 @@ export function saveRun(
         selectionLogic: meta.selectionLogic,
         portfolioRisk: meta.portfolioRisk,
         runId: meta.runId,
+        horizon: meta.horizon ?? 'short',
+        universeNote: meta.universeNote ?? null,
         createdAt,
       })
       .run();

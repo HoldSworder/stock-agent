@@ -160,6 +160,14 @@ export const strategies = sqliteTable('strategies', {
   screenEngine: text('screen_engine'),
   /** 买入关联的选股预设/策略 id */
   screenStrategyId: text('screen_strategy_id'),
+  /** 持有视角：short 短线（默认）/ mid 中线，决定盯盘规则集与卖点档案口径 */
+  horizon: text('horizon').notNull().default('short'),
+  /** 自动建仓每次取选股 TopN 只数（M4 调仓编排器用） */
+  pickTopN: integer('pick_top_n'),
+  /** 自动建仓持仓数上限（M4 调仓编排器用） */
+  maxPositions: integer('max_positions'),
+  /** 自动调仓 cron（为空走模块默认调度） */
+  rebalanceCron: text('rebalance_cron'),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -578,6 +586,10 @@ export const screenRuns = sqliteTable(
     portfolioRisk: text('portfolio_risk'),
     /** 关联运行 id（计量） */
     runId: text('run_id'),
+    /** 持有视角：short 短线（默认）/ mid 中线下钻 */
+    horizon: text('horizon').notNull().default('short'),
+    /** 下钻 universe 来源说明（全市场为空） */
+    universeNote: text('universe_note'),
     createdAt: text('created_at').notNull(),
   },
   (t) => ({
@@ -736,6 +748,8 @@ export const marketThemes = sqliteTable(
     sources: text('sources').notNull().default('[]'),
     /** 证据要点 JSON（ThemeEvidence[]） */
     evidence: text('evidence').notNull().default('[]'),
+    /** 强度历史 JSON（{date,strength}[]，按日去重，近30日，旧→新；S5 生命周期趋势） */
+    strengthHistory: text('strength_history').notNull().default('[]'),
     firstSeenDate: text('first_seen_date').notNull(),
     lastSeenDate: text('last_seen_date').notNull(),
     updatedAt: text('updated_at').notNull(),
@@ -832,5 +846,103 @@ export const disciplineEvents = sqliteTable(
   (t) => ({
     byCreated: index('idx_discipline_events_created').on(t.createdAt),
     byCodeKindDate: index('idx_discipline_events_dedup').on(t.code, t.kind, t.eventDate),
+  }),
+);
+
+/** 日终持仓归因：逐票当日盈亏贡献（按 date+code 幂等），供「真实账户今日谁赚谁亏」复盘。 */
+export const positionAttributions = sqliteTable(
+  'position_attributions',
+  {
+    id: text('id').primaryKey(),
+    account: text('account').notNull().default('real'),
+    /** 归因日 YYYY-MM-DD（Asia/Shanghai） */
+    date: text('date').notNull(),
+    code: text('code').notNull(),
+    name: text('name').notNull(),
+    /** 当日盈亏额（元） */
+    dayPnl: real('day_pnl').notNull().default(0),
+    /** 当日盈亏率（小数） */
+    dayRate: real('day_rate').notNull().default(0),
+    /** 仓位权重（小数，市值/总资产） */
+    weight: real('weight').notNull().default(0),
+    /** 当日对账户盈亏贡献（小数，dayRate×weight） */
+    contribution: real('contribution').notNull().default(0),
+    /** 确定性归因文本（可选） */
+    note: text('note'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({
+    byDate: index('idx_position_attributions_date').on(t.date),
+    byKey: uniqueIndex('idx_position_attributions_key').on(t.account, t.date, t.code),
+  }),
+);
+
+/** 回测运行记录（单标的信号级 / 组合级）：曲线与流水以 JSON 列内联存储 */
+export const backtestRuns = sqliteTable(
+  'backtest_runs',
+  {
+    id: text('id').primaryKey(),
+    /** signal | portfolio */
+    scope: text('scope').notNull().default('signal'),
+    label: text('label').notNull().default(''),
+    /** string[] JSON：参与回测的标的代码 */
+    codes: text('codes').notNull().default('[]'),
+    preset: text('preset').notNull(),
+    /** BacktestParams JSON */
+    params: text('params').notNull().default('{}'),
+    /** day | week */
+    period: text('period').notNull().default('day'),
+    /** 数据区间描述 */
+    range: text('range').notNull().default(''),
+    /** BacktestCosts JSON */
+    costs: text('costs').notNull().default('{}'),
+    /** BacktestMetricsLite JSON */
+    metrics: text('metrics').notNull().default('{}'),
+    /** BacktestSystemMetrics[] JSON（组合分系统绩效） */
+    systems: text('systems').notNull().default('[]'),
+    /** BacktestEquityPoint[] JSON */
+    equity: text('equity').notNull().default('[]'),
+    /** BacktestTradeLite[] JSON */
+    trades: text('trades').notNull().default('[]'),
+    /** string[] JSON：口径/近似说明 */
+    notes: text('notes').notNull().default('[]'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({
+    byCreated: index('idx_backtest_runs_created').on(t.createdAt),
+  }),
+);
+
+/**
+ * 板块新高宽度日快照（主线识别）：一天一行 per 板块，沉淀「板块内 60 日新高个股数」横向排名。
+ * 主线判据 = 新高数最多且持续多日稳居榜首，故必须按交易日落库以算持续天数/排名变化/退潮。
+ * 按 (trade_date, board_code) 唯一，upsert 幂等。纯确定性只读统计，不下单、不调 LLM。
+ */
+export const boardNewHighSnapshots = sqliteTable(
+  'board_newhigh_snapshots',
+  {
+    id: text('id').primaryKey(),
+    /** 交易日 YYYY-MM-DD（Asia/Shanghai） */
+    tradeDate: text('trade_date').notNull(),
+    /** 板块代码（东财板块代码） */
+    boardCode: text('board_code').notNull(),
+    /** 板块名称 */
+    boardName: text('board_name').notNull(),
+    /** 板块口径：industry 行业 / concept 概念 */
+    kind: text('kind').notNull(),
+    /** 板块内创新高个股数 */
+    newHighCount: integer('new_high_count').notNull().default(0),
+    /** 板块成分股总数（算占比用） */
+    consTotal: integer('cons_total').notNull().default(0),
+    /** 新高占比 %（newHighCount / consTotal * 100） */
+    ratio: real('ratio').notNull().default(0),
+    /** 当日全榜横向排名（1 = 新高数最多） */
+    rank: integer('rank').notNull().default(0),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => ({
+    byDate: index('idx_board_newhigh_date').on(t.tradeDate),
+    byKey: uniqueIndex('idx_board_newhigh_key').on(t.tradeDate, t.boardCode),
   }),
 );

@@ -1,0 +1,20 @@
+# 构建上下文裁剪：原生依赖与产物在镜像内重新生成，本机数据/密钥绝不入镜像
+node_modules
+**/node_modules
+.git
+.github
+**/dist
+backend/public
+data
+**/data
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+.env
+*.log
+.DS_Store
+.codegraph
+.cursor
+.playwright-cli
+extension
+docs

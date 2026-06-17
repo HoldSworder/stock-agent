@@ -213,6 +213,8 @@ export interface StockQuote {
   prevClose: number;
   /** 成交额（亿元） */
   amount: number;
+  /** 振幅 %（best-effort，东财 f7，缺失为 undefined） */
+  amplitude?: number;
   /** 换手率 %（best-effort，缺失为 undefined） */
   turnoverRate?: number;
   /** 量比（best-effort，缺失为 undefined） */
@@ -335,6 +337,184 @@ export interface LadderTier {
   /** 该梯队个股数 */
   count: number;
   stocks: LadderStock[];
+}
+
+// ===== S6 龙头/连板梯队（龙头辨识分层）=====
+
+/** 龙头梯队中的个股角色（A 股短线龙头战法分层） */
+export type DragonRole = '总龙头' | '中军' | '弹性';
+
+/** 龙头辨识个股：在连板梯队基础上叠加封板时间/封单/换手等龙头辨识维度 */
+export interface DragonStock {
+  code: string;
+  name: string;
+  /** 所属行业板块 */
+  sector: string;
+  /** 连板天数 */
+  streak: number;
+  /** 首次封板时间（HH:MM:SS，越早越强；缺失为空串） */
+  firstSealTime: string;
+  /** 封单额（亿元；缺失为 null） */
+  sealFund: number | null;
+  /** 换手率 %（缺失为 null） */
+  turnoverRate: number | null;
+  /** 龙头分 0-100（封板早/封单大/连板高/换手活合成） */
+  dragonScore: number;
+  /** 角色（总龙头/中军/弹性） */
+  role: DragonRole;
+}
+
+/** 龙头梯队总览（连板梯队 + 龙头分层 + 情绪统计） */
+export interface DragonOverview {
+  asOf: string;
+  /** 最高连板高度 */
+  maxStreak: number;
+  /** 涨停总数 */
+  limitUpCount: number;
+  /** 炸板率 % */
+  brokenRate: number;
+  /** 全场总龙头（龙头分最高者，可能为 null） */
+  topDragon: DragonStock | null;
+  /** 按连板天数分组的龙头梯队（高板→首板） */
+  tiers: Array<{
+    streak: number;
+    count: number;
+    stocks: DragonStock[];
+  }>;
+  /** 是否走了降级/缓存 */
+  stale?: boolean;
+  note: string;
+}
+
+/** S7 资金面：龙虎榜席位类型（按营业部名识别游资/机构/北向） */
+export type CapitalSeatTag = '游资' | '机构' | '北向' | '其他';
+
+/** S7 资金面：单个龙虎榜席位（买入/卖出金额，单位万元） */
+export interface CapitalSeat {
+  name: string;
+  buy: number;
+  sell: number;
+  net: number;
+  tag: CapitalSeatTag;
+}
+
+/** S7 资金面：个股最近一次龙虎榜席位拆分（买卖前 N 席位 + 游资/机构/北向识别） */
+export interface DragonTigerSeats {
+  date: string;
+  /** 上榜原因 */
+  reason: string;
+  /** 买方前 N 席位 */
+  buys: CapitalSeat[];
+  /** 卖方前 N 席位 */
+  sells: CapitalSeat[];
+}
+
+/** S7 资金面：个股单次龙虎榜上榜净额（净额趋势用，单位万元） */
+export interface DragonTigerEntry {
+  date: string;
+  /** 当日涨跌幅 % */
+  pct: number;
+  /** 龙虎榜净买入（万元，正为净买） */
+  net: number;
+  /** 换手率 % */
+  turnover: number;
+  /** 上榜原因 */
+  reason: string;
+}
+
+/** S7 资金面：个股龙虎榜资金面深挖（净额趋势 + 最近一次席位拆分），喂游资分析师 / KlineDialog 资金面 Tab */
+export interface StockCapitalDetail {
+  code: string;
+  name: string;
+  asOf: string;
+  /** 近 N 次上榜净额趋势（东财，新→旧） */
+  recent: DragonTigerEntry[];
+  /** 最近一次龙虎榜席位拆分（akshare；无上榜或不可用为 null） */
+  seats: DragonTigerSeats | null;
+  note: string;
+}
+
+/** S9 技术指标库：MACD 读数（CN 口径：DIF/DEA/MACD 柱） */
+export interface MacdReadout {
+  /** 快线 DIF（短期 EMA - 长期 EMA） */
+  dif: number;
+  /** 慢线 DEA（DIF 的信号 EMA） */
+  dea: number;
+  /** MACD 柱（(DIF-DEA)×2，CN 习惯） */
+  bar: number;
+  /** 形态：金叉/死叉（当根穿越）｜多头/空头（DIF 在 DEA 上/下，未穿越） */
+  state: '金叉' | '死叉' | '多头' | '空头';
+}
+
+/** S9 技术指标库：KDJ 读数 */
+export interface KdjReadout {
+  k: number;
+  d: number;
+  j: number;
+  /** 超买(K>80)/超卖(K<20)/中性 */
+  signal: '超买' | '超卖' | '中性';
+}
+
+/** S9 技术指标库：RSI 读数（6/12/24） */
+export interface RsiReadout {
+  rsi6: number;
+  rsi12: number;
+  rsi24: number;
+  /** 以 RSI6 判：超买(>80)/超卖(<20)/中性 */
+  signal: '超买' | '超卖' | '中性';
+}
+
+/** S9 技术指标库：BOLL 读数（布林带 20,2） */
+export interface BollReadout {
+  upper: number;
+  mid: number;
+  lower: number;
+  /** %B =(收-下轨)/(上轨-下轨)，>1 破上轨、<0 破下轨 */
+  pctB: number;
+  /** 价格相对带位置 */
+  pos: '上轨上方' | '中上轨' | '中下轨' | '下轨下方';
+}
+
+/** S9 技术指标库：个股技术指标快照（日线 MACD/KDJ/RSI/BOLL + 读数），喂技术分析师 / KlineDialog 副图读数条 */
+export interface StockIndicators {
+  code: string;
+  asOf: string;
+  /** 最新收盘 */
+  close: number;
+  /** K 线周期（默认日线 day） */
+  period: KlinePeriod;
+  macd: MacdReadout | null;
+  kdj: KdjReadout | null;
+  rsi: RsiReadout | null;
+  boll: BollReadout | null;
+  note: string;
+}
+
+/** S8 筹码分布：单日筹码快照（东财 stock_cyq_em，比例字段为 0-1） */
+export interface ChipSnapshot {
+  date: string;
+  /** 获利比例（0-1，当前价上方持仓占比） */
+  profitRatio: number;
+  /** 平均成本 */
+  avgCost: number;
+  cost90Low: number;
+  cost90High: number;
+  /** 90 集中度（0-1，越小越集中=锁筹） */
+  concentration90: number;
+  cost70Low: number;
+  cost70High: number;
+  concentration70: number;
+}
+
+/** S8 筹码分布：个股筹码分布（最新快照 + 近 N 日趋势），喂技术分析师 / KlineDialog 筹码 Tab */
+export interface StockChipDistribution {
+  code: string;
+  asOf: string;
+  /** 最新一日筹码快照（不可用为 null） */
+  latest: ChipSnapshot | null;
+  /** 近 N 日趋势（新→旧），用于判断获利盘变化与筹码集中/发散 */
+  recent: ChipSnapshot[];
+  note: string;
 }
 
 /** 大盘看盘总览（各块可选，分块容错；某块失败为 null） */
@@ -759,8 +939,11 @@ export interface DecisionResult {
 /** 决策场景：不同调用来源走独立缓存，避免串用 */
 export type DecisionScenario = 'manual' | 'plan' | 'sellcheck' | 'watch';
 
-/** 持有视角：短线 / 中线 */
-export type DecisionHorizon = 'short' | 'mid';
+/** 持有视角：短线 / 中线（贯穿 screener/decision/watch/strategy 四模块的周期挡位） */
+export type Horizon = 'short' | 'mid';
+
+/** 持有视角：短线 / 中线（decision 历史命名，等价 Horizon） */
+export type DecisionHorizon = Horizon;
 
 /**
  * 决策裁决缓存条目（结构化、可校验）。交易判断只认本结构，
@@ -1033,6 +1216,14 @@ export interface Strategy {
   screenEngine?: string | null;
   /** 买入关联的选股预设/策略 id（配合 screenEngine，买入标的来自该口径选出的候选） */
   screenStrategyId?: string | null;
+  /** 持有视角：short 短线（默认）/ mid 中线，决定盯盘规则集与卖点档案口径 */
+  horizon: Horizon;
+  /** 自动建仓时每次取选股 TopN 只数（M4 调仓编排器用） */
+  pickTopN?: number | null;
+  /** 自动建仓持仓数上限（M4 调仓编排器用） */
+  maxPositions?: number | null;
+  /** 自动调仓 cron（为空走模块默认调度） */
+  rebalanceCron?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -1051,6 +1242,14 @@ export interface StrategyInput {
   screenEngine?: string | null;
   /** 买入关联的选股预设/策略 id */
   screenStrategyId?: string | null;
+  /** 持有视角：short 短线（默认）/ mid 中线 */
+  horizon?: Horizon;
+  /** 自动建仓时每次取选股 TopN 只数 */
+  pickTopN?: number | null;
+  /** 自动建仓持仓数上限 */
+  maxPositions?: number | null;
+  /** 自动调仓 cron */
+  rebalanceCron?: string | null;
 }
 
 /** 战法前向样本（单日权益快照） */
@@ -1078,6 +1277,14 @@ export interface StrategyForwardStats {
   closedTrades: number;
   /** 已实现胜率（realizedProfit>0 占卖出比） */
   winRate: number | null;
+  /** 沪深300 同期区间收益率（%，权益曲线起点日起算；样本/数据不足为 null） */
+  csi300Return: number | null;
+  /** 相对沪深300 超额 Alpha（%，cumReturn - csi300Return；任一缺失为 null） */
+  alpha: number | null;
+  /** 绑定的选股策略 id（战法 screenStrategyId，无则 null） */
+  screenStrategyId: string | null;
+  /** 绑定的选股策略名（无则 null） */
+  screenStrategyName: string | null;
   /** 是否纳入自动模拟白名单 */
   autoSimEnabled: boolean;
   /** 全局自动模拟总闸是否开启 */
@@ -1754,6 +1961,30 @@ export interface EtfRotationOverview {
   note: string;
 }
 
+/** M2 中线下钻：强赛道 ETF 入选条目（轮动榜里被选作下钻起点的 ETF） */
+export interface MidDrilldownEtf {
+  code: string;
+  name: string;
+  track: string | null;
+  state: EtfRotationState;
+  score: number;
+  /** 该 ETF 取到的成分股只数（0=取数失败/未下钻） */
+  constituentCount: number;
+}
+
+/** M2 中线下钻结果：强赛道 ETF → 合并成分股 universe → 中线选股龙头 */
+export interface MidDrilldownResult {
+  asOf: string;
+  /** 入选的强赛道 ETF（上升/加速且 RS 为正，按强度降序） */
+  strongEtfs: MidDrilldownEtf[];
+  /** 合并去重后的 universe 总只数 */
+  universeSize: number;
+  /** 在 universe 内中线选股的运行详情（universe 为空则为 null） */
+  run: ScreenRunDetail | null;
+  /** 一句话说明（如无强赛道/无成分股的降级原因） */
+  note: string;
+}
+
 // ===== S1 市场情绪周期（短线择时总开关，确定性只读，不下单/不调 LLM）=====
 
 /** 情绪周期阶段（结合指数水位 + 日间方向判定） */
@@ -1824,6 +2055,76 @@ export interface SentimentHistoryItem {
   index: number;
   level: SentimentLevel;
   phase: SentimentPhase;
+}
+
+// ===== 板块新高宽度（主线识别，确定性只读，不下单/不调 LLM）=====
+
+/** 板块口径：行业 / 概念 */
+export type BoardKind = 'industry' | 'concept';
+
+/**
+ * 主线判定档：
+ *  - none 未达标（新高数未过数量级地板）
+ *  - candidate 候选（达标但未稳居榜首/持续不足）
+ *  - confirmed 确认主线（新高数最多且持续多日稳居榜首）
+ *  - fading 退潮（曾是主线，新高数骤降/榜首易主）
+ */
+export type BoardBreadthVerdict = 'none' | 'candidate' | 'confirmed' | 'fading';
+
+/** 单个板块的新高宽度评估项 */
+export interface BoardBreadthItem {
+  boardCode: string;
+  boardName: string;
+  kind: BoardKind;
+  /** 板块内创新高个股数（按 window 口径） */
+  newHighCount: number;
+  /** 板块成分股总数（算占比用） */
+  consTotal: number;
+  /** 新高占比 %（newHighCount/consTotal*100，consTotal=0 时为 null） */
+  ratio: number | null;
+  /** 当日横向排名（1 = 新高数最多） */
+  rank: number;
+  /** 连续达标天数（近端连续满足数量级地板的交易日数，含当日；无历史为 1） */
+  streakDays: number;
+  /** 近端居于榜首 Top 的天数（近 N 日内排名 ≤ TOP_RANK 的天数） */
+  topDays: number;
+  /** 较上一交易日新高数变化（无历史为 null） */
+  delta: number | null;
+  /** 主线判定 */
+  verdict: BoardBreadthVerdict;
+  /** 映射到的代表 ETF（无映射为 null） */
+  etf: { code: string; name: string } | null;
+  /** 一句话说明 */
+  note: string;
+}
+
+/** 板块新高宽度总览（按新高数降序） */
+export interface BoardBreadthOverview {
+  /** 数据时刻 ISO */
+  asOf: string;
+  /** 交易日 YYYY-MM-DD（Asia/Shanghai） */
+  tradeDate: string;
+  /** 新高窗口口径（创月新高/半年新高/一年新高/历史新高） */
+  window: string;
+  /** 全市场当日创新高个股总数（相对集中度的分母参考） */
+  marketNewHighTotal: number;
+  /** 各板块宽度榜（按新高数降序） */
+  items: BoardBreadthItem[];
+  /** 当前确认的主线板块（verdict=confirmed，按新高数降序） */
+  mainlines: BoardBreadthItem[];
+  /** 备注 */
+  note: string;
+  /** 数据源降级（创新高/成分股取数失败时为 true，榜为不完整估计） */
+  stale: boolean;
+}
+
+/** 板块新高宽度历史点（趋势/持续用） */
+export interface BoardBreadthHistoryItem {
+  tradeDate: string;
+  boardCode: string;
+  boardName: string;
+  newHighCount: number;
+  rank: number;
 }
 
 /** 设置项（key-value）。模型为任意 OpenAI 兼容服务，非固定 DeepSeek。 */
@@ -2040,7 +2341,8 @@ export type WatchSignalType =
   | 'strategy_stop' // 战法：跌破止损线
   | 'plan_buy' // 今日计划：命中买点触发价
   | 'plan_stop' // 今日计划：跌破计划止损/卖点
-  | 'plan_take_profit'; // 今日计划：达计划止盈
+  | 'plan_take_profit' // 今日计划：达计划止盈
+  | 'weekly_break'; // 中线：跌破周线趋势（周线MA/高点回撤），中线盯盘档专用
 
 /**
  * 信号去向：描述一条信号在确定性管道中的最终落点（解释「为何没升级成 AI 建议」）。
@@ -2203,6 +2505,15 @@ export interface StrategySellProfile {
   stopLossPct: number;
   /** 尾盘了结时间（Asia/Shanghai 分钟数，如 14:50=890），到点对战法持仓产 eod_settle */
   eodCutoffMin: number;
+  /**
+   * 中线趋势破坏均线周期（中线盯盘档）：跌破该周期均线即产 weekly_break 告警。
+   * 配合 maBreakTimeframe；为空表示不启用周线趋势破坏检查（短线档默认不设）。
+   */
+  maBreakPeriod?: number | null;
+  /** 趋势破坏均线时间框架：week 周线（默认）/ day 日线 */
+  maBreakTimeframe?: 'day' | 'week';
+  /** 中线移动止盈：从持有以来最高（周线收盘）回撤 % 达此值告警，锁住趋势利润；为空不启用 */
+  trailingStop?: number | null;
 }
 
 /** 战法盯盘视图（页面展示：归属 + 卖点档案 + 现行卖出 Skill） */
@@ -2246,12 +2557,34 @@ export interface WatchStatus {
   config: WatchConfig;
 }
 
+/** 自动/拒绝成交实时事件（经盯盘总线推送，让自动建仓/卖出与总闸拒绝「看得见」） */
+export interface WatchTradeEvent {
+  /** 发生时刻 ISO */
+  at: string;
+  /** auto_buy 自动买入成功 / auto_sell 自动卖出成功 / rejected 被安全总闸拒绝 */
+  kind: 'auto_buy' | 'auto_sell' | 'rejected';
+  /** 触发来源：cron | agent | watch（rejected 时为被拒来源） */
+  source: string;
+  code: string;
+  name: string;
+  qty: number | null;
+  price: number | null;
+  amount: number | null;
+  /** 卖出已实现盈亏（买入/拒绝为 null） */
+  realizedProfit: number | null;
+  strategyId: string | null;
+  strategyName: string | null;
+  /** 操作原因（买卖）或拒绝原因（rejected） */
+  reason: string | null;
+}
+
 /** 盯盘 WebSocket 推送事件（独立于 StreamEvent） */
 export type WatchEvent =
   | { type: 'status'; status: WatchStatus }
   | { type: 'quotes'; at: string; items: WatchQuoteItem[] }
   | { type: 'signal'; signal: WatchSignal }
-  | { type: 'alert'; alert: WatchAlert };
+  | { type: 'alert'; alert: WatchAlert }
+  | { type: 'trade'; trade: WatchTradeEvent };
 
 // ===================== LLM 调用记录分析 =====================
 
@@ -2681,6 +3014,8 @@ export interface DisciplineFlag {
 export interface DisciplinePositionItem {
   code: string;
   name: string;
+  /** 资产类型：stock 个股 / etf 场内基金（ETF 走更宽松的趋势级纪律） */
+  assetType: 'stock' | 'etf';
   price: number;
   avgCost: number;
   /** 持有盈亏率（小数） */
@@ -2740,6 +3075,83 @@ export interface DisciplineEvent {
   detail: string;
   holdRate: number | null;
   createdAt: string;
+}
+
+// ===== 日终持仓归因（确定性只读，落库 + 可推送）=====
+
+/** 单票当日盈亏贡献 */
+export interface PositionAttributionItem {
+  code: string;
+  name: string;
+  /** 当日盈亏额（元） */
+  dayPnl: number;
+  /** 当日盈亏率（小数） */
+  dayRate: number;
+  /** 仓位权重（小数，市值 / 总资产） */
+  weight: number;
+  /** 当日对账户的盈亏贡献（小数，dayRate × weight） */
+  contribution: number;
+  /** 确定性归因文本（可选白话增强留空） */
+  note: string | null;
+}
+
+/** 某交易日的账户级持仓归因 */
+export interface PositionAttributionReport {
+  /** 归因日 YYYY-MM-DD */
+  date: string;
+  /** 数据时间 ISO */
+  asOf: string;
+  /** 账户当日盈亏额（元） */
+  totalDayPnl: number;
+  /** 账户当日盈亏率（小数，对总资产） */
+  totalDayRate: number;
+  /** 逐票贡献（按贡献绝对值倒序） */
+  items: PositionAttributionItem[];
+  /** 当日最大赢家（无持仓为 null） */
+  topWinner: PositionAttributionItem | null;
+  /** 当日最大输家（无持仓为 null） */
+  topLoser: PositionAttributionItem | null;
+}
+
+// ===== 真实持仓 vs 模拟战法绩效对照（只读，不反哺调参）=====
+
+/** 单个模拟战法的对照行 */
+export interface VsSimStrategyRow {
+  strategyId: string;
+  strategyName: string;
+  /** 区间累计收益率（%，权益口径） */
+  cumReturn: number | null;
+  /** 相对沪深300 超额 Alpha（%） */
+  alpha: number | null;
+  /** 最大回撤（%，负值） */
+  maxDrawdown: number | null;
+  /** 已实现胜率 */
+  winRate: number | null;
+  /** 绑定选股策略名（无则 null） */
+  screenStrategyName: string | null;
+}
+
+/** 真实 vs 模拟绩效对照 */
+export interface VsSimReport {
+  asOf: string;
+  real: {
+    /** 总资产 */
+    totalAsset: number;
+    /** 当日盈亏额 */
+    todayProfit: number;
+    /** 当日盈亏率（小数） */
+    todayRate: number;
+    /** 累计持有盈亏额 */
+    totalHoldProfit: number;
+    /** 最大单一持仓集中度（小数） */
+    topConcentration: number;
+    /** 持仓数 */
+    positionCount: number;
+  } | null;
+  /** 真实数据缺失原因（如同花顺未配置）；有则 real 为 null */
+  realError: string | null;
+  /** 各本地模拟战法对照 */
+  strategies: VsSimStrategyRow[];
 }
 
 // ===== 运维（Ops）·SQLite 体积治理 =====
@@ -2832,6 +3244,16 @@ export interface DecisionEngineConfig {
   targetedFetch: boolean;
 }
 
+/** 可决策股指白名单项（GET /api/decision/indices）；指数走 secid 取数，规避 6 位撞码 */
+export interface DecisionIndexInfo {
+  /** 稳定主键（历史 refKey / 前端选项 value） */
+  key: string;
+  /** 指数中文名 */
+  name: string;
+  /** 东财 secid（市场前缀.代码） */
+  secid: string;
+}
+
 /** 决策智能体总览（GET /api/decision/agents） */
 export interface DecisionEngineOverview {
   agents: DecisionAgentInfo[];
@@ -2865,6 +3287,7 @@ export interface ScreenEngineInfo {
  * 需逐只历史的稳定性/反转因子留作后续（需另接 K 线，避免对全市场 5000 只逐只取数）。
  */
 export type ScreenFactorKey =
+  | 'midTrend'
   | 'value'
   | 'liquidity'
   | 'size'
@@ -2872,10 +3295,12 @@ export type ScreenFactorKey =
   | 'activity'
   | 'themeHeat'
   | 'trend'
-  | 'fundFlow';
+  | 'fundFlow'
+  | 'dragonRank';
 
 /** 选股因子中文标签（前端展示） */
 export const SCREEN_FACTOR_LABELS: Record<ScreenFactorKey, string> = {
+  midTrend: '中线趋势',
   value: '估值',
   liquidity: '流动性',
   size: '市值',
@@ -2884,6 +3309,7 @@ export const SCREEN_FACTOR_LABELS: Record<ScreenFactorKey, string> = {
   themeHeat: '题材热度',
   trend: '趋势',
   fundFlow: '资金流',
+  dragonRank: '龙头分',
 };
 
 /** 自然语言选股预设（nl 链路：一段自然语言 keyword 直喂妙想 mx_screener，与战法定时任务同源） */
@@ -2906,6 +3332,8 @@ export interface ScreenStrategy {
   factorWeights: Partial<Record<ScreenFactorKey, number>>;
   /** 硬筛 + 理想点的人话口径（前端「指标口径」展示，如「成交额≥2亿」「动量理想+4%」） */
   criteria: string[];
+  /** 策略周期定位：short 短线（默认）/ mid 中线趋势 */
+  horizon?: Horizon;
 }
 
 /** 单只候选的某因子得分（0-100，便于前端迷你条/雷达展示） */
@@ -2978,6 +3406,10 @@ export interface ScreenRun {
   portfolioRisk: string | null;
   /** 关联 agent/oneshot 运行 id（计量与运行管理） */
   runId: string | null;
+  /** 持有视角：short 短线（默认）/ mid 中线下钻 */
+  horizon?: Horizon;
+  /** 下钻 universe 来源说明（如「轮动 TopN 强赛道成分股」；全市场为空） */
+  universeNote?: string | null;
   createdAt: string;
 }
 
@@ -3047,6 +3479,12 @@ export interface MarketTheme {
   firstSeenDate: string;
   /** 最近更新日 YYYY-MM-DD（据此判定退潮/归档） */
   lastSeenDate: string;
+  /** 主线持续天数（首次出现→最近出现，含端点；越长越是中线主升浪而非一日游） */
+  durationDays: number;
+  /** 强度趋势（据 strengthHistory 近段对比）：rising 走强 / flat 走平 / falling 走弱 */
+  strengthTrend: 'rising' | 'flat' | 'falling';
+  /** 强度历史快照（按日去重，最多近 30 日，旧→新），驱动趋势判断与前端走势 */
+  strengthHistory: Array<{ date: string; strength: number }>;
   updatedAt: string;
 }
 
@@ -3081,6 +3519,8 @@ export interface CockpitEvent {
   detail: string;
   code?: string | null;
   name?: string | null;
+  /** 是否为自动来源（cron/agent/watch 触发的成交）；trade 类事件专用，前端打「自动」徽标 */
+  auto?: boolean;
 }
 
 /** 驾驶舱当日计划定调（直达计划全文用的轻量摘要） */
@@ -3215,4 +3655,160 @@ export interface CockpitOverview {
   screenerPicks: CockpitScreenerPick[];
   /** 合并后的最近事件时间线（按时间倒序） */
   events: CockpitEvent[];
+}
+
+// ===== 回测（Backtest）：单标的信号级（阶段一）+ 组合级（阶段二）=====
+
+/** 回测范围：单标的信号 / 多标的组合 */
+export type BacktestScope = 'signal' | 'portfolio';
+
+/** 预设策略（白话口径，无需量化知识） */
+export type BacktestPreset = 'maTrend' | 'momentum';
+
+/** 预设策略参数（缺省取默认值） */
+export interface BacktestParams {
+  /** maTrend：快线周期（默认 10） */
+  fastPeriod?: number;
+  /** maTrend：慢线周期（默认 30） */
+  slowPeriod?: number;
+  /** momentum：动能回看天数（默认 20） */
+  lookback?: number;
+  /** momentum：N 日涨幅阈值（%，默认 0 表示创 lookback 新高即入） */
+  breakoutPct?: number;
+  /** 止损：跌破近 N 日最低价（默认 10） */
+  stopLookback?: number;
+  /** 盈亏比目标（默认 2） */
+  rr?: number;
+  /** ATR 移动止盈倍数（>0 启用跟踪止盈骑趋势，默认 0 关闭） */
+  atrTrailMult?: number;
+}
+
+/** A 股成本口径（bps = 万分之一） */
+export interface BacktestCosts {
+  /** 佣金（双边，bps），默认 2.5（万 2.5） */
+  commissionBps: number;
+  /** 单笔最低佣金（元），默认 5 */
+  minCommission: number;
+  /** 印花税（卖出单边，bps），默认 5（0.05%），映射时折半摊双边近似 */
+  stampDutyBps: number;
+  /** 过户费（双边，bps），默认 0.1 */
+  transferFeeBps: number;
+  /** 滑点（bps），默认 2 */
+  slippageBps: number;
+}
+
+/** 单只系统配置（组合回测用） */
+export interface BacktestSystemInput {
+  code: string;
+  /** 默认配置上限权重（缺省等权） */
+  weight?: number;
+}
+
+/** 发起回测入参 */
+export interface BacktestRunInput {
+  /** 默认 signal */
+  scope?: BacktestScope;
+  /** signal：单标的 6 位代码 */
+  code?: string;
+  /** portfolio：多标的（与 systems 二选一，systems 优先） */
+  codes?: string[];
+  /** portfolio：带权重的系统配置 */
+  systems?: BacktestSystemInput[];
+  /** 仅支持 day / week（日/周线，天然契合 T+1） */
+  period?: KlinePeriod;
+  /** 取多少根 K 线（默认 500） */
+  limit?: number;
+  preset: BacktestPreset;
+  params?: BacktestParams;
+  /** 初始资金（元，默认 100000） */
+  equity?: number;
+  /** 单笔风险占总资金比例（%，默认 1） */
+  riskPct?: number;
+  costs?: Partial<BacktestCosts>;
+  label?: string;
+}
+
+/** 回测核心指标（取引擎子集，前端红涨绿跌渲染） */
+export interface BacktestMetricsLite {
+  /** 完成的完整持仓笔数 */
+  trades: number;
+  /** 胜率（0-1） */
+  winRate: number;
+  /** 盈亏比（总盈利/总亏损） */
+  profitFactor: number;
+  /** 最大回撤（%，正值） */
+  maxDrawdown: number;
+  /** 夏普（日频） */
+  sharpe: number;
+  /** 区间总收益率（%） */
+  returnPct: number;
+  /** 期末权益 */
+  finalEquity: number;
+  /** 期初权益 */
+  startEquity: number;
+}
+
+/** 净值曲线点 */
+export interface BacktestEquityPoint {
+  /** 交易日 YYYY-MM-DD */
+  time: string;
+  equity: number;
+}
+
+/** 成交腿（K 线买卖点标注 + 流水表） */
+export interface BacktestTradeLite {
+  symbol: string;
+  side: 'long' | 'short';
+  entry: number;
+  exit: number;
+  /** 建仓日 YYYY-MM-DD */
+  entryTime: string;
+  /** 平仓日 YYYY-MM-DD */
+  exitTime: string;
+  /** 该笔已实现盈亏（元） */
+  pnl: number;
+  /** 离场原因（stop / target / trail 等引擎标签） */
+  reason: string;
+}
+
+/** 单系统绩效（组合回测分解，scope=signal 时为空） */
+export interface BacktestSystemMetrics {
+  code: string;
+  weight: number;
+  metrics: BacktestMetricsLite;
+}
+
+/** 一次回测的完整结果 */
+export interface BacktestRun {
+  id: string;
+  scope: BacktestScope;
+  label: string;
+  codes: string[];
+  preset: BacktestPreset;
+  params: BacktestParams;
+  period: KlinePeriod;
+  /** 数据区间描述，如 2023-01-03 ~ 2026-06-16（580 根） */
+  range: string;
+  costs: BacktestCosts;
+  metrics: BacktestMetricsLite;
+  /** 组合分系统绩效（signal 为空数组） */
+  systems: BacktestSystemMetrics[];
+  equity: BacktestEquityPoint[];
+  trades: BacktestTradeLite[];
+  /** 口径 / 近似说明（前端提示） */
+  notes: string[];
+  createdAt: string;
+}
+
+/** 列表项（不含曲线 / 流水，省带宽） */
+export interface BacktestRunListItem {
+  id: string;
+  scope: BacktestScope;
+  label: string;
+  codes: string[];
+  preset: BacktestPreset;
+  period: KlinePeriod;
+  range: string;
+  metrics: BacktestMetricsLite;
+  createdAt: string;
 }

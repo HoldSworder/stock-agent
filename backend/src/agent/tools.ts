@@ -14,7 +14,9 @@ import {
 } from '../strategy/sim';
 import { syncMiaoxiangStrategy } from '../strategy/miaoxiangSync';
 import { dimensionLabel, proposeSkillUpdate } from '../strategy/skill';
-import { assertTradeAllowed } from '../safety/guard';
+import { assertTradeAllowed, SafetyError } from '../safety/guard';
+import { broadcastWatch } from '../watch/bus';
+import { nowIso } from '../util';
 import * as trendradar from '../trendradar/service';
 import * as research from '../research/service';
 import { runDecision } from '../decision/service';
@@ -37,11 +39,17 @@ import {
   getSectorByChange,
   getQuotes,
   getQuoteWithLimits,
+  getStockFundFlow,
 } from '../market/eastmoney';
 import { getDragonTiger, getFinancialStatements, getLockupAndHolders } from '../market/datacenter';
 import { callAkshare } from '../market/akshare';
-import { queryStock as iwencaiQueryStock } from '../iwencai/client';
+import { queryStock as iwencaiQueryStock, queryStockL2 } from '../iwencai/client';
 import { buildSentimentOverview, formatForAgent as formatSentiment } from '../sentiment/service';
+import { buildDragonOverview, formatDragonForAgent } from '../dragon/service';
+import { getAttribution, formatAttributionForAgent } from '../positions/attribution';
+import { getStockCapital, formatCapitalForAgent } from '../capital/service';
+import { getStockIndicators, formatIndicatorsForAgent } from '../market/indicators';
+import { getChipDistribution, formatChipForAgent } from '../market/chip';
 import { listReviews } from '../repo';
 import type { MarketReviewResult } from '@stock-agent/shared';
 import type {
@@ -125,7 +133,9 @@ export const tools: ToolDef[] = [
       function: {
         name: 'mx_finance_data',
         description:
-          '妙想全市场金融数据查询，支持 A股/港股/美股/基金/债券/ETF。用自然语言描述要查的标的与指标（行情、资金流、估值、涨跌停价等），可一次查多只多指标。',
+          '妙想全市场金融数据查询，支持 A股/港股/美股/基金/债券/ETF。用自然语言描述要查的标的与指标，可一次查多只多指标。' +
+          '【妙想有日限量，按需省用】：仅用于免费源拿不到的深度数据（估值/财务/份额变化/北向资金等）；' +
+          '现价/涨跌/量比/换手/振幅/成交额/涨跌停/主力净流入请走 stock_quotes（免费），DDX/DDY 请走 stock_l2_indicators，不要用本工具查这些免费可得指标。',
         parameters: {
           type: 'object',
           properties: { query: { type: 'string', description: '自然语言查询语句' } },
@@ -142,7 +152,8 @@ export const tools: ToolDef[] = [
         name: 'mx_assistant_ask',
         description:
           '妙想金融问答助手（东方财富 robo-advisor，独立新门户）。用自然语言一次提问，返回【已加工好的自然语言答案】（含实时行情/资金面/最新动态/研判与引用来源）。' +
-          '比 mx_finance_data 更快更稳，适合综合问某些股票现在的价格/涨跌幅/资金与动态。作为行情/资讯的【优先】数据源；deepThink=true 触发深度思考（更慢）。',
+          '适合需要「综合研判型自然语言解读」而非单纯取数的场景（如某股近期资金与动态综述）；deepThink=true 触发深度思考（更慢）。' +
+          '【妙想有日限量】：纯量价指标请走 stock_quotes（免费），不要用本工具取价。',
         parameters: {
           type: 'object',
           properties: {
@@ -305,8 +316,8 @@ export const tools: ToolDef[] = [
       function: {
         name: 'stock_quotes',
         description:
-          '内部实时行情（东方财富→网易自动兜底，无需鉴权、不受妙想限流）。批量取 A 股 6 位代码的现价/涨跌幅/昨收/成交额/换手/量比/涨停价/跌停价。' +
-          '作为 mx_finance_data 的【降级数据源】：当 mx_finance_data 返回失败或限流（请求频率过高）时改用本工具取价；不提供资金流/估值等深度指标。',
+          '内部实时行情（东方财富 push2→网易自动兜底，无需鉴权、零额度、不受妙想/问财限流）。批量取 A 股 6 位代码的：现价/涨跌幅/昨收/成交额/振幅/换手/量比/涨停价/跌停价/当日主力净流入（东财口径）。' +
+          '【量价与资金面的首选数据源】：以上这些免费即可获取的指标一律走本工具，不要用 mx_finance_data（妙想有日限量）。仅 DDX/DDY 等本工具没有的 L2 独有指标才改用 stock_l2_indicators。',
         parameters: {
           type: 'object',
           properties: {
@@ -327,12 +338,21 @@ export const tools: ToolDef[] = [
       if (codes.length === 0) return preview('未提供合法的 6 位股票代码');
       const quotes = await getQuotes(codes);
       const byCode = new Map(quotes.map((q) => [q.code, q]));
-      // 涨跌停价 getQuotes 不含，逐只补取（持仓只数少，失败不阻断整体）
-      const limits = await Promise.all(
-        codes.map((c) => getQuoteWithLimits(c).catch(() => null)),
-      );
+      // 涨跌停价 + 当日主力净流入 getQuotes 不含，逐只补取（东财 push2，免 MX；持仓只数少，失败不阻断整体）
+      const [limits, flows] = await Promise.all([
+        Promise.all(codes.map((c) => getQuoteWithLimits(c).catch(() => null))),
+        Promise.all(codes.map((c) => getStockFundFlow(c, 1).catch(() => []))),
+      ]);
       const limitByCode = new Map(
         limits.filter((l): l is NonNullable<typeof l> => l != null).map((l) => [l.code, l]),
+      );
+      // 主力净流入取最新一日（fflow daykline 升序，末行为当日），元→亿
+      const inflowByCode = new Map(
+        codes.map((c, i) => {
+          const days = flows[i];
+          const last = days.length ? days[days.length - 1] : null;
+          return [c, last ? last.main / 1e8 : null] as const;
+        }),
       );
       const lines = codes.map((code) => {
         const q = byCode.get(code);
@@ -345,13 +365,74 @@ export const tools: ToolDef[] = [
           parts.push(`涨跌幅${q.pct >= 0 ? '+' : ''}${q.pct}%`);
           parts.push(`昨收${q.prevClose}`);
           parts.push(`成交额${q.amount.toFixed(1)}亿`);
+          if (q.amplitude != null) parts.push(`振幅${q.amplitude}%`);
           if (q.turnoverRate != null) parts.push(`换手${q.turnoverRate}%`);
           if (q.volumeRatio != null) parts.push(`量比${q.volumeRatio}`);
         }
         if (lim) parts.push(`涨停${lim.limitUp}`, `跌停${lim.limitDown}`);
+        const inflow = inflowByCode.get(code);
+        if (inflow != null) parts.push(`主力净流入${inflow >= 0 ? '+' : ''}${inflow.toFixed(2)}亿(东财口径)`);
         return parts.join(' ');
       });
       return preview(lines.join('\n'));
+    },
+  },
+  {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'stock_l2_indicators',
+        description:
+          'L2 独有指标（DDX 大单动向 / DDY 涨跌动因，基于 Level-2 逐单数据，免费行情接口没有）。批量取 A 股 6 位代码的 DDX/DDY。' +
+          '仅当需要 DDX/DDY 这类免费源（stock_quotes）拿不到的 L2 指标时调用；现价/涨跌/量比/换手/振幅/涨跌停/主力净流入请一律走 stock_quotes（免费、无限流）。' +
+          '取数：问财（同花顺 L2）优先，限流/不可用时自动回退妙想（东财 L2）；两源 DDX 口径略有差异，阈值按所用源校准。',
+        parameters: {
+          type: 'object',
+          properties: {
+            codes: {
+              type: 'array',
+              items: { type: 'string' },
+              description: 'A 股 6 位代码数组，如 ["600519","300750"]',
+            },
+          },
+          required: ['codes'],
+        },
+      },
+    },
+    run: async (args, ctx) => {
+      const codes = Array.isArray(args.codes)
+        ? args.codes.map((c) => String(c).trim()).filter((c) => /^\d{6}$/.test(c))
+        : [];
+      if (codes.length === 0) return preview('未提供合法的 6 位股票代码');
+      // 问财（同花顺 L2）优先
+      try {
+        const rows = await queryStockL2(codes, ctx.signal);
+        if (rows.length && rows.some((r) => r.ddx != null)) {
+          const byCode = new Map(rows.map((r) => [r.code, r]));
+          const lines = codes.map((code) => {
+            const r = byCode.get(code);
+            if (!r) return `- ${code} 查无 L2 数据`;
+            const parts = [`- ${r.name}(${code})`];
+            if (r.ddx != null) parts.push(`DDX ${r.ddx}`);
+            if (r.ddy != null) parts.push(`DDY ${r.ddy}`);
+            return parts.join(' ');
+          });
+          return preview(`L2 指标（问财·同花顺口径）：\n${lines.join('\n')}`);
+        }
+      } catch (e) {
+        console.warn('[stock_l2_indicators] 问财失败，回退妙想:', e instanceof Error ? e.message : e);
+      }
+      // 回退妙想（东财 L2）
+      try {
+        const names = codes.join('、');
+        const text = await miaoxiang.financeData(`${names} 的 DDX 大单动向、DDY 涨跌动因`, ctx.signal);
+        return preview(`L2 指标（妙想·东财口径，问财不可用时回退）：\n${text}`);
+      } catch (e) {
+        return preview(
+          `DDX/DDY 取数失败：问财与妙想均不可用（${e instanceof Error ? e.message : String(e)}）。` +
+            '可改用 stock_quotes 的量价/主力净流入做卖点研判。',
+        );
+      }
     },
   },
   {
@@ -816,6 +897,93 @@ export const tools: ToolDef[] = [
       const ov = await buildSentimentOverview();
       return formatSentiment(ov);
     },
+  },
+  {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'dragon_ladder',
+        description:
+          '读取 A 股当日连板梯队与龙头辨识（S6 龙头战法）：按连板天数分组的涨停梯队 + 每只个股的「龙头分」（连板高度+封板时间+封单额+换手率规则化合成）+ 总龙头/中军/弹性角色分层。判断「谁是这波题材的总龙头/能不能跟、梯队是否健康（高度+数量）」、做短线龙头/动能套利、生成今日计划与复盘定调时调用。数据源东财涨停池，纯规则、不含主观预测。',
+        parameters: { type: 'object', properties: {} },
+      },
+    },
+    run: async () => {
+      const ov = await buildDragonOverview();
+      return preview(formatDragonForAgent(ov));
+    },
+  },
+  {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'stock_capital',
+        description:
+          '个股龙虎榜资金面深挖（S7 资金面）：近 N 次上榜「净额趋势」（净买入/换手/上榜原因，东财）+ 最近一次「席位拆分」（买方/卖方前 5 席位 + 游资/机构/北向席位辨识，akshare）。回答「谁在买谁在卖、是游资接力还是机构出货、资金是否持续流入」时调用，做游资跟随/龙头研判/卖点检查的关键资金证据。需传 6 位个股代码 code。',
+        parameters: {
+          type: 'object',
+          properties: { code: { type: 'string', description: '6 位个股代码' } },
+          required: ['code'],
+        },
+      },
+    },
+    run: async (args) => {
+      const code = asString(args.code).trim();
+      if (!/^\d{6}$/.test(code)) return '请提供 6 位个股代码 code';
+      return preview(formatCapitalForAgent(await getStockCapital(code)));
+    },
+  },
+  {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'stock_indicators',
+        description:
+          '个股技术指标库（S9）：基于东财日线用 trading-signals 计算 MACD(12,26,9)/KDJ(9,3,3)/RSI(6,12,24)/BOLL(20,2) 并给规则化读数（金叉/死叉、超买/超卖、布林带位置）。判断技术买卖点、指标共振/背离、超买超卖时调用。纯确定性算法，不含主观预测。需传 6 位个股代码 code。',
+        parameters: {
+          type: 'object',
+          properties: { code: { type: 'string', description: '6 位个股代码' } },
+          required: ['code'],
+        },
+      },
+    },
+    run: async (args) => {
+      const code = asString(args.code).trim();
+      if (!/^\d{6}$/.test(code)) return '请提供 6 位个股代码 code';
+      return preview(formatIndicatorsForAgent(await getStockIndicators(code)));
+    },
+  },
+  {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'stock_chips',
+        description:
+          '个股筹码分布（S8，东财）：获利比例（套牢盘轻重）、平均成本、70%/90% 成本区间与集中度（锁筹/派发），及近 N 日趋势。判断「上方套牢压力、主力成本、筹码是否集中（吸筹）还是发散（派发）、突破前是否充分换手」时调用。需传 6 位个股代码 code。',
+        parameters: {
+          type: 'object',
+          properties: { code: { type: 'string', description: '6 位个股代码' } },
+          required: ['code'],
+        },
+      },
+    },
+    run: async (args) => {
+      const code = asString(args.code).trim();
+      if (!/^\d{6}$/.test(code)) return '请提供 6 位个股代码 code';
+      return preview(formatChipForAgent(await getChipDistribution(code)));
+    },
+  },
+  {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'get_attribution',
+        description:
+          '读取真实账户【当日持仓归因】（确定性只读，收盘后落库）：账户当日盈亏额/对账户贡献，当日最大赢家/最大输家，以及逐票「当日盈亏贡献」（当日盈亏率×仓位权重，按绝对值倒序）。回答「今天账户是谁在贡献/谁在拖累、哪只票拉低了组合」、做收盘复盘归因时调用。无参数，默认取最近一个交易日。',
+        parameters: { type: 'object', properties: {} },
+      },
+    },
+    run: async () => preview(formatAttributionForAgent(getAttribution())),
   },
   {
     definition: {
@@ -1444,9 +1612,13 @@ export const tools: ToolDef[] = [
         const mom = it.metrics.momentum != null ? `动量${it.metrics.momentum >= 0 ? '+' : ''}${it.metrics.momentum.toFixed(1)}` : '';
         return `${i + 1}. ${it.name}[${kind}] 强度${it.strengthScore}·${trendText[it.trend] ?? it.trend}·当日${pct}${mom ? '·' + mom : ''}${it.leadStock ? '·领涨' + it.leadStock : ''}`;
       });
+      const trendArrow: Record<string, string> = { rising: '↑走强', flat: '→走平', falling: '↓走弱' };
       const themeLines = themeList.slice(0, 12).map((t, i) => {
         const ev = t.evidence[0]?.text ?? '';
-        return `${i + 1}. ${t.theme} 强度${Math.round(t.strength)}·${t.status}·${t.sources.length}源${ev ? '｜' + ev : ''}`;
+        return (
+          `${i + 1}. ${t.theme} 强度${Math.round(t.strength)}${trendArrow[t.strengthTrend] ?? ''}·` +
+          `持续${t.durationDays}天·${t.status}·${t.sources.length}源${ev ? '｜' + ev : ''}`
+        );
       });
       const text =
         '【板块中线强弱（行业+概念，按中线强度排序，非当日涨幅）】\n' +
@@ -1517,25 +1689,59 @@ export const simTools: ToolDef[] = [
     },
     run: async (args, ctx) => {
       if (!ctx.strategyId) return '当前运行未绑定战法，无法执行模拟下单';
-      const r = await executeSimTrade({
-        strategyId: ctx.strategyId,
-        side: asString(args.side, 'buy') as 'buy' | 'sell',
-        code: asString(args.stockCode),
-        qty: Number(args.quantity) || 0,
-        price: typeof args.price === 'number' ? args.price : undefined,
-        reason: args.reason ? asString(args.reason) : null,
-        thesis: args.thesis ? asString(args.thesis) : null,
-        runId: ctx.runId,
-        source: 'agent',
-        force: ctx.forceTrade ?? false,
-      });
-      const t = r.trade;
-      return (
-        `模拟${t.side === 'buy' ? '买入' : '卖出'}成功：${t.name}(${t.code}) ${t.qty}股 @${t.price} ` +
-        `金额${t.amount.toFixed(2)}` +
-        (t.realizedProfit != null ? ` 已实现盈亏${t.realizedProfit.toFixed(2)}` : '') +
-        ` 剩余现金${r.cash.toFixed(2)}`
-      );
+      const side = asString(args.side, 'buy') as 'buy' | 'sell';
+      const code = asString(args.stockCode);
+      const qty = Number(args.quantity) || 0;
+      try {
+        const r = await executeSimTrade({
+          strategyId: ctx.strategyId,
+          side,
+          code,
+          qty,
+          price: typeof args.price === 'number' ? args.price : undefined,
+          reason: args.reason ? asString(args.reason) : null,
+          thesis: args.thesis ? asString(args.thesis) : null,
+          runId: ctx.runId,
+          source: 'agent',
+          force: ctx.forceTrade ?? false,
+        });
+        const t = r.trade;
+        return (
+          `模拟${t.side === 'buy' ? '买入' : '卖出'}成功：${t.name}(${t.code}) ${t.qty}股 @${t.price} ` +
+          `金额${t.amount.toFixed(2)}` +
+          (t.realizedProfit != null ? ` 已实现盈亏${t.realizedProfit.toFixed(2)}` : '') +
+          ` 剩余现金${r.cash.toFixed(2)}`
+        );
+      } catch (e) {
+        // 安全总闸拒绝：不静默，经盯盘总线广播一条「自动交易被拒」事件让用户看得见为何没自动成交，
+        // 同时把明确原因回灌给模型。其它业务错误（资金不足/涨跌停等）按原样抛回，由模型据此调整。
+        if (e instanceof SafetyError) {
+          const strategy = getStrategy(ctx.strategyId);
+          try {
+            broadcastWatch({
+              type: 'trade',
+              trade: {
+                at: nowIso(),
+                kind: 'rejected',
+                source: 'agent',
+                code,
+                name: strategy?.name ?? code,
+                qty: qty || null,
+                price: null,
+                amount: null,
+                realizedProfit: null,
+                strategyId: ctx.strategyId,
+                strategyName: strategy?.name ?? null,
+                reason: e.message,
+              },
+            });
+          } catch {
+            /* 广播失败不影响回灌 */
+          }
+          return `自动交易被安全总闸拒绝：${e.message}。如需启用，请到驾驶舱安全台开启「自动本地模拟」开关。`;
+        }
+        throw e;
+      }
     },
   },
 ];
@@ -1639,10 +1845,16 @@ const TOOL_GROUP: Record<string, string> = {
   mx_trade: '妙想',
   mx_cancel: '妙想',
   stock_quotes: '行情持仓',
+  stock_l2_indicators: '行情持仓',
   real_positions: '行情持仓',
   get_position_discipline: '行情持仓',
+  get_attribution: '行情持仓',
   market_snapshot: '行情持仓',
   market_sentiment: '行情持仓',
+  dragon_ladder: '行情持仓',
+  stock_capital: '行情持仓',
+  stock_indicators: '行情持仓',
+  stock_chips: '行情持仓',
   market_board_strength: '行情持仓',
   sync_ths_watchlist: '行情持仓',
   eastmoney_datacenter: '行情持仓',

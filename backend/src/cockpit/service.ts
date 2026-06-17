@@ -109,6 +109,8 @@ function tradeEvents(limit: number): CockpitEvent[] {
       detail: `${t.qty} 股 @ ${t.price}（${t.source}）${profit}`,
       code: t.code,
       name: t.name,
+      // 非手动来源（cron/agent/watch）即自动成交，前端打「自动」徽标
+      auto: t.source !== 'manual',
     };
   });
 }

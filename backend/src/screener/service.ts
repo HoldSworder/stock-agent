@@ -5,6 +5,7 @@ import type {
   ScreenStrategy,
   RunTrigger,
   ScreenProgressEvent,
+  Horizon,
 } from '@stock-agent/shared';
 import { getMeta, setMeta } from '../settings';
 import { DEFAULT_STRATEGY_ID, hasStrategy, listStrategies } from './strategy';
@@ -82,6 +83,12 @@ export interface RunScreenOptions {
   useLlm?: boolean;
   trigger: RunTrigger;
   taskName?: string | null;
+  /** 持有视角：short 短线（默认）/ mid 中线下钻 */
+  horizon?: Horizon;
+  /** 限定候选池代码集合（如 ETF 成分股下钻 universe；为空走全市场） */
+  universe?: string[] | null;
+  /** universe 来源说明（落库展示，如「轮动 TopN 强赛道成分股」） */
+  universeNote?: string | null;
   /** 进度回调（WS 手动选股传入；cron/agent 缺省即静默） */
   onProgress?: (e: ScreenProgressEvent) => void;
 }
@@ -98,12 +105,20 @@ export async function runScreen(opts: RunScreenOptions): Promise<ScreenRunDetail
       ? resolveNlStrategyId(opts.strategyId)
       : resolveStrategyId(opts.strategyId);
 
+  const horizon: Horizon = opts.horizon === 'mid' ? 'mid' : 'short';
+  const universe =
+    opts.universe && opts.universe.length > 0
+      ? Array.from(new Set(opts.universe.map((c) => c.trim()).filter(Boolean)))
+      : null;
+
   const out = await engine.produce({
     strategyId: resolvedStrategyId,
     context: (opts.context ?? '').trim(),
     topN: opts.topN != null ? clampTopN(opts.topN) : defaultTopN(),
     useLlm: opts.useLlm !== false,
     trigger: opts.trigger,
+    horizon,
+    universe,
     onProgress: opts.onProgress,
   });
 
@@ -121,6 +136,8 @@ export async function runScreen(opts: RunScreenOptions): Promise<ScreenRunDetail
       selectionLogic: out.selectionLogic,
       portfolioRisk: out.portfolioRisk,
       runId: out.runId,
+      horizon,
+      universeNote: universe ? opts.universeNote ?? null : null,
     },
     out.picks,
   );

@@ -3,6 +3,8 @@ import { getJson, getKline } from '../market/eastmoney';
 import { numOrNull as num, toSecid, PUSH2_QT as PUSH2 } from '../datasource/codes';
 import { isSourceEnabled } from '../datasource/registry';
 import { getEtfPremiumJisilu } from '../market/jisilu';
+import { callAkshare } from '../market/akshare';
+import { cached } from '../lib/ttlCache';
 
 // ETF 确定性指标层：复用东方财富公开行情（getJson / getKline，已带缓存/重试/多源回退）。
 // 仅做只读取数与本地数值计算，不引入额外数据源，输出供 service 综合成买卖建议。
@@ -337,6 +339,46 @@ const THEME_DEFS: ReadonlyArray<{ name: string; codes: string[] }> = [
   { name: '黄金/商品', codes: ['518880', '159980'] },
   { name: '债券', codes: ['511260', '511010'] },
 ];
+
+// ===== ETF 成分股下钻取数（M2：经 aktools 透传 akshare，best-effort） =====
+
+/** 从 akshare 记录里尽力取 6 位股票代码（兼容不同列名） */
+function pickStockCode(rec: Record<string, unknown>): string | null {
+  const cand =
+    rec['股票代码'] ?? rec['品种代码'] ?? rec['代码'] ?? rec['stock_code'] ?? rec['code'];
+  const raw = String(cand ?? '').trim();
+  const m = raw.match(/\d{6}/);
+  return m ? m[0] : null;
+}
+
+/**
+ * 取 ETF 成分股（去重 6 位代码）。供 M2「强赛道 ETF → 成分股下钻选龙头」用。
+ * 经 aktools 透传 akshare `fund_portfolio_hold_em`（基金报告期持仓），按当年→上一年兜底；
+ * best-effort：取数失败/为空返回 []，由上层退化为不下钻或换源，不抛错。
+ * 结果缓存 6 小时（成分股变更频率低）。
+ */
+export async function fetchEtfConstituents(code: string): Promise<string[]> {
+  const clean = (code ?? '').trim();
+  if (!/^\d{6}$/.test(clean)) return [];
+  return cached(`etf:cons:${clean}`, 6 * 3600_000, async () => {
+    const year = new Date().getFullYear();
+    for (const y of [year, year - 1]) {
+      try {
+        const data = await callAkshare('fund_portfolio_hold_em', { symbol: clean, date: String(y) });
+        if (!Array.isArray(data) || data.length === 0) continue;
+        const codes = new Set<string>();
+        for (const rec of data as Array<Record<string, unknown>>) {
+          const c = pickStockCode(rec);
+          if (c) codes.add(c);
+        }
+        if (codes.size > 0) return Array.from(codes);
+      } catch (e) {
+        console.warn(`[etf] 取成分股失败 ${clean}@${y}：`, e instanceof Error ? e.message : e);
+      }
+    }
+    return [];
+  });
+}
 
 /** 主题赛道分类涨幅：一次批量取所有代表 ETF，再按主题分组算平均涨幅 + 领涨代表 */
 export async function fetchThemeCategories(): Promise<EtfThemeCategory[]> {

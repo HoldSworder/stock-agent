@@ -28,6 +28,21 @@ const WEIPAN_PROFILE: StrategySellProfile = {
   eodCutoffMin: 890,
 };
 
+/**
+ * 中线档默认卖点档案（M3）：趋势不破不走——只在跌破 10 周线 / 周线高点回撤 18% 时告警，
+ * 过滤日内噪声（拿得住主升浪）。无尾盘了结（eodCutoffMin=0，中线持有过夜）。
+ * 止盈/日内回撤设很宽（仅作硬安全垫），实际中线卖点由 weekly_break 主导。
+ */
+export const MID_PROFILE: StrategySellProfile = {
+  takeProfitPct: 50,
+  intradayDrawdownPct: 99,
+  stopLossPct: 12,
+  eodCutoffMin: 0,
+  maBreakPeriod: 10,
+  maBreakTimeframe: 'week',
+  trailingStop: 18,
+};
+
 /** 写回尾盘套利的卖出标准，统一 cron 与 watch 研判口径 */
 const WEIPAN_SELL_STANDARD = `T+1 尾盘动能套利卖出标准（持有不超 1-2 日）：
 1. 止盈：次日冲高，盈利达 +5%（强势主线可看 +8%）即分批/全部兑现，不贪回调。
@@ -66,6 +81,19 @@ export function getProfile(strategyId: string): StrategySellProfile | null {
   return map[strategyId] ?? null;
 }
 
+/**
+ * 按战法周期解析卖点档案：显式档案优先；中线战法（horizon=mid）无显式档案时回退 MID_PROFILE
+ * （趋势不破不走的中线纪律），短线战法无档案仍返回 null（只走通用下跌触发）。
+ */
+export function resolveProfile(
+  strategyId: string,
+  horizon: 'short' | 'mid',
+): StrategySellProfile | null {
+  const explicit = getProfile(strategyId);
+  if (explicit) return explicit;
+  return horizon === 'mid' ? MID_PROFILE : null;
+}
+
 /** 页面展示：各非归档战法的卖点档案 + 现行 active 卖出 Skill */
 export function getStrategyViews(): WatchStrategyView[] {
   return listStrategies(false).map((s) => {
@@ -74,7 +102,7 @@ export function getStrategyViews(): WatchStrategyView[] {
       strategyId: s.id,
       name: s.name,
       kind: s.kind,
-      profile: getProfile(s.id),
+      profile: resolveProfile(s.id, s.horizon === 'mid' ? 'mid' : 'short'),
       sellSkill: sell?.content ?? null,
     };
   });

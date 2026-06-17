@@ -14,7 +14,10 @@ services:
       # 容器内数据库路径，对应下方挂载卷
       DATABASE_PATH: /app/data/stock-agent.sqlite
     volumes:
-      - ./data:/app/data
+      # 宿主数据目录：群晖部署时在 .env 设 DATA_DIR=/volume1/docker/stock-agent/data
+      # （Synology 共享文件夹绝对路径）；本地默认仓库内 ./data。
+      # 必须落在 NAS 本地磁盘（btrfs/ext4），切勿用网络挂载，否则 SQLite WAL 会损坏。
+      - ${DATA_DIR:-./data}:/app/data
 
   # 注：AKShare HTTP 服务（aktools）作为独立基础设施容器部署（与 trendradar/scrapling 一致），
   # 建议仅绑本机端口并经反向代理以 HTTPS 暴露，故不并入本 compose。

@@ -95,6 +95,23 @@ const STRATEGIES: ScreenStrategyDef[] = [
     activityIdeal: { ideal: 8, tolerance: 7 },
   },
   {
+    id: 'dragon_leader',
+    name: '龙头连板梯队',
+    description:
+      '短线龙头战法：在当日连板梯队里挑龙头分高（封板早、封单厚、连板高、换手活）的强势标的，叠加题材热度与资金面。聚焦总龙头/中军，回避一字与弱势补涨。需读取当日涨停池龙头辨识。',
+    factorWeights: { dragonRank: 0.4, themeHeat: 0.25, fundFlow: 0.2, activity: 0.15 },
+    hardFilters: {
+      amountMinYi: 2,
+      turnoverMin: 3,
+      turnoverMax: 45,
+      pctMin: 0,
+      marketCapMinYi: 30,
+      marketCapMaxYi: 800,
+    },
+    momentumIdeal: { ideal: 8, tolerance: 6 },
+    activityIdeal: { ideal: 12, tolerance: 9 },
+  },
+  {
     id: 'balanced_alpha',
     name: '均衡阿尔法',
     description:
@@ -138,6 +155,25 @@ const STRATEGIES: ScreenStrategyDef[] = [
     momentumIdeal: { ideal: 0, tolerance: 6 },
     activityIdeal: { ideal: 4, tolerance: 6 },
   },
+  {
+    id: 'mid_leader',
+    name: '中线龙头（赛道下钻）',
+    description:
+      '中线趋势打法：在强赛道 ETF 成分股内选龙头——周线多头排列(月线定方向)+周线金叉(右侧确认)+主力资金持续净流入+题材走强，回避一字追涨与暴跌。配合 ETF 行业轮动下钻使用。',
+    horizon: 'mid',
+    factorWeights: { midTrend: 0.4, fundFlow: 0.2, themeHeat: 0.2, liquidity: 0.1, momentum: 0.1 },
+    hardFilters: {
+      amountMinYi: 1,
+      turnoverMin: 1,
+      turnoverMax: 30,
+      pctMin: -4,
+      pctMax: 7,
+      marketCapMinYi: 50,
+      marketCapMaxYi: 5000,
+    },
+    momentumIdeal: { ideal: 2, tolerance: 6 },
+    activityIdeal: { ideal: 6, tolerance: 8 },
+  },
 ];
 
 const BY_ID = new Map(STRATEGIES.map((s) => [s.id, s]));
@@ -176,9 +212,9 @@ function buildCriteria(def: ScreenStrategyDef): string[] {
 
 /** 前端/agent 用的策略清单（暴露 id/name/description/factorWeights + 口径 criteria） */
 export function listStrategies(): ScreenStrategy[] {
-  return STRATEGIES.map(({ id, name, description, factorWeights }) => {
+  return STRATEGIES.map(({ id, name, description, factorWeights, horizon }) => {
     const def = BY_ID.get(id)!;
-    return { id, name, description, factorWeights, criteria: buildCriteria(def) };
+    return { id, name, description, factorWeights, horizon: horizon ?? 'short', criteria: buildCriteria(def) };
   });
 }
 

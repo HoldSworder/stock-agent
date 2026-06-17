@@ -14,6 +14,7 @@ import {
   Cpu,
   Compass,
   Odometer,
+  Stopwatch,
 } from '@element-plus/icons-vue';
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
@@ -70,6 +71,7 @@ const groups = [
     items: [
       { to: '/review', title: '复盘', desc: 'Review', icon: Memo },
       { to: '/strategy', title: '战法模拟', desc: 'Strategy', icon: DataAnalysis },
+      { to: '/backtest', title: '回测', desc: 'Backtest', icon: Stopwatch },
     ],
   },
   {

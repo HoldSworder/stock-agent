@@ -43,6 +43,26 @@ function evalPositionSignals(ctx: QuoteCtx, cfg: WatchConfig): WatchSignal[] {
   const out: WatchSignal[] = [];
   const { price, dayHigh, prevPrice, avgCost, limitUp, profile } = ctx;
 
+  // 中线档：过滤日内噪声（回撤/急跌/炸板/跌破成本/止盈都不在日内触发），
+  // 只保留「硬止损」作安全垫；趋势破坏由低频 weekly_break 扫描负责（engine 调用）。
+  if (ctx.horizon === 'mid') {
+    if (profile && avgCost && avgCost > 0) {
+      const stopLine = avgCost * (1 - profile.stopLossPct / 100);
+      if (price <= stopLine && prevPrice != null && prevPrice > stopLine) {
+        out.push(
+          mk(
+            ctx,
+            'strategy_stop',
+            'high',
+            `跌破中线硬止损 ${stopLine.toFixed(2)}（成本 ${avgCost.toFixed(2)} 下方 ${profile.stopLossPct}%，现价 ${price.toFixed(2)}）`,
+            75,
+          ),
+        );
+      }
+    }
+    return out;
+  }
+
   // 战法止盈：浮盈达档案 takeProfitPct（每轮均可提示，由 cooldown 控频）
   if (profile && avgCost && avgCost > 0) {
     const gain = ((price - avgCost) / avgCost) * 100;
@@ -226,6 +246,18 @@ export function evalQuoteSignals(ctx: QuoteCtx, cfg: WatchConfig): WatchSignal[]
         ? evalWatchSignals(ctx, cfg)
         : [];
   return [...base, ...evalPlanSignals(ctx)];
+}
+
+/**
+ * 中线趋势破坏信号（engine 低频周线扫描后调用；按日去重）。
+ * reason 区分：'ma' 跌破周线均线 / 'trail' 周线高点回撤超阈值。
+ */
+export function buildWeeklyBreak(
+  ctx: QuoteCtx,
+  detail: string,
+  reason: 'ma' | 'trail',
+): WatchSignal {
+  return mk(ctx, 'weekly_break', reason === 'ma' ? 'high' : 'medium', detail, reason === 'ma' ? 78 : 64);
 }
 
 /** 尾盘了结信号（engine 在到点且按日去重后调用） */

@@ -6,6 +6,7 @@ import type {
   WatchQuoteItem,
   WatchSignal,
   WatchStatus,
+  WatchTradeEvent,
 } from '@stock-agent/shared';
 import { api, openWs } from '@/api';
 
@@ -24,6 +25,8 @@ export const useWatchStore = defineStore('watch', () => {
   const quotesAt = ref<string>('');
   const signals = ref<WatchSignalRow[]>([]);
   const alerts = ref<WatchAlert[]>([]);
+  // 自动/拒绝成交实时流（auto_buy/auto_sell/rejected），供驾驶舱「自动成交」可见性展示
+  const trades = ref<WatchTradeEvent[]>([]);
   const connected = ref(false);
 
   let ws: WebSocket | null = null;
@@ -48,6 +51,8 @@ export const useWatchStore = defineStore('watch', () => {
       signals.value = [row, ...rest].slice(0, 100);
     } else if (e.type === 'alert') {
       alerts.value = [e.alert, ...alerts.value].slice(0, 100);
+    } else if (e.type === 'trade') {
+      trades.value = [e.trade, ...trades.value].slice(0, 50);
     }
   }
 
@@ -104,6 +109,7 @@ export const useWatchStore = defineStore('watch', () => {
     quotesAt,
     signals,
     alerts,
+    trades,
     connected,
     connect,
     disconnect,

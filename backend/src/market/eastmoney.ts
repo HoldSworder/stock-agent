@@ -1,4 +1,7 @@
 import type {
+  DragonOverview,
+  DragonRole,
+  DragonStock,
   FuturesItem,
   GlobalIndex,
   KlineBar,
@@ -176,6 +179,32 @@ export async function getIndices(): Promise<MarketIndex[]> {
 }
 
 /**
+ * 单指数实时快照文本（push2 stock/get，显式 secid）：现价/涨跌幅/涨跌额/今开/最高/最低/昨收/振幅。
+ * 供指数辩论决策注入，支持 A 股/港股/外围指数（不走 6 位码，规避撞码）。
+ */
+export async function getIndexSnapshot(secid: string): Promise<string> {
+  const url = `${PUSH2}/stock/get?fltt=2&fields=f43,f44,f45,f46,f57,f58,f60,f169,f170,f171&secid=${secid}`;
+  const json = await getJson(url);
+  const d = (json.data ?? {}) as Record<string, unknown>;
+  const name = String(d.f58 ?? '');
+  const point = num(d.f43);
+  if (!name || point <= 0) throw new MarketError(`指数快照不可用: ${secid}`);
+  const parts = [
+    `${name}(${String(d.f57 ?? '')}) 现报 ${point}（${num(d.f170) >= 0 ? '+' : ''}${num(d.f170)}%，涨跌额 ${num(d.f169)}）`,
+  ];
+  const open = num(d.f46);
+  const high = num(d.f44);
+  const low = num(d.f45);
+  const prevClose = num(d.f60);
+  const amplitude = num(d.f171);
+  if (open > 0) parts.push(`今开 ${open}`);
+  if (high > 0 && low > 0) parts.push(`最高 ${high} / 最低 ${low}`);
+  if (prevClose > 0) parts.push(`昨收 ${prevClose}`);
+  if (amplitude > 0) parts.push(`振幅 ${amplitude}%`);
+  return parts.join('，');
+}
+
+/**
  * 指数（带兜底）：先东财 push2；抛错或返回空时回退腾讯 minute qt。
  * 供 buildOverview 使用，配合 stale 缓存形成「东财→腾讯→缓存」三级。
  */
@@ -326,15 +355,16 @@ function buildKlineSecid(code: string): string {
   throw new MarketError(`无法解析 K 线代码: ${code}`);
 }
 
-/** 批量个股实时报价（ulist.np 一次取多只）。f2 现价 / f3 涨跌幅% / f12 代码 / f14 名称 / f18 昨收 / f6 成交额 / f8 换手率% / f10 量比 */
+/** 批量个股实时报价（ulist.np 一次取多只）。f2 现价 / f3 涨跌幅% / f12 代码 / f14 名称 / f18 昨收 / f6 成交额 / f7 振幅% / f8 换手率% / f10 量比 */
 export async function getQuotesEastmoney(codes: string[]): Promise<StockQuote[]> {
   const valid = codes.filter((c) => /^\d{6}$/.test(c));
   if (valid.length === 0) return [];
   const secids = valid.map(toSecid).join(',');
-  const url = `${PUSH2}/ulist.np/get?fltt=2&fields=f2,f3,f6,f8,f10,f12,f14,f18&secids=${secids}`;
+  const url = `${PUSH2}/ulist.np/get?fltt=2&fields=f2,f3,f6,f7,f8,f10,f12,f14,f18&secids=${secids}`;
   const json = await getJson(url);
   return toRows(json).map((r) => {
-    // f8 换手率 / f10 量比：缺失（如停牌/无数据）东财返回 '-' → num()=0，归一为 undefined
+    // f7 振幅 / f8 换手率 / f10 量比：缺失（如停牌/无数据）东财返回 '-' → num()=0，归一为 undefined
+    const amplitude = num(r.f7);
     const turnover = num(r.f8);
     const volRatio = num(r.f10);
     return {
@@ -345,6 +375,7 @@ export async function getQuotesEastmoney(codes: string[]): Promise<StockQuote[]>
       prevClose: num(r.f18),
       // f6 成交额（元）→ 亿
       amount: num(r.f6) / 1e8,
+      amplitude: amplitude > 0 ? amplitude : undefined,
       turnoverRate: turnover > 0 ? turnover : undefined,
       volumeRatio: volRatio > 0 ? volRatio : undefined,
     };
@@ -713,6 +744,11 @@ interface ZtPoolItem {
   hybk?: string; // 行业板块
   lbc?: number; // 连板数（连续涨停天数），如 4 即 4 连板
   zttj?: { days?: number; ct?: number }; // {days天ct板} 涨停统计（近 days 天涨停 ct 次），非连板数
+  fbt?: number; // 首次封板时间（HHMMSS，如 93015 即 09:30:15，越早越强）
+  lbt?: number; // 最后封板时间
+  fund?: number; // 封单额（元）
+  hs?: number; // 换手率 %
+  amount?: number; // 成交额（元）
 }
 
 async function fetchPool(
@@ -766,4 +802,112 @@ export async function getLadder(): Promise<LadderTier[]> {
     }
   }
   return [...byStreak.values()].sort((a, b) => b.streak - a.streak);
+}
+
+// ===== S6 龙头辨识（连板梯队 + 龙头分层）=====
+
+/** 封板时间数字（HHMMSS）→ HH:MM:SS 文本；缺失/异常返回空串 */
+function fmtSealTime(v: number | undefined): string {
+  if (!v || v <= 0) return '';
+  const s = String(v).padStart(6, '0');
+  return `${s.slice(0, 2)}:${s.slice(2, 4)}:${s.slice(4, 6)}`;
+}
+
+const dragonClamp = (v: number, lo = 0, hi = 100): number => Math.min(hi, Math.max(lo, v));
+
+/**
+ * 龙头分 0-100（A 股短线龙头辨识，规则化、零量化知识）：
+ *  - 连板高度：越高越强（8 板封顶满分，权重 40）
+ *  - 封板时间：越早越强（09:30 满分→11:30 衰减，权重 30）——「先板是大哥」
+ *  - 封单额：越大越强（5 亿封顶满分，权重 20）——封单厚度反映资金合力
+ *  - 换手率：适度活跃（首板看换手，过低无人气、过高分歧，权重 10）
+ */
+function computeDragonScore(p: ZtPoolItem): number {
+  const streak = p.lbc ?? 1;
+  const heightScore = dragonClamp((streak / 8) * 100);
+
+  // 封板时间：09:30(=570min) 给满分，到 11:30(=690min) 线性衰减到 0；缺失给中性 50
+  let sealTimeScore = 50;
+  if (p.fbt && p.fbt > 0) {
+    const s = String(p.fbt).padStart(6, '0');
+    const minutes = Number(s.slice(0, 2)) * 60 + Number(s.slice(2, 4));
+    sealTimeScore = dragonClamp(100 - ((minutes - 570) / 120) * 100);
+  }
+
+  // 封单额（元→亿）：5 亿封顶满分；缺失给中性 40
+  const fundYi = p.fund != null ? p.fund / 1e8 : null;
+  const fundScore = fundYi != null ? dragonClamp((fundYi / 5) * 100) : 40;
+
+  // 换手率：8% 为理想活跃点，过低/过高都扣分；缺失给中性 50
+  const hs = p.hs ?? null;
+  const hsScore = hs != null ? dragonClamp(100 - Math.abs(hs - 8) * 6) : 50;
+
+  return Math.round(heightScore * 0.4 + sealTimeScore * 0.3 + fundScore * 0.2 + hsScore * 0.1);
+}
+
+/** 龙头分层：组装连板梯队 + 每梯队龙头分排序 + 全场总龙头/中军/弹性角色标注 */
+export async function getDragonRanking(): Promise<DragonOverview> {
+  const [{ pool }, emotion] = await Promise.all([
+    fetchPool('getTopicZTPool', 400),
+    getEmotion().catch(() => null),
+  ]);
+
+  // 逐只算龙头分
+  const enriched: DragonStock[] = pool.map((p) => ({
+    code: p.c,
+    name: p.n,
+    sector: p.hybk ?? '',
+    streak: p.lbc ?? 1,
+    firstSealTime: fmtSealTime(p.fbt),
+    sealFund: p.fund != null ? Math.round((p.fund / 1e8) * 100) / 100 : null,
+    turnoverRate: p.hs ?? null,
+    dragonScore: computeDragonScore(p),
+    role: '弹性' as DragonRole,
+  }));
+
+  // 全场总龙头：龙头分最高者；中军：高板梯队（连板≥3且非总龙头）的强者；其余首板/低板为弹性
+  const sortedByScore = [...enriched].sort((a, b) => b.dragonScore - a.dragonScore);
+  const topDragon = sortedByScore[0] ?? null;
+  for (const s of enriched) {
+    if (topDragon && s.code === topDragon.code) s.role = '总龙头';
+    else if (s.streak >= 3) s.role = '中军';
+    else s.role = '弹性';
+  }
+
+  // 按连板天数分组，组内按龙头分降序，每梯队最多 20 只
+  const byStreak = new Map<number, DragonStock[]>();
+  for (const s of enriched) {
+    const arr = byStreak.get(s.streak) ?? [];
+    arr.push(s);
+    byStreak.set(s.streak, arr);
+  }
+  const tiers = [...byStreak.entries()]
+    .map(([streak, stocks]) => ({
+      streak,
+      count: stocks.length,
+      stocks: stocks.sort((a, b) => b.dragonScore - a.dragonScore).slice(0, 20),
+    }))
+    .sort((a, b) => b.streak - a.streak);
+
+  return {
+    asOf: new Date().toISOString(),
+    maxStreak: emotion?.maxStreak ?? (enriched.reduce((m, s) => Math.max(m, s.streak), 0) || 0),
+    limitUpCount: emotion?.limitUp ?? pool.length,
+    brokenRate: emotion?.brokenRate ?? 0,
+    topDragon,
+    tiers,
+    note:
+      '连板梯队龙头辨识（确定性规则：连板高度+封板时间+封单额+换手），仅供参考，不构成投资建议。',
+  };
+}
+
+/** 取单只个股在当日连板梯队中的位置与龙头角色（决策/盯盘用，不在涨停池则返回 null） */
+export async function getStockDragonStatus(code: string): Promise<DragonStock | null> {
+  const ov = await getDragonRanking().catch(() => null);
+  if (!ov) return null;
+  for (const tier of ov.tiers) {
+    const hit = tier.stocks.find((s) => s.code === code);
+    if (hit) return hit;
+  }
+  return null;
 }

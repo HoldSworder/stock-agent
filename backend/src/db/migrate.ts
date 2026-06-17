@@ -113,6 +113,10 @@ CREATE TABLE IF NOT EXISTS strategies (
   auto_sim_enabled INTEGER NOT NULL DEFAULT 0,
   screen_engine TEXT,
   screen_strategy_id TEXT,
+  horizon TEXT NOT NULL DEFAULT 'short',
+  pick_top_n INTEGER,
+  max_positions INTEGER,
+  rebalance_cron TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -360,6 +364,8 @@ CREATE TABLE IF NOT EXISTS screen_runs (
   selection_logic TEXT,
   portfolio_risk TEXT,
   run_id TEXT,
+  horizon TEXT NOT NULL DEFAULT 'short',
+  universe_note TEXT,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_screen_runs_created ON screen_runs(created_at);
@@ -442,6 +448,7 @@ CREATE TABLE IF NOT EXISTS market_themes (
   phase TEXT NOT NULL DEFAULT '未知',
   sources TEXT NOT NULL DEFAULT '[]',
   evidence TEXT NOT NULL DEFAULT '[]',
+  strength_history TEXT NOT NULL DEFAULT '[]',
   first_seen_date TEXT NOT NULL,
   last_seen_date TEXT NOT NULL,
   updated_at TEXT NOT NULL,
@@ -493,6 +500,57 @@ CREATE TABLE IF NOT EXISTS sentiment_snapshots (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sentiment_snapshots_date ON sentiment_snapshots(trade_date);
+
+CREATE TABLE IF NOT EXISTS position_attributions (
+  id TEXT PRIMARY KEY,
+  account TEXT NOT NULL DEFAULT 'real',
+  date TEXT NOT NULL,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  day_pnl REAL NOT NULL DEFAULT 0,
+  day_rate REAL NOT NULL DEFAULT 0,
+  weight REAL NOT NULL DEFAULT 0,
+  contribution REAL NOT NULL DEFAULT 0,
+  note TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_position_attributions_date ON position_attributions(date);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_position_attributions_key ON position_attributions(account, date, code);
+
+CREATE TABLE IF NOT EXISTS backtest_runs (
+  id TEXT PRIMARY KEY,
+  scope TEXT NOT NULL DEFAULT 'signal',
+  label TEXT NOT NULL DEFAULT '',
+  codes TEXT NOT NULL DEFAULT '[]',
+  preset TEXT NOT NULL,
+  params TEXT NOT NULL DEFAULT '{}',
+  period TEXT NOT NULL DEFAULT 'day',
+  range TEXT NOT NULL DEFAULT '',
+  costs TEXT NOT NULL DEFAULT '{}',
+  metrics TEXT NOT NULL DEFAULT '{}',
+  systems TEXT NOT NULL DEFAULT '[]',
+  equity TEXT NOT NULL DEFAULT '[]',
+  trades TEXT NOT NULL DEFAULT '[]',
+  notes TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_backtest_runs_created ON backtest_runs(created_at);
+
+CREATE TABLE IF NOT EXISTS board_newhigh_snapshots (
+  id TEXT PRIMARY KEY,
+  trade_date TEXT NOT NULL,
+  board_code TEXT NOT NULL,
+  board_name TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  new_high_count INTEGER NOT NULL DEFAULT 0,
+  cons_total INTEGER NOT NULL DEFAULT 0,
+  ratio REAL NOT NULL DEFAULT 0,
+  rank INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_board_newhigh_date ON board_newhigh_snapshots(trade_date);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_board_newhigh_key ON board_newhigh_snapshots(trade_date, board_code);
 `;
 
 export function ensureSchema(): void {
@@ -508,6 +566,10 @@ export function ensureSchema(): void {
     "ALTER TABLE strategies ADD COLUMN auto_sim_enabled INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE strategies ADD COLUMN screen_engine TEXT",
     "ALTER TABLE strategies ADD COLUMN screen_strategy_id TEXT",
+    "ALTER TABLE strategies ADD COLUMN horizon TEXT NOT NULL DEFAULT 'short'",
+    "ALTER TABLE strategies ADD COLUMN pick_top_n INTEGER",
+    "ALTER TABLE strategies ADD COLUMN max_positions INTEGER",
+    "ALTER TABLE strategies ADD COLUMN rebalance_cron TEXT",
     "ALTER TABLE sim_trades ADD COLUMN ext_id TEXT",
     "ALTER TABLE watch_alerts ADD COLUMN trigger_price REAL NOT NULL DEFAULT 0",
     "ALTER TABLE watch_alerts ADD COLUMN outcome TEXT",
@@ -526,7 +588,10 @@ export function ensureSchema(): void {
     "ALTER TABLE daily_plan_items ADD COLUMN invalid_conditions TEXT NOT NULL DEFAULT '[]'",
     'ALTER TABLE daily_plan_items ADD COLUMN confidence INTEGER',
     "ALTER TABLE screen_runs ADD COLUMN engine TEXT NOT NULL DEFAULT 'multifactor'",
+    "ALTER TABLE screen_runs ADD COLUMN horizon TEXT NOT NULL DEFAULT 'short'",
+    "ALTER TABLE screen_runs ADD COLUMN universe_note TEXT",
     "ALTER TABLE market_themes ADD COLUMN phase TEXT NOT NULL DEFAULT '未知'",
+    "ALTER TABLE market_themes ADD COLUMN strength_history TEXT NOT NULL DEFAULT '[]'",
   ];
   for (const sql of addColumns) {
     try {
@@ -547,11 +612,11 @@ export function ensureSchema(): void {
 function warnOnSchemaDrift(): void {
   const required: Record<string, string[]> = {
     scheduled_tasks: ['strategy_id'],
-    strategies: ['kind', 'screen_engine', 'screen_strategy_id'],
+    strategies: ['kind', 'screen_engine', 'screen_strategy_id', 'horizon', 'rebalance_cron'],
     daily_plan_items: ['asset_type', 'confirm_conditions', 'invalid_conditions', 'confidence'],
     watch_alerts: ['strategy_id', 'exec_status'],
-    screen_runs: ['engine'],
-    market_themes: ['phase'],
+    screen_runs: ['engine', 'horizon'],
+    market_themes: ['phase', 'strength_history'],
   };
   for (const [table, cols] of Object.entries(required)) {
     try {

@@ -9,6 +9,7 @@ import type {
   DisciplinePositionItem,
   DisciplineReport,
   DisciplineStatus,
+  EtfSignal,
   RealPortfolio,
 } from '@stock-agent/shared';
 import { db, schema } from '../db/client';
@@ -32,6 +33,34 @@ const DEFAULT_CONFIG: DisciplineConfig = {
   singleMaxWeightPct: 30,
   totalMaxPositionPct: 90,
 };
+
+/**
+ * ETF 走更宽松的趋势级默认纪律：ETF 跟随赛道趋势波动更大、可承受更深回撤与更高集中度，
+ * 用偏紧的个股止损会频繁误触发。优先引用 ETF 信号的结构化触发价，取不到才回退此默认。
+ */
+const ETF_DEFAULT_CONFIG: DisciplineConfig = {
+  stopLossPct: 12,
+  takeProfitPct: 40,
+  maxHoldDays: null,
+  singleMaxWeightPct: 40,
+  totalMaxPositionPct: 95,
+};
+
+/** 判定是否 ETF/LOF 场内基金（15/5 开头代码或名称含 ETF/LOF），复用 ETF 模块口径 */
+function isEtfPosition(code: string, name: string): boolean {
+  return /^(15|5)\d{4}$/.test(code) || /ETF|LOF/i.test(name);
+}
+
+/** 取 ETF 跟踪池信号（best-effort，动态导入避免与 agent/runner 形成静态循环依赖） */
+async function loadEtfSignals(): Promise<Map<string, EtfSignal>> {
+  try {
+    const etf = await import('../etf/service');
+    const result = await etf.signals();
+    return new Map(result.signals.map((s) => [s.code, s]));
+  } catch {
+    return new Map();
+  }
+}
 
 /** 读取账户级默认纪律（meta JSON，缺省回退内置默认） */
 export function getDisciplineConfig(): DisciplineConfig {
@@ -149,24 +178,43 @@ export function removeOverride(code: string): void {
 
 // ===== 纪律体检 =====
 
-/** 解析某标的的生效纪律（逐票覆盖优先，逐字段回退账户默认） */
+/**
+ * 解析某标的的生效纪律：逐票覆盖优先 → ETF 走趋势级默认（并引用 ETF 信号触发价反算止损/止盈线）
+ * → 个股走账户默认。逐字段回退，互不影响。
+ */
 function resolveRule(
-  code: string,
+  p: RealPortfolio['positions'][number],
+  assetType: 'stock' | 'etf',
   cfg: DisciplineConfig,
   overrides: Map<string, DisciplineOverride>,
+  etfSig?: EtfSignal,
 ): DisciplinePositionItem['rule'] {
-  const ov = overrides.get(code);
+  const base = assetType === 'etf' ? ETF_DEFAULT_CONFIG : cfg;
+  const ov = overrides.get(p.code);
   const hasOverride =
     !!ov &&
     (ov.stopLossPct != null ||
       ov.takeProfitPct != null ||
       ov.maxHoldDays != null ||
       ov.singleMaxWeightPct != null);
+
+  // ETF 无逐票覆盖该字段时，引用信号结构化触发价反算「相对成本的百分比」线（取不到回退趋势级默认）
+  let etfStopLossPct: number | null = null;
+  let etfTakeProfitPct: number | null = null;
+  if (assetType === 'etf' && etfSig && p.avgCost > 0) {
+    if (etfSig.stopLoss && etfSig.stopLoss.value > 0 && etfSig.stopLoss.value < p.avgCost) {
+      etfStopLossPct = Math.round(((p.avgCost - etfSig.stopLoss.value) / p.avgCost) * 1000) / 10;
+    }
+    if (etfSig.takeProfit && etfSig.takeProfit.value > p.avgCost) {
+      etfTakeProfitPct = Math.round(((etfSig.takeProfit.value - p.avgCost) / p.avgCost) * 1000) / 10;
+    }
+  }
+
   return {
-    stopLossPct: ov?.stopLossPct ?? cfg.stopLossPct,
-    takeProfitPct: ov?.takeProfitPct ?? cfg.takeProfitPct,
-    maxHoldDays: ov?.maxHoldDays ?? cfg.maxHoldDays,
-    singleMaxWeightPct: ov?.singleMaxWeightPct ?? cfg.singleMaxWeightPct,
+    stopLossPct: ov?.stopLossPct ?? etfStopLossPct ?? base.stopLossPct,
+    takeProfitPct: ov?.takeProfitPct ?? etfTakeProfitPct ?? base.takeProfitPct,
+    maxHoldDays: ov?.maxHoldDays ?? base.maxHoldDays,
+    singleMaxWeightPct: ov?.singleMaxWeightPct ?? base.singleMaxWeightPct,
     source: hasOverride ? 'override' : 'default',
   };
 }
@@ -245,12 +293,18 @@ export async function evaluateDiscipline(portfolio?: RealPortfolio): Promise<Dis
   const cfg = getDisciplineConfig();
   const overrides = getOverrideMap();
 
+  // 仅当存在 ETF 持仓时才拉取 ETF 信号，避免纯个股账户多打一次行情接口
+  const hasEtf = pf.positions.some((p) => isEtfPosition(p.code, p.name));
+  const etfSignals = hasEtf ? await loadEtfSignals() : new Map<string, EtfSignal>();
+
   const items: DisciplinePositionItem[] = pf.positions.map((p) => {
-    const rule = resolveRule(p.code, cfg, overrides);
+    const assetType: 'stock' | 'etf' = isEtfPosition(p.code, p.name) ? 'etf' : 'stock';
+    const rule = resolveRule(p, assetType, cfg, overrides, etfSignals.get(p.code));
     const { status, flags, advice } = evalPosition(p, rule);
     return {
       code: p.code,
       name: p.name,
+      assetType,
       price: p.price,
       avgCost: p.avgCost,
       holdRate: p.holdRate,

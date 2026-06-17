@@ -17,7 +17,9 @@ import {
 import { storeToRefs } from 'pinia';
 import { api } from '@/api';
 import { useKlineStore } from '@/stores/kline';
-import type { KlinePeriod, TrendPoint, TrendsResult } from '@stock-agent/shared';
+import CapitalPanel from '@/components/CapitalPanel.vue';
+import ChipPanel from '@/components/ChipPanel.vue';
+import type { KlinePeriod, TrendPoint, TrendsResult, StockIndicators } from '@stock-agent/shared';
 
 /** 弹窗标签：分时 + 日/周/月 K 线 */
 type Tab = 'trend' | KlinePeriod;
@@ -48,10 +50,15 @@ const { visible, code, name, secid } = storeToRefs(store);
 
 const chartEl = ref<HTMLDivElement | null>(null);
 const tab = ref<Tab>('day');
+// 视图模式：图表（K线/分时）｜资金面（S7 龙虎榜）｜筹码（S8 筹码分布）。后两者仅 A 股个股可用
+const viewMode = ref<'chart' | 'capital' | 'chip'>('chart');
+const isStock = computed(() => /^\d{6}$/.test(code.value || '') && !secid.value);
 const loading = ref(false);
 const error = ref('');
 // 当日分时原始数据（用于派生盘口数据条），切到非分时或关闭时置空
 const trend = ref<TrendsResult | null>(null);
+// S9 技术指标读数（MACD/KDJ/RSI/BOLL 状态条），仅 K 线视图展示
+const indicators = ref<StockIndicators | null>(null);
 
 let chart: Chart | null = null;
 // 自增 token：切换标的/周期时丢弃过期请求
@@ -62,6 +69,8 @@ const POLL_MS = 10_000;
 // 独立副图的 pane id
 const macdPaneId = 'macd_pane';
 const bollPaneId = 'boll_pane';
+const kdjPaneId = 'kdj_pane';
+const rsiPaneId = 'rsi_pane';
 // A 股一日分时点数（09:30-11:30 + 13:00-15:00 共 240 分钟），用于分时铺满全天框架
 const SESSION_BARS = 240;
 // 图表默认 bar 间距，从分时切回 K 线时还原
@@ -270,6 +279,17 @@ async function loadKline(silent = false) {
   }
 }
 
+/** 加载 S9 技术指标读数（仅 A 股个股；失败静默，不影响图表） */
+async function loadIndicators(): Promise<void> {
+  indicators.value = null;
+  if (!isStock.value || !code.value) return;
+  try {
+    indicators.value = await api.stockIndicators(code.value);
+  } catch {
+    indicators.value = null;
+  }
+}
+
 /** 分时铺满全天框架：按全天 240 点计算 bar 间距，右侧预留未到时段空白 */
 function fitTrendFullDay(): void {
   if (!chart || !chartEl.value) return;
@@ -320,8 +340,11 @@ function applyView() {
     chart.setStyles({ candle: { type: CandleType.Area } });
     chart.removeIndicator('candle_pane', 'MA');
     chart.removeIndicator('candle_pane', 'TS_LINES');
-    // 分时不显示 BOLL
+    // 分时不显示 BOLL / KDJ / RSI（仅 K 线视图有意义）
     chart.removeIndicator(bollPaneId, 'BOLL');
+    chart.removeIndicator(kdjPaneId, 'KDJ');
+    chart.removeIndicator(rsiPaneId, 'RSI');
+    indicators.value = null; // 分时不展示指标读数条
     chart.createIndicator(
       {
         name: 'TS_LINES',
@@ -347,9 +370,12 @@ function applyView() {
     chart.removeIndicator('candle_pane', 'TS_LINES');
     chart.removeIndicator('candle_pane', 'MA');
     chart.createIndicator('MA', false, { id: 'candle_pane' });
-    // MACD + BOLL 独立副图（BOLL 在 MACD 下方一栏）
-    chart.createIndicator('MACD', false, { id: macdPaneId, height: 72 });
-    chart.createIndicator('BOLL', false, { id: bollPaneId, height: 72 });
+    // MACD + BOLL + KDJ + RSI 独立副图（S9 技术指标库；紧凑高度以容纳多栏）
+    chart.createIndicator('MACD', false, { id: macdPaneId, height: 62 });
+    chart.createIndicator('BOLL', false, { id: bollPaneId, height: 62 });
+    chart.createIndicator('KDJ', false, { id: kdjPaneId, height: 62 });
+    chart.createIndicator('RSI', false, { id: rsiPaneId, height: 62 });
+    void loadIndicators();
     // K 线恢复缩放/拖动，并还原分时改动过的 bar 间距与右偏移
     chart.setZoomEnabled(true);
     chart.setScrollEnabled(true);
@@ -385,12 +411,42 @@ function onClosed() {
   teardownChart();
   error.value = '';
   trend.value = null;
+  indicators.value = null;
   tab.value = 'day';
 }
 
 const tipText = computed(() =>
   tab.value === 'trend' ? '当日分时 · 多源行情' : '前复权 · 多源行情',
 );
+
+/** S9 技术指标读数条单元（dir：1 偏多红 / -1 偏空绿 / 0 中性） */
+interface IndCell {
+  label: string;
+  value: string;
+  dir: 1 | 0 | -1;
+}
+const indicatorCells = computed<IndCell[]>(() => {
+  const ind = indicators.value;
+  if (!ind) return [];
+  const cells: IndCell[] = [];
+  if (ind.macd) {
+    const dir = ind.macd.state === '金叉' || ind.macd.state === '多头' ? 1 : -1;
+    cells.push({ label: 'MACD', value: `${ind.macd.state}（DIF ${ind.macd.dif}/DEA ${ind.macd.dea}）`, dir });
+  }
+  if (ind.kdj) {
+    const dir = ind.kdj.signal === '超买' ? 1 : ind.kdj.signal === '超卖' ? -1 : 0;
+    cells.push({ label: 'KDJ', value: `K${ind.kdj.k} D${ind.kdj.d} J${ind.kdj.j}（${ind.kdj.signal}）`, dir });
+  }
+  if (ind.rsi) {
+    const dir = ind.rsi.signal === '超买' ? 1 : ind.rsi.signal === '超卖' ? -1 : 0;
+    cells.push({ label: 'RSI', value: `6:${ind.rsi.rsi6} 12:${ind.rsi.rsi12} 24:${ind.rsi.rsi24}`, dir });
+  }
+  if (ind.boll) {
+    const dir = ind.boll.pos === '上轨上方' ? 1 : ind.boll.pos === '下轨下方' ? -1 : 0;
+    cells.push({ label: 'BOLL', value: `${ind.boll.pos}（%B ${ind.boll.pctB}）`, dir });
+  }
+  return cells;
+});
 
 /** 盘口数据条：从分时点位 + 昨收派生（仅分时 tab 展示） */
 interface TrendStat {
@@ -445,6 +501,7 @@ watch(tab, () => applyView());
 
 // 弹窗打开时若切换到另一标的，重载（指数 code 可能相同，故同时监听 secid）
 watch([code, secid], () => {
+  viewMode.value = 'chart'; // 切标的回到图表视图
   if (tab.value !== 'day') {
     tab.value = 'day'; // 触发 watch(tab) → applyView
     return;
@@ -467,7 +524,12 @@ watch([code, secid], () => {
   >
     <div class="kline-head">
       <span class="kline-code num">{{ code }}</span>
-      <el-radio-group v-model="tab" size="small">
+      <el-radio-group v-if="isStock" v-model="viewMode" size="small">
+        <el-radio-button value="chart">图表</el-radio-button>
+        <el-radio-button value="capital">资金面</el-radio-button>
+        <el-radio-button value="chip">筹码</el-radio-button>
+      </el-radio-group>
+      <el-radio-group v-show="viewMode === 'chart'" v-model="tab" size="small">
         <el-radio-button value="trend">分时</el-radio-button>
         <el-radio-button value="5m">5分</el-radio-button>
         <el-radio-button value="15m">15分</el-radio-button>
@@ -478,13 +540,13 @@ watch([code, secid], () => {
         <el-radio-button value="week">周K</el-radio-button>
         <el-radio-button value="month">月K</el-radio-button>
       </el-radio-group>
-      <span class="kline-legend">
+      <span v-show="viewMode === 'chart'" class="kline-legend">
         <i class="kline-legend__dot is-up" />红涨
         <i class="kline-legend__dot is-down" />绿跌
       </span>
-      <span class="kline-tip">{{ tipText }}</span>
+      <span v-show="viewMode === 'chart'" class="kline-tip">{{ tipText }}</span>
     </div>
-    <div v-if="showStats" class="kline-quote">
+    <div v-if="showStats && viewMode === 'chart'" class="kline-quote">
       <div
         v-for="s in trendStats"
         :key="s.label"
@@ -499,10 +561,26 @@ watch([code, secid], () => {
         <span class="kline-quote__value num">{{ s.value }}</span>
       </div>
     </div>
-    <div v-loading="loading" class="kline-wrap">
+    <div
+      v-if="viewMode === 'chart' && indicatorCells.length"
+      class="kline-ind"
+    >
+      <div
+        v-for="c in indicatorCells"
+        :key="c.label"
+        class="kline-ind__cell"
+        :class="{ 'is-up': c.dir === 1, 'is-down': c.dir === -1 }"
+      >
+        <span class="kline-ind__label">{{ c.label }}</span>
+        <span class="kline-ind__value num">{{ c.value }}</span>
+      </div>
+    </div>
+    <div v-show="viewMode === 'chart'" v-loading="loading" class="kline-wrap">
       <div ref="chartEl" class="kline-chart" />
       <div v-if="error" class="kline-error">{{ error }}</div>
     </div>
+    <CapitalPanel v-if="viewMode === 'capital'" :code="code" class="kline-capital" />
+    <ChipPanel v-if="viewMode === 'chip'" :code="code" class="kline-capital" />
   </el-dialog>
 </template>
 
@@ -591,6 +669,39 @@ watch([code, secid], () => {
 }
 .kline-quote__cell.is-flat .kline-quote__value {
   color: #cfd3dc;
+}
+/* S9 技术指标读数条 */
+.kline-ind {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.kline-ind__cell {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: 1 1 auto;
+  min-width: 150px;
+  padding: 5px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.kline-ind__label {
+  color: var(--text-2);
+  font-size: 11px;
+  font-weight: 600;
+}
+.kline-ind__value {
+  font-size: 12px;
+  color: #cfd3dc;
+}
+.kline-ind__cell.is-up .kline-ind__value {
+  color: #f0454a;
+}
+.kline-ind__cell.is-down .kline-ind__value {
+  color: #12b886;
 }
 .kline-wrap {
   position: relative;

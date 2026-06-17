@@ -1,22 +1,26 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import dayjs from 'dayjs';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { Refresh, Warning, VideoPause, VideoPlay, TopRight } from '@element-plus/icons-vue';
 import { api } from '@/api';
+import { useWatchStore } from '@/stores/watch';
 import AiAnalysisHub from '@/components/AiAnalysisHub.vue';
 import StockLink from '@/components/StockLink.vue';
 import type {
   CockpitEvent,
   CockpitModuleSummary,
   CockpitOverview,
+  PositionAttributionReport,
   SafetyState,
 } from '@stock-agent/shared';
 
 const data = ref<CockpitOverview | null>(null);
 const loading = ref(false);
 const acting = ref(false);
+// 当日盈亏归因（只读旁路，收盘后落库；驾驶舱仅显示账户贡献 + 最大赢/输家）
+const attribution = ref<PositionAttributionReport | null>(null);
 
 const route = useRoute();
 const router = useRouter();
@@ -39,6 +43,10 @@ watch(tab, (v) => {
 });
 
 const safety = computed<SafetyState | null>(() => data.value?.safety ?? null);
+
+// 自动成交实时流（auto_buy/auto_sell/rejected），经盯盘总线 /ws/watch 推送
+const watchStore = useWatchStore();
+const autoTrades = computed(() => watchStore.trades.slice(0, 8));
 const plan = computed(() => data.value?.plan ?? null);
 const planStance = computed(() => data.value?.planStance ?? null);
 const themes = computed(() => data.value?.themes ?? []);
@@ -86,7 +94,18 @@ async function load() {
   } finally {
     loading.value = false;
   }
+  // 归因为只读旁路，独立拉取，失败不影响驾驶舱主视图
+  try {
+    attribution.value = await api.attribution();
+  } catch {
+    attribution.value = null;
+  }
 }
+
+// 贡献（小数）格式化为百分点文本：+0.42pct / -0.18pct
+const contribText = (v: number) => (v >= 0 ? '+' : '') + (v * 100).toFixed(2) + 'pct';
+// A股 红涨绿跌：正 -> up(红)，负 -> down(绿)
+const dir = (v: number) => (v > 0 ? 'up' : v < 0 ? 'down' : '');
 
 async function doKill() {
   try {
@@ -123,8 +142,47 @@ async function doResume() {
   }
 }
 
+// 自动本地模拟总闸：开启后才允许 cron/agent 定时任务（尾盘 1445 / 妙想 0933）自动建仓
+async function toggleAutoLocalSim(on: boolean) {
+  try {
+    acting.value = true;
+    const s = await api.safety.update({ autoLocalSimEnabled: on });
+    if (data.value) data.value.safety = s;
+    ElMessage.success(on ? '已开启自动本地模拟' : '已关闭自动本地模拟');
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : String(e));
+  } finally {
+    acting.value = false;
+  }
+}
+
+// 自动外部（妙想）模拟总闸：开启后才允许妙想模拟盘自动下单
+async function toggleAutoExternalSim(on: boolean) {
+  try {
+    acting.value = true;
+    const s = await api.safety.update({ autoExternalSimEnabled: on });
+    if (data.value) data.value.safety = s;
+    ElMessage.success(on ? '已开启自动外部（妙想）模拟' : '已关闭自动外部（妙想）模拟');
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : String(e));
+  } finally {
+    acting.value = false;
+  }
+}
+
+const TRADE_KIND_LABEL: Record<'auto_buy' | 'auto_sell' | 'rejected', string> = {
+  auto_buy: '自动买入',
+  auto_sell: '自动卖出',
+  rejected: '被拒',
+};
+
 onMounted(() => {
   void load();
+  watchStore.connect();
+});
+
+onUnmounted(() => {
+  watchStore.disconnect();
 });
 </script>
 
@@ -156,14 +214,33 @@ onMounted(() => {
                   {{ safety.killSwitch ? '安全总闸已拉下（急停中）' : '安全总闸正常' }}
                 </div>
                 <div class="safety-meta">
-                  <span>自动本地模拟 <b :class="safety.autoLocalSimEnabled ? 'on' : 'off'">{{ safety.autoLocalSimEnabled ? '开' : '关' }}</b></span>
+                  <span class="sw">
+                    自动本地模拟
+                    <el-switch
+                      :model-value="safety.autoLocalSimEnabled"
+                      :disabled="acting || safety.killSwitch"
+                      size="small"
+                      @change="(v: boolean) => toggleAutoLocalSim(v)"
+                    />
+                  </span>
                   <span class="sep">/</span>
-                  <span>自动外部模拟 <b :class="safety.autoExternalSimEnabled ? 'on' : 'off'">{{ safety.autoExternalSimEnabled ? '开' : '关' }}</b></span>
+                  <span class="sw">
+                    自动外部模拟
+                    <el-switch
+                      :model-value="safety.autoExternalSimEnabled"
+                      :disabled="acting || safety.killSwitch"
+                      size="small"
+                      @change="(v: boolean) => toggleAutoExternalSim(v)"
+                    />
+                  </span>
                   <span class="sep">/</span>
                   <span>手动强制 <b :class="safety.allowManualForceTrade ? 'on' : 'off'">{{ safety.allowManualForceTrade ? '允许' : '禁用' }}</b></span>
                   <template v-if="safety.killSwitch && safety.killReason">
                     <span class="sep">/</span><span>原因 {{ safety.killReason }}</span>
                   </template>
+                </div>
+                <div v-if="!safety.autoLocalSimEnabled" class="safety-hint">
+                  开启后，定时任务（尾盘 1445 / 妙想 0933）方可自动为本地战法账户建仓；还需在「中枢 · 调度」启用对应任务。仅影响虚拟战法账户，绝不触及真实持仓。
                 </div>
               </div>
             </div>
@@ -179,6 +256,42 @@ onMounted(() => {
             <el-button v-else type="success" :icon="VideoPlay" :loading="acting" @click="doResume">
               解除急停
             </el-button>
+          </div>
+
+          <!-- 自动成交实时流：自动建仓/卖出与总闸拒绝（经盯盘总线推送，看得见为何自动/未自动） -->
+          <div v-if="autoTrades.length" class="auto-trades">
+            <div class="at-head">自动成交实时流</div>
+            <div class="at-list">
+              <div v-for="(t, i) in autoTrades" :key="`${t.at}:${i}`" class="at-item" :class="{ rejected: t.kind === 'rejected' }">
+                <span class="at-tag" :class="t.kind">{{ TRADE_KIND_LABEL[t.kind] }}</span>
+                <span class="at-strategy">{{ t.strategyName || '—' }}</span>
+                <StockLink :code="t.code" :name="t.name" class="at-code" />
+                <span v-if="t.kind !== 'rejected'" class="at-detail num">{{ t.qty }} 股 @ {{ t.price }}</span>
+                <span v-else class="at-reason">{{ t.reason }}</span>
+                <span class="at-time num">{{ dayjs(t.at).format('HH:mm:ss') }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 当日盈亏归因（精简卡）：账户当日贡献 + 最大赢家/输家，详情见持仓页 -->
+          <div v-if="attribution && attribution.items.length" class="attr-card">
+            <span class="attr-card-title">当日盈亏归因</span>
+            <span class="attr-card-total">
+              账户贡献
+              <b class="num" :class="dir(attribution.totalDayPnl)">
+                {{ contribText(attribution.totalDayRate) }}
+              </b>
+            </span>
+            <span v-if="attribution.topWinner" class="attr-card-item">
+              赢家
+              <StockLink :code="attribution.topWinner.code" :name="attribution.topWinner.name" />
+              <b class="num up">{{ contribText(attribution.topWinner.contribution) }}</b>
+            </span>
+            <span v-if="attribution.topLoser" class="attr-card-item">
+              输家
+              <StockLink :code="attribution.topLoser.code" :name="attribution.topLoser.name" />
+              <b class="num down">{{ contribText(attribution.topLoser.contribution) }}</b>
+            </span>
           </div>
 
           <div class="grid">
@@ -300,6 +413,7 @@ onMounted(() => {
                 <div class="tl-body">
                   <div class="tl-line">
                     <el-tag size="small" effect="plain" :type="kindTag(e.kind)">{{ KIND_LABEL[e.kind] }}</el-tag>
+                    <el-tag v-if="e.auto" size="small" type="success" effect="dark" class="auto-badge">自动</el-tag>
                     <span class="tl-title">{{ e.title }}</span>
                     <StockLink v-if="e.code" :code="e.code" :name="e.name ?? undefined" class="tl-code" />
                     <span class="tl-time num">{{ dayjs(e.at).format('MM-DD HH:mm') }}</span>
@@ -397,6 +511,117 @@ onMounted(() => {
 }
 .safety-meta b.off {
   color: var(--text-1);
+}
+.safety-meta .sw {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.safety-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-2);
+  line-height: 1.5;
+  max-width: 760px;
+}
+
+/* ---- 自动成交实时流 ---- */
+.auto-trades {
+  margin-bottom: 18px;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+}
+.attr-card {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  margin-bottom: 18px;
+  padding: 10px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+  font-size: 13px;
+}
+.attr-card-title {
+  font-weight: 600;
+}
+.attr-card-total,
+.attr-card-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-2);
+}
+.attr-card .num.up {
+  color: var(--up, #f56c6c);
+}
+.attr-card .num.down {
+  color: var(--down, #67c23a);
+}
+.at-head {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-1);
+  margin-bottom: 8px;
+}
+.at-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.at-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12.5px;
+}
+.at-tag {
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+.at-tag.auto_buy {
+  color: var(--up);
+  background: rgba(246, 70, 93, 0.12);
+}
+.at-tag.auto_sell {
+  color: var(--down, #1fc77f);
+  background: rgba(31, 199, 127, 0.12);
+}
+.at-tag.rejected {
+  color: var(--status-warn);
+  background: rgba(240, 180, 41, 0.12);
+}
+.at-strategy {
+  color: var(--text-2);
+  flex-shrink: 0;
+}
+.at-code {
+  flex-shrink: 0;
+}
+.at-detail {
+  color: var(--text-1);
+}
+.at-reason {
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+  flex: 1;
+}
+.at-time {
+  margin-left: auto;
+  color: var(--text-2);
+  flex-shrink: 0;
+}
+.auto-badge {
+  flex-shrink: 0;
 }
 
 /* ---- 概览面板 ---- */

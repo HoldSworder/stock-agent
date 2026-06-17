@@ -22,19 +22,30 @@ import type {
   DecisionAgentUpdate,
   DecisionEngineConfig,
   DecisionEngineOverview,
+  DecisionIndexInfo,
   DecisionVerdictCache,
   EtfPoolItem,
   EtfOverview,
   EtfRotationOverview,
+  MidDrilldownResult,
   EtfSignalsResult,
   SentimentOverview,
   SentimentHistoryItem,
+  BoardBreadthOverview,
+  BoardBreadthHistoryItem,
+  DragonOverview,
+  StockCapitalDetail,
+  StockIndicators,
+  StockChipDistribution,
   RadarOverview,
   EtfStatus,
   HomeModule,
   IdingpanPushResult,
   KlineBar,
   KlinePeriod,
+  BacktestRun,
+  BacktestRunInput,
+  BacktestRunListItem,
   MarketOverview,
   ModuleScheduleJob,
   ModuleScheduleUpdate,
@@ -53,6 +64,8 @@ import type {
   DisciplineOverride,
   DisciplineOverrideInput,
   DisciplineReport,
+  PositionAttributionReport,
+  VsSimReport,
   MarketTheme,
   MarketThemeStatus,
   ThemesRefreshResult,
@@ -205,7 +218,18 @@ export const api = {
       unwrap<void>(http.delete(`/positions/discipline/overrides/${code}`)),
     events: (limit?: number) =>
       unwrap<DisciplineEvent[]>(http.get('/positions/discipline/events', { params: { limit } })),
+    getPushMedium: () =>
+      unwrap<{ enabled: boolean }>(http.get('/positions/discipline/push-medium')),
+    setPushMedium: (enabled: boolean) =>
+      unwrap<{ enabled: boolean }>(http.put('/positions/discipline/push-medium', { enabled })),
   },
+
+  // 日终持仓归因 + 真实 vs 模拟绩效对照（只读）
+  attribution: (date?: string) =>
+    unwrap<PositionAttributionReport | null>(
+      http.get('/positions/attribution', { params: { date } }),
+    ),
+  vsSim: () => unwrap<VsSimReport>(http.get('/positions/vs-sim', { timeout: 25000 })),
 
   // 结构化市场主线（复盘/热点聚合 market_themes）
   themes: {
@@ -325,6 +349,13 @@ export const api = {
     unwrap<StrategySnapshot>(http.post(`/strategies/${id}/reset`, {}, { timeout: 30000 })),
   getStrategyDailyOutput: (id: string) =>
     unwrap<TaskRun[]>(http.get(`/strategies/${id}/daily-output`)),
+
+  // 回测（单标的信号级 / 组合级）
+  runBacktest: (body: BacktestRunInput) =>
+    unwrap<BacktestRun>(http.post('/backtest/run', body, { timeout: 120000 })),
+  listBacktestRuns: (limit?: number) =>
+    unwrap<BacktestRunListItem[]>(http.get('/backtest/runs', { params: { limit } })),
+  getBacktestRun: (id: string) => unwrap<BacktestRun>(http.get(`/backtest/runs/${id}`)),
 
   // 战法前向验证（样本曲线/累计收益/回撤/胜率）+ 自动模拟总闸
   getStrategyForward: (id: string) =>
@@ -481,6 +512,9 @@ export const api = {
   // M1 ETF 行业轮动（确定性轮动榜 + agent 过滤研判）
   rotation: {
     overview: () => unwrap<EtfRotationOverview>(http.get('/rotation/overview', { timeout: 60000 })),
+    // M2 中线下钻：强赛道 ETF → 成分股 universe → 中线龙头选股（默认纯量化，不调 LLM）
+    drilldown: (body?: { topEtf?: number; pickTopN?: number; context?: string; useLlm?: boolean }) =>
+      unwrap<MidDrilldownResult>(http.post('/rotation/drilldown', body ?? {}, { timeout: 120000 })),
     reviews: (limit?: number) =>
       unwrap<ReviewHistoryItem[]>(http.get('/rotation/reviews', { params: { limit } })),
     review: () =>
@@ -496,6 +530,35 @@ export const api = {
     history: (limit?: number) =>
       unwrap<SentimentHistoryItem[]>(http.get('/sentiment/history', { params: { limit } })),
   },
+
+  // 板块新高宽度主线识别（确定性：各板块创新高个股数横向排名 + 持续性判主线）
+  breadth: {
+    overview: () =>
+      unwrap<BoardBreadthOverview>(http.get('/breadth/overview', { timeout: 120000 })),
+    history: (code: string, limit?: number) =>
+      unwrap<BoardBreadthHistoryItem[]>(
+        http.get('/breadth/history', { params: { code, limit } }),
+      ),
+  },
+
+  // S6 龙头/连板梯队（确定性连板梯队 + 龙头辨识分层）
+  dragon: {
+    overview: () => unwrap<DragonOverview>(http.get('/dragon/overview', { timeout: 60000 })),
+  },
+
+  // S7 资金面（个股龙虎榜净额趋势 + 最近一次席位拆分）
+  capital: {
+    stock: (code: string) =>
+      unwrap<StockCapitalDetail>(http.get(`/capital/stock/${code}`, { timeout: 60000 })),
+  },
+
+  // S9 技术指标库（个股 MACD/KDJ/RSI/BOLL 读数）
+  stockIndicators: (code: string) =>
+    unwrap<StockIndicators>(http.get(`/stock/${code}/indicators`, { timeout: 30000 })),
+
+  // S8 筹码分布（个股获利比例/成本区间/集中度）
+  stockChips: (code: string) =>
+    unwrap<StockChipDistribution>(http.get(`/stock/${code}/chips`, { timeout: 30000 })),
 
   // 数据源中心（统一管理外部取数：健康/配置/启停/统计）
   datasource: {
@@ -569,6 +632,8 @@ export const api = {
           timeout: 20000,
         }),
       ),
+    // 可决策股指白名单（「股指」下拉）
+    indices: () => unwrap<DecisionIndexInfo[]>(http.get('/decision/indices', { timeout: 20000 })),
   },
 
   // 今日计划（作战室）

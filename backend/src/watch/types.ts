@@ -31,6 +31,8 @@ export interface QuoteCtx {
   strategyId?: string;
   /** 所属战法名 */
   strategyName?: string;
+  /** 持仓周期：short 短线（默认）/ mid 中线（中线过滤日内噪声，只在趋势破坏时告警） */
+  horizon?: 'short' | 'mid';
   /** 战法卖点档案（有档案才启用战法专属触发） */
   profile?: StrategySellProfile | null;
   /** 今日计划标的项（有则启用计划结构化触发价对照） */

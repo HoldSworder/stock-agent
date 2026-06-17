@@ -2,13 +2,23 @@ import type {
   EtfRotationItem,
   EtfRotationOverview,
   EtfRotationState,
+  MidDrilldownResult,
+  MidDrilldownEtf,
+  RunTrigger,
   StrengthBreakdown,
 } from '@stock-agent/shared';
-import { computeMetrics, fetchEtfRank, fetchThemeCategories, type EtfMetrics } from '../etf/data';
+import {
+  computeMetrics,
+  fetchEtfConstituents,
+  fetchEtfRank,
+  fetchThemeCategories,
+  type EtfMetrics,
+} from '../etf/data';
 import { listPool } from '../etf/repo';
 import { getKline } from '../market/eastmoney';
 import { fetchEtfPremiumMap, type JisiluPremium } from '../market/jisilu';
 import { isSourceEnabled } from '../datasource/registry';
+import { runScreen } from '../screener/service';
 import { nowIso } from '../util';
 
 // M1 ETF 行业轮动引擎（建议向）：纯确定性只读取数 + 本地计算，复用 ETF 指标层 computeMetrics。
@@ -211,6 +221,86 @@ export async function buildRotationOverview(): Promise<EtfRotationOverview> {
     asOf: nowIso(),
     items: list,
     note: 'ETF 行业轮动（中线赛道层，相对强弱+趋势+资金流确定性研判，仅供参考，不构成下单建议）',
+  };
+}
+
+// ===== M2 中线下钻：强赛道 ETF → 成分股 universe → 中线选股龙头 =====
+
+export interface MidDrilldownOptions {
+  /** 取强度最高的前 N 只强赛道 ETF 作为下钻起点（默认 4） */
+  topEtf?: number;
+  /** universe 内选股输出 TopN（默认走选股页默认值） */
+  pickTopN?: number;
+  /** 题材上下文（透传选股 LLM） */
+  context?: string;
+  /** 是否调用 LLM 横排（默认 true；纯量化下钻传 false） */
+  useLlm?: boolean;
+  /** 触发来源（落库与计量） */
+  trigger?: RunTrigger;
+}
+
+/** 强赛道判定：状态为上升/加速且相对沪深300为正（RS 为正才是真强，呼应评审） */
+function isStrongTrack(it: EtfRotationItem): boolean {
+  return (it.state === '上升' || it.state === '加速') && (it.rs ?? 0) > 0;
+}
+
+/**
+ * M2 中线下钻：先取 ETF 行业轮动榜筛出强赛道 ETF，下钻其成分股合并为 universe，
+ * 再在 universe 内跑中线龙头策略（mid_leader, horizon=mid）选龙头。
+ * best-effort：无强赛道或成分股全部取数失败时返回 run=null 并附降级说明，不抛错。
+ */
+export async function runMidDrilldown(opts: MidDrilldownOptions = {}): Promise<MidDrilldownResult> {
+  const topEtf = Math.min(Math.max(Math.round(opts.topEtf ?? 4), 1), 8);
+  const ov = await buildRotationOverview();
+  const strong = ov.items.filter(isStrongTrack).slice(0, topEtf);
+
+  const strongEtfs: MidDrilldownEtf[] = [];
+  const universe = new Set<string>();
+  for (const it of strong) {
+    const cons = await fetchEtfConstituents(it.code);
+    for (const c of cons) universe.add(c);
+    strongEtfs.push({
+      code: it.code,
+      name: it.name,
+      track: it.track,
+      state: it.state,
+      score: it.score,
+      constituentCount: cons.length,
+    });
+  }
+
+  if (strong.length === 0) {
+    return { asOf: ov.asOf, strongEtfs, universeSize: 0, run: null, note: '当前无「上升/加速且跑赢沪深300」的强赛道，暂不下钻。' };
+  }
+  if (universe.size === 0) {
+    return {
+      asOf: ov.asOf,
+      strongEtfs,
+      universeSize: 0,
+      run: null,
+      note: '强赛道已选出，但成分股取数为空（aktools/akshare 不可用或基金未披露持仓），无法下钻。',
+    };
+  }
+
+  const trackNames = strongEtfs.map((e) => e.track || e.name).join('、');
+  const run = await runScreen({
+    engine: 'multifactor',
+    strategyId: 'mid_leader',
+    horizon: 'mid',
+    universe: Array.from(universe),
+    universeNote: `轮动 Top${strong.length} 强赛道成分股（${trackNames}）`,
+    context: opts.context ?? trackNames,
+    topN: opts.pickTopN ?? null,
+    useLlm: opts.useLlm !== false,
+    trigger: opts.trigger ?? 'manual',
+  });
+
+  return {
+    asOf: ov.asOf,
+    strongEtfs,
+    universeSize: universe.size,
+    run,
+    note: `在 ${strong.length} 个强赛道、${universe.size} 只成分股内下钻中线龙头。`,
   };
 }
 

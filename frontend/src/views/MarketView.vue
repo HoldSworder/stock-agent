@@ -12,8 +12,10 @@ import MarkdownView from '@/components/MarkdownView.vue';
 import StockLink from '@/components/StockLink.vue';
 import BoardReviewConclusion from '@/components/BoardReviewConclusion.vue';
 import BoardStrengthPanel from '@/components/BoardStrengthPanel.vue';
+import BoardBreadthPanel from '@/components/BoardBreadthPanel.vue';
 import MarketThemesPanel from '@/components/MarketThemesPanel.vue';
 import SentimentPanel from '@/components/SentimentPanel.vue';
+import LadderPanel from '@/components/LadderPanel.vue';
 import { useKlineStore } from '@/stores/kline';
 import type {
   FuturesItem,
@@ -418,9 +420,15 @@ onUnmounted(() => {
         <SentimentPanel />
       </el-tab-pane>
 
+      <!-- ===== 连板梯队 / 龙头辨识（S6 龙头战法）===== -->
+      <el-tab-pane label="连板梯队" name="ladder" lazy>
+        <LadderPanel />
+      </el-tab-pane>
+
       <!-- ===== 行业中线 / 市场主线（合并：中线雷达 + 市场主线）===== -->
       <el-tab-pane label="行业中线 / 市场主线" name="board" lazy>
         <BoardReviewConclusion />
+        <BoardBreadthPanel />
         <MarketThemesPanel />
         <BoardStrengthPanel />
       </el-tab-pane>

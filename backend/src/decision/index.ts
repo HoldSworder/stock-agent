@@ -15,7 +15,8 @@ import {
   setEngineConfig,
 } from './agentConfig';
 import { debateRealPositions } from './sellcheck';
-import { runDecision } from './service';
+import { runDecision, runIndexDecision } from './service';
+import { listIndexDefs, resolveIndex } from './indices';
 import { reviewPending } from './reflection';
 import { listVerdicts } from './verdictCache';
 
@@ -38,7 +39,7 @@ export function registerDecisionModule(app: FastifyInstance): void {
     let activeAbort: AbortController | null = null;
 
     socket.on('message', async (raw: Buffer) => {
-      let payload: { action?: string; code?: string; name?: string; context?: string };
+      let payload: { action?: string; assetType?: string; code?: string; name?: string; context?: string };
       try {
         payload = JSON.parse(raw.toString());
       } catch {
@@ -59,7 +60,15 @@ export function registerDecisionModule(app: FastifyInstance): void {
         }
       };
 
-      const code = normalizeCode(payload.code);
+      // 股指辩论（独立精简链路）：按白名单解析 code 为指数定义
+      const indexDef = payload.assetType === 'index' ? resolveIndex(payload.code) : null;
+      if (payload.assetType === 'index' && !indexDef) {
+        send({ type: 'error', message: '未知股指，请从白名单中选择' });
+        send({ type: 'run_finished', runId: '', status: 'error' });
+        return;
+      }
+
+      const code = indexDef ? indexDef.key : normalizeCode(payload.code);
       if (!code) {
         send({ type: 'error', message: '请输入合法的 6 位股票代码' });
         send({ type: 'run_finished', runId: '', status: 'error' });
@@ -72,19 +81,21 @@ export function registerDecisionModule(app: FastifyInstance): void {
       activeAbort = abort;
       send({ type: 'run_started', runId: '' });
       try {
-        const result = await runDecision(
-          {
-            code,
-            name: typeof payload.name === 'string' ? payload.name : undefined,
-            context: typeof payload.context === 'string' ? payload.context : undefined,
-          },
-          { onEvent: send, signal: abort.signal, purpose: 'decision' },
-        );
-        // 成功结果落公共历史库（供弹窗历史列表切换查看），refKey 作用域为股票代码
+        const result = indexDef
+          ? await runIndexDecision(indexDef, { onEvent: send, signal: abort.signal, purpose: 'decision' })
+          : await runDecision(
+              {
+                code,
+                name: typeof payload.name === 'string' ? payload.name : undefined,
+                context: typeof payload.context === 'string' ? payload.context : undefined,
+              },
+              { onEvent: send, signal: abort.signal, purpose: 'decision' },
+            );
+        // 成功结果落公共历史库（供弹窗历史列表切换查看），refKey 作用域为股票代码/指数 key
         saveAnalysis({
           kind: ANALYSIS_KIND,
           refKey: code,
-          title: `${result.name}(${code}) 决策`,
+          title: indexDef ? `${result.name} 指数研判` : `${result.name}(${code}) 决策`,
           runId: null,
           content: result.narrative,
         });
@@ -107,6 +118,11 @@ export function registerDecisionModule(app: FastifyInstance): void {
       activeAbort?.abort();
       activeAbort = null;
     });
+  });
+
+  // 可决策股指白名单（前端「股指」下拉）：指数走 secid 取数，规避 6 位撞码
+  app.get('/api/decision/indices', () => {
+    return { ok: true, data: listIndexDefs() };
   });
 
   // —— 决策智能体治理（中枢·智能体页）——

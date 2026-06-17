@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { runTask } from '../runner';
 import { listEtfAnalyzeReviews } from '../repo';
-import { buildRotationOverview } from './service';
+import { buildRotationOverview, runMidDrilldown } from './service';
 import { ETF_ANALYZE_PROMPT, ETF_ANALYZE_TASK_NAME } from '../etf/service';
 import { cached } from '../lib/ttlCache';
 
@@ -20,6 +20,26 @@ export function registerRotationModule(app: FastifyInstance): void {
       return reply.code(502).send({ ok: false, error: e instanceof Error ? e.message : String(e) });
     }
   });
+
+  // M2 中线下钻：强赛道 ETF → 成分股 universe → 中线龙头选股（确定性 + 可选 LLM 横排，落库 screen_runs）
+  app.post<{ Body?: { topEtf?: number; pickTopN?: number; context?: string; useLlm?: boolean } }>(
+    '/api/rotation/drilldown',
+    async (req, reply) => {
+      try {
+        const b = req.body ?? {};
+        const data = await runMidDrilldown({
+          topEtf: b.topEtf,
+          pickTopN: b.pickTopN,
+          context: b.context,
+          useLlm: b.useLlm,
+          trigger: 'manual',
+        });
+        return { ok: true, data };
+      } catch (e) {
+        return reply.code(502).send({ ok: false, error: e instanceof Error ? e.message : String(e) });
+      }
+    },
+  );
 
   // 「ETF 综合研判」历史（合并后单一 ETF AI 分析；union 旧 ETF行业轮动研判/市场点评，ETF 页轮动 Tab 顶部取最新一条）
   app.get<{ Querystring: { limit?: string } }>('/api/rotation/reviews', (req) => ({

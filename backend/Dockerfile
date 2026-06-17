@@ -1,7 +1,7 @@
 # 多阶段构建：构建前端 -> 装配后端运行镜像
 # 注意：构建上下文为仓库根目录（见 docker-compose.yml 的 context: .）
 
-FROM node:22-bookworm AS build
+FROM node:24-bookworm AS build
 WORKDIR /app
 RUN corepack enable
 
@@ -19,7 +19,7 @@ COPY frontend ./frontend
 RUN pnpm --filter ./frontend build
 
 # ===== 运行阶段 =====
-FROM node:22-bookworm-slim AS runtime
+FROM node:24-bookworm-slim AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 # 复制整个工作区（含已编译的 better-sqlite3 与 tsx）

@@ -24,6 +24,7 @@ import type {
   EtfStatus,
   EtfTrigger,
   HomeModule,
+  MidDrilldownResult,
 } from '@stock-agent/shared';
 
 const msg = (e: unknown) => (e instanceof Error ? e.message : '请求失败');
@@ -91,6 +92,21 @@ async function loadRotation(force = false) {
 }
 
 const openRotKline = (it: EtfRotationItem) => kline.open(it.code, it.name);
+
+// ===== Tab3 中线下钻：强赛道 ETF → 成分股 universe → 中线龙头选股 =====
+const drill = ref<MidDrilldownResult | null>(null);
+const drillLoading = ref(false);
+async function runDrilldown() {
+  drillLoading.value = true;
+  try {
+    // 默认纯量化（不调 LLM），快且省成本；如需 LLM 横排可后续加开关
+    drill.value = await api.rotation.drilldown({ useLlm: false });
+  } catch (e) {
+    ElMessage.error(msg(e));
+  } finally {
+    drillLoading.value = false;
+  }
+}
 
 const ACTION_LABEL: Record<EtfAction, string> = {
   buy: '买入',
@@ -673,6 +689,94 @@ onUnmounted(() => {
           </el-table>
           <el-empty v-else-if="!rotLoading" description="暂无轮动数据，点右上角刷新轮动榜重试" />
         </div>
+
+        <!-- M2 中线下钻：强赛道 ETF → 成分股 universe → 中线龙头选股 -->
+        <div class="panel drill-panel" v-loading="drillLoading">
+          <div class="drill-head">
+            <div>
+              <span class="drill-title">中线下钻</span>
+              <span class="drill-sub">
+                取轮动榜「上升/加速 + RS 为正」的强赛道 ETF，合并其成分股为 universe，在其中跑中线龙头选股（纯量化）
+              </span>
+            </div>
+            <el-button type="primary" :loading="drillLoading" @click="runDrilldown">
+              {{ drill ? '重新下钻' : '开始下钻' }}
+            </el-button>
+          </div>
+
+          <template v-if="drill">
+            <div class="drill-flow">
+              <span class="flow-step">
+                强赛道 ETF <b>{{ drill.strongEtfs.length }}</b> 个
+              </span>
+              <span class="flow-arrow">→</span>
+              <span class="flow-step">
+                合并 universe <b>{{ drill.universeSize }}</b> 只
+              </span>
+              <span class="flow-arrow">→</span>
+              <span class="flow-step">
+                中线龙头 <b>{{ drill.run?.picks.length ?? 0 }}</b> 只
+              </span>
+              <span class="drill-asof muted">{{ dayjs(drill.asOf).format('MM-DD HH:mm') }}</span>
+            </div>
+
+            <div v-if="drill.strongEtfs.length" class="drill-etfs">
+              <el-tag
+                v-for="e in drill.strongEtfs"
+                :key="e.code"
+                :type="STATE_TAG[e.state]"
+                effect="plain"
+                class="drill-etf-tag"
+                @click="kline.open(e.code, e.name)"
+              >
+                {{ e.name }}
+                <span v-if="e.track" class="muted">[{{ e.track }}]</span>
+                · 强度{{ e.score }} · 成分{{ e.constituentCount }}
+              </el-tag>
+            </div>
+
+            <el-table
+              v-if="drill.run && drill.run.picks.length"
+              :data="drill.run.picks"
+              size="small"
+              class="drill-picks"
+            >
+              <el-table-column label="#" width="44">
+                <template #default="{ row }">{{ row.rank }}</template>
+              </el-table-column>
+              <el-table-column label="个股" min-width="160">
+                <template #default="{ row }">
+                  <span class="link" @click="kline.open(row.code, row.name)">
+                    {{ row.name }}<span class="muted">({{ row.code }})</span>
+                  </span>
+                  <span v-if="row.industry" class="muted track">[{{ row.industry }}]</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="选股分" width="84" align="right">
+                <template #default="{ row }"><span class="num strength">{{ row.screenScore }}</span></template>
+              </el-table-column>
+              <el-table-column label="现价" width="84" align="right">
+                <template #default="{ row }"><span class="num">{{ fixed(row.price) }}</span></template>
+              </el-table-column>
+              <el-table-column label="涨跌" width="84" align="right">
+                <template #default="{ row }"><span class="num" :class="dir(row.pct)">{{ pct(row.pct) }}</span></template>
+              </el-table-column>
+              <el-table-column label="逻辑/风险" min-width="220">
+                <template #default="{ row }">
+                  <span v-if="row.thesis" class="muted note">{{ row.thesis }}</span>
+                  <span v-for="t in row.riskTags" :key="t" class="risk-tag">{{ t }}</span>
+                </template>
+              </el-table-column>
+            </el-table>
+
+            <div class="drill-note muted">{{ drill.note }}</div>
+          </template>
+          <el-empty
+            v-else-if="!drillLoading"
+            description="点「开始下钻」从强赛道 ETF 钻取中线龙头个股"
+            :image-size="60"
+          />
+        </div>
       </el-tab-pane>
     </el-tabs>
 
@@ -928,5 +1032,68 @@ onUnmounted(() => {
 }
 .notes li {
   line-height: 1.7;
+}
+/* ===== 中线下钻 ===== */
+.drill-panel {
+  margin-top: 14px;
+}
+.drill-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.drill-title {
+  font-weight: 600;
+  margin-right: 8px;
+}
+.drill-sub {
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.drill-flow {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  margin-bottom: 12px;
+  font-size: 13px;
+}
+.flow-step b {
+  color: var(--brand);
+  font-size: 15px;
+  padding: 0 2px;
+}
+.flow-arrow {
+  color: var(--text-2);
+}
+.drill-asof {
+  margin-left: auto;
+  font-size: 12px;
+}
+.drill-etfs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.drill-etf-tag {
+  cursor: pointer;
+}
+.drill-picks {
+  margin-bottom: 10px;
+}
+.risk-tag {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 6px;
+  font-size: 11.5px;
+  color: var(--el-color-warning);
+  border: 1px solid var(--el-color-warning);
+  border-radius: 4px;
+}
+.drill-note {
+  font-size: 12.5px;
 }
 </style>

@@ -1,5 +1,6 @@
 import { requestJson } from '../datasource/httpClient';
 import { num, shanghaiYmd } from '../datasource/codes';
+import type { DragonTigerEntry } from '@stock-agent/shared';
 
 // 东财 datacenter / F10 结构化数据（龙虎榜 / 限售解禁 / 增减持 / 股权质押 / 财报主表），
 // 对标 TradingAgents-astock 的 get_insider_transactions / get_fundamentals，免 MX_APIKEY、直连 HTTP。
@@ -64,10 +65,13 @@ function fmtDate(v: unknown): string {
 }
 
 /**
- * 龙虎榜上榜明细（个股近 N 次）：上榜日/涨跌幅/净买入/换手/上榜原因。
- * 游资追踪师的核心资金面证据，A 股短线定价关键。
+ * 龙虎榜上榜明细（个股近 N 次）结构化：上榜日/涨跌幅/净买入(万)/换手/上榜原因 + 个股名。
+ * getDragonTiger（文本）与 S7 资金面深挖共用，避免重复取数（DRY）。
  */
-export async function getDragonTiger(code: string, limit = 5): Promise<string> {
+export async function getDragonTigerEntries(
+  code: string,
+  limit = 5,
+): Promise<{ name: string; entries: DragonTigerEntry[] }> {
   const rows = await fetchRows(
     WEB_BASE,
     {
@@ -83,18 +87,32 @@ export async function getDragonTiger(code: string, limit = 5): Promise<string> {
     },
     'em-dc-dragon',
   );
-  if (!rows.length) return '近期无龙虎榜上榜记录。';
+  if (!rows.length) return { name: code, entries: [] };
   const name = String(rows[0].SECURITY_NAME_ABBR ?? code);
-  const lines = rows.map((r) => {
-    const net = num(r.BILLBOARD_NET_AMT) / 1e4;
-    const reason = String(r.EXPLANATION || r.EXPLAIN || '').trim();
-    return (
-      `${fmtDate(r.TRADE_DATE)} 涨跌${num(r.CHANGE_RATE).toFixed(2)}% ` +
-      `净买入${net >= 0 ? '+' : ''}${net.toFixed(0)}万 换手${num(r.TURNOVERRATE).toFixed(2)}%` +
-      (reason ? ` 原因:${reason}` : '')
-    );
-  });
-  return `${name}(${code}) 近 ${rows.length} 次龙虎榜：\n${lines.join('\n')}`;
+  const entries: DragonTigerEntry[] = rows.map((r) => ({
+    date: fmtDate(r.TRADE_DATE),
+    pct: num(r.CHANGE_RATE),
+    net: num(r.BILLBOARD_NET_AMT) / 1e4,
+    turnover: num(r.TURNOVERRATE),
+    reason: String(r.EXPLANATION || r.EXPLAIN || '').trim(),
+  }));
+  return { name, entries };
+}
+
+/**
+ * 龙虎榜上榜明细（个股近 N 次）：上榜日/涨跌幅/净买入/换手/上榜原因。
+ * 游资追踪师的核心资金面证据，A 股短线定价关键。
+ */
+export async function getDragonTiger(code: string, limit = 5): Promise<string> {
+  const { name, entries } = await getDragonTigerEntries(code, limit);
+  if (!entries.length) return '近期无龙虎榜上榜记录。';
+  const lines = entries.map(
+    (e) =>
+      `${e.date} 涨跌${e.pct.toFixed(2)}% ` +
+      `净买入${e.net >= 0 ? '+' : ''}${e.net.toFixed(0)}万 换手${e.turnover.toFixed(2)}%` +
+      (e.reason ? ` 原因:${e.reason}` : ''),
+  );
+  return `${name}(${code}) 近 ${entries.length} 次龙虎榜：\n${lines.join('\n')}`;
 }
 
 /**

@@ -1,6 +1,8 @@
 import { and, asc, eq } from 'drizzle-orm';
 import type { StrategyForwardStats, StrategySample } from '@stock-agent/shared';
 import { db, schema } from '../db/client';
+import { csi300Return } from '../market/csi300';
+import { listStrategies as listScreenStrategies } from '../screener/strategy';
 import { getMeta, setMeta } from '../settings';
 import { newId, nowIso } from '../util';
 import { getStrategy, getStrategySnapshot, listStrategies, shanghaiDate } from './sim';
@@ -102,8 +104,26 @@ function realizedStats(strategyId: string): { closedTrades: number; winRate: num
   return { closedTrades, winRate: Math.round((wins / closedTrades) * 1000) / 10 };
 }
 
-/** 前向验证统计：样本曲线累计收益、最大回撤 + 已实现胜率 + 自动模拟闸门状态 */
-export function computeForwardStats(strategyId: string): StrategyForwardStats {
+/** 两个 YYYY-MM-DD 之间的自然日差（b - a，Asia/Shanghai） */
+function dayDiff(a: string, b: string): number {
+  const ta = Date.parse(`${a}T00:00:00+08:00`);
+  const tb = Date.parse(`${b}T00:00:00+08:00`);
+  if (!Number.isFinite(ta) || !Number.isFinite(tb)) return 0;
+  return Math.round((tb - ta) / 86400000);
+}
+
+/** 解析战法绑定选股策略名（内置策略；未绑定/未知为 null，id 仍照常返回） */
+function resolveScreenStrategyName(id: string | null): string | null {
+  if (!id) return null;
+  return listScreenStrategies().find((s) => s.id === id)?.name ?? null;
+}
+
+/**
+ * 前向验证统计：样本曲线累计收益、最大回撤 + 已实现胜率 + 自动模拟闸门状态。
+ * 额外按「选股口径」附沪深300 同期收益与超额 Alpha（权益曲线起点日起算），以及绑定选股策略 id/名。
+ * 因需拉取指数 K 线算 Alpha 故为异步。
+ */
+export async function computeForwardStats(strategyId: string): Promise<StrategyForwardStats> {
   const samples = listSamples(strategyId);
   const strategy = getStrategy(strategyId);
   const { closedTrades, winRate } = realizedStats(strategyId);
@@ -124,14 +144,32 @@ export function computeForwardStats(strategyId: string): StrategyForwardStats {
     maxDrawdown = Math.round(mdd * 10000) / 100;
   }
 
+  // 同期沪深300 区间收益（与 cumReturn 同为 % 口径）与超额 Alpha
+  let csi300: number | null = null;
+  let alpha: number | null = null;
+  const sinceDate = samples[0]?.sampleDate ?? null;
+  if (sinceDate && cumReturn != null) {
+    const days = Math.max(dayDiff(sinceDate, shanghaiDate()), samples.length);
+    const idx = await csi300Return(sinceDate, days);
+    if (idx != null) {
+      csi300 = Math.round(idx * 100) / 100;
+      alpha = Math.round((cumReturn - csi300) * 100) / 100;
+    }
+  }
+
+  const screenStrategyId = strategy?.screenStrategyId ?? null;
   return {
     strategyId,
-    sinceDate: samples[0]?.sampleDate ?? null,
+    sinceDate,
     days: samples.length,
     cumReturn,
     maxDrawdown,
     closedTrades,
     winRate,
+    csi300Return: csi300,
+    alpha,
+    screenStrategyId,
+    screenStrategyName: resolveScreenStrategyName(screenStrategyId),
     autoSimEnabled: strategy?.autoSimEnabled ?? false,
     globalAutoEnabled: isGlobalAutoSimEnabled(),
     samples,

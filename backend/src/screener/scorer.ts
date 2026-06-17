@@ -152,8 +152,10 @@ export function scoreCandidates(
         return base;
       }
       case 'trend':
-      case 'fundFlow': {
-        // 趋势/资金流为逐只历史因子，由外部 extraScores 注入；缺失记中性 50
+      case 'fundFlow':
+      case 'midTrend':
+      case 'dragonRank': {
+        // 趋势/资金流/中线趋势/龙头分为逐只历史/涨停池因子，由外部 extraScores 注入；缺失记中性 50
         const v = extraScores?.get(r.code)?.[key];
         return typeof v === 'number' ? v : 50;
       }

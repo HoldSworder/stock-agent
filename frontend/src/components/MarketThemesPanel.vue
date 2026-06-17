@@ -29,6 +29,12 @@ const statusTag = (s: MarketTheme['status']) =>
 const phaseTag = (p: MarketTheme['phase']) =>
   p === '加速' ? 'danger' : p === '启动' ? 'success' : p === '分歧' ? 'warning' : 'info';
 const strengthClass = (v: number) => (v >= 80 ? 'hot' : v >= 60 ? 'mid' : 'low');
+// S5 强度趋势：走强红、走平灰、走弱绿（A 股红涨绿跌口径）
+const TREND_META: Record<MarketTheme['strengthTrend'], { label: string; cls: string }> = {
+  rising: { label: '↑ 走强', cls: 'up' },
+  flat: { label: '→ 走平', cls: 'flat' },
+  falling: { label: '↓ 走弱', cls: 'down' },
+};
 
 async function load() {
   loading.value = true;
@@ -127,6 +133,14 @@ onMounted(load);
               <p class="str-pop-note">板块涨幅排名越前、主力净流入越大、来源越多，强度越高。</p>
             </div>
           </el-popover>
+        </div>
+        <div class="theme-lifecycle">
+          <span class="lc-duration" title="主线持续天数（首次出现→最近出现）">
+            持续 <b>{{ t.durationDays }}</b> 天
+          </span>
+          <span class="lc-trend" :class="TREND_META[t.strengthTrend].cls" title="近段强度趋势">
+            {{ TREND_META[t.strengthTrend].label }}
+          </span>
         </div>
         <div class="theme-sources">
           <el-tag v-for="s in t.sources" :key="s" size="small" effect="dark" class="src-tag">
@@ -255,6 +269,29 @@ onMounted(load);
   color: var(--text-2);
 }
 .str-pop-note {
+  color: var(--text-2);
+}
+.theme-lifecycle {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.lc-duration b {
+  color: var(--text-1, inherit);
+  font-family: var(--font-mono);
+}
+.lc-trend {
+  font-weight: 600;
+}
+.lc-trend.up {
+  color: var(--danger, #f56c6c);
+}
+.lc-trend.down {
+  color: var(--success, #67c23a);
+}
+.lc-trend.flat {
   color: var(--text-2);
 }
 .theme-sources {

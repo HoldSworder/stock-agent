@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22 <23"
+    "node": ">=22 <25"
   },
   "scripts": {
     "dev": "tsx watch src/server.ts",
@@ -24,12 +24,13 @@
     "drizzle-orm": "^0.38.2",
     "fastify": "^5.2.0",
     "openai": "^4.77.0",
+    "tradelab": "1.0.1",
     "trading-signals": "^7.4.3",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
-    "@types/node": "^22.10.2",
+    "@types/node": "^24.0.0",
     "drizzle-kit": "^0.30.1",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"

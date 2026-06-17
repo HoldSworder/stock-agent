@@ -3,6 +3,7 @@ import type {
   ScreenPick,
   RunTrigger,
   ScreenProgressEvent,
+  Horizon,
 } from '@stock-agent/shared';
 import {
   fetchMarketSnapshot,
@@ -17,6 +18,7 @@ import { rankCandidates } from './ranker';
 import { diversifyByIndustry, ruleRiskTags } from './risk';
 import { activeFactors, getStrategyDef } from './strategy';
 import { enrichTrendFactors } from './trend';
+import { enrichDragonFactors } from './dragon';
 import { nlEngine } from './nlEngine';
 
 // 选股链路（engine）注册表：选股页是「发现枢纽」，可承载多条选股链路。
@@ -45,6 +47,10 @@ export interface EngineRunInput {
   topN: number;
   useLlm: boolean;
   trigger: RunTrigger;
+  /** 持有视角：short 短线（默认）/ mid 中线 */
+  horizon?: Horizon;
+  /** 限定候选池代码集合（ETF 成分股下钻 universe；为空走全市场） */
+  universe?: string[] | null;
   /** 进度回调（逐阶段上报；缺省即静默，cron/agent 调用不传） */
   onProgress?: (e: ScreenProgressEvent) => void;
 }
@@ -96,6 +102,17 @@ const multifactor: ScreenEngine = {
     let snapshot = await fetchMarketSnapshot();
     if (snapshot.length === 0) throw new Error('全市场快照为空，选股中止');
 
+    // universe 限定（ETF 成分股下钻）：对全市场快照取交集，把选股域收窄到强赛道成分股内。
+    // universe 为空则维持全市场，行为不变。
+    if (input.universe && input.universe.length > 0) {
+      const allow = new Set(input.universe);
+      const scoped = snapshot.filter((r) => allow.has(r.code));
+      if (scoped.length === 0) {
+        throw new Error('下钻 universe 与全市场快照无交集（成分股可能停牌或代码口径不符）');
+      }
+      snapshot = scoped;
+    }
+
     // 盘前退化处理：当日量价被东财置 0 时，优先复用最近一次有效行情缓存（通常即上一交易日收盘），
     // 让硬筛/打分照常生效；非退化则把本次快照写入缓存，供下个盘前窗口使用。
     let runMode: string | null = null;
@@ -141,12 +158,28 @@ const multifactor: ScreenEngine = {
     let pool = scored.slice(0, LLM_POOL_MAX);
     emit({ stage: 'score', label: '多因子打分', status: 'done', poolCount: pool.length });
 
-    // 二段增强：策略若启用 trend / fundFlow（逐只历史因子），仅对收窄后的候选池限量取
-    // K 线与资金流补分并重打分（避免对全市场逐只取数）。其它策略零额外取数、行为不变。
-    const needsTrend = activeFactors(def).some((k) => k === 'trend' || k === 'fundFlow');
-    if (needsTrend && pool.length > 0) {
-      emit({ stage: 'enrich', label: '趋势/资金二段增强', status: 'running', poolCount: pool.length });
-      const extra = await enrichTrendFactors(pool.map((c) => c.row.code)).catch(() => null);
+    // 二段增强：策略若启用 trend / fundFlow（逐只历史因子）或 dragonRank（涨停池因子），
+    // 仅对收窄后的候选池限量取 K 线/资金流/涨停池补分并重打分（避免对全市场逐只取数）。
+    // 其它策略零额外取数、行为不变。
+    const factors = activeFactors(def);
+    const histFactors = factors.filter(
+      (k) => k === 'trend' || k === 'fundFlow' || k === 'midTrend',
+    );
+    const needsTrend = histFactors.length > 0;
+    const needsDragon = factors.some((k) => k === 'dragonRank');
+    if ((needsTrend || needsDragon) && pool.length > 0) {
+      emit({ stage: 'enrich', label: '趋势/资金/龙头二段增强', status: 'running', poolCount: pool.length });
+      const codes = pool.map((c) => c.row.code);
+      const [trendExtra, dragonExtra] = await Promise.all([
+        needsTrend ? enrichTrendFactors(codes, histFactors).catch(() => null) : Promise.resolve(null),
+        needsDragon ? enrichDragonFactors(codes).catch(() => null) : Promise.resolve(null),
+      ]);
+      // 合并两份补充表（同 code 合并因子）
+      const extra: typeof trendExtra = new Map();
+      for (const src of [trendExtra, dragonExtra]) {
+        if (!src) continue;
+        for (const [code, vals] of src) extra!.set(code, { ...extra!.get(code), ...vals });
+      }
       if (extra && extra.size > 0) {
         pool = scoreCandidates(
           pool.map((c) => c.row),
@@ -155,7 +188,7 @@ const multifactor: ScreenEngine = {
           extra,
         ).sort((a, b) => b.screenScore - a.screenScore);
       }
-      emit({ stage: 'enrich', label: '趋势/资金二段增强', status: 'done', poolCount: pool.length });
+      emit({ stage: 'enrich', label: '趋势/资金/龙头二段增强', status: 'done', poolCount: pool.length });
     }
     if (input.useLlm) {
       emit({ stage: 'rank', label: 'LLM 横向排序', status: 'running', poolCount: pool.length });

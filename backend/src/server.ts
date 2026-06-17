@@ -56,6 +56,8 @@ import {
   getKline,
   getTrends,
 } from './market/eastmoney';
+import { getStockIndicators } from './market/indicators';
+import { getChipDistribution } from './market/chip';
 import {
   buildOverview,
   buildMarketBoardPrompt,
@@ -82,6 +84,12 @@ import {
 import { syncMiaoxiangStrategy } from './strategy/miaoxiangSync';
 import { registerStrategyForward } from './strategy/forwardModule';
 import {
+  runBacktest,
+  listBacktestRuns,
+  getBacktestRun,
+  BacktestError,
+} from './backtest/service';
+import {
   approveProposal,
   listSkillView,
   rejectProposal,
@@ -101,6 +109,7 @@ import type {
   StockSuggest,
   KlineBar,
   KlinePeriod,
+  BacktestRunInput,
 } from '@stock-agent/shared';
 import * as gateway from './agent/gateway';
 import {
@@ -135,6 +144,9 @@ import { registerThemesModule } from './themes';
 import { registerRadarModule } from './radar';
 import { registerRotationModule } from './rotation';
 import { registerSentimentModule } from './sentiment';
+import { registerBreadthModule } from './breadth';
+import { registerDragonModule } from './dragon';
+import { registerCapitalModule } from './capital';
 import { registerCockpitModule } from './cockpit';
 import { catchUpModuleMissedRuns } from './scheduling/moduleScheduler';
 
@@ -420,6 +432,10 @@ async function main() {
       autoSimEnabled?: boolean;
       screenEngine?: string | null;
       screenStrategyId?: string | null;
+      horizon?: 'short' | 'mid';
+      pickTopN?: number | null;
+      maxPositions?: number | null;
+      rebalanceCron?: string | null;
     };
   }>(
     '/api/strategies/:id',
@@ -591,6 +607,36 @@ async function main() {
     }
   });
 
+  // ===== 回测 =====
+  // 入参校验失败（BacktestError）回 400，取数/引擎异常回 502
+  const backtestErr = (reply: import('fastify').FastifyReply, e: unknown) => {
+    const msg = e instanceof Error ? e.message : String(e);
+    return reply.code(e instanceof BacktestError ? 400 : 502).send({ ok: false, error: msg });
+  };
+
+  app.post<{ Body: BacktestRunInput }>('/api/backtest/run', async (req, reply) => {
+    try {
+      return { ok: true, data: await runBacktest(req.body) };
+    } catch (e) {
+      return backtestErr(reply, e);
+    }
+  });
+
+  app.get<{ Querystring: { limit?: string } }>('/api/backtest/runs', (req, reply) => {
+    try {
+      const limit = req.query?.limit ? Number(req.query.limit) : undefined;
+      return { ok: true, data: listBacktestRuns(limit) };
+    } catch (e) {
+      return backtestErr(reply, e);
+    }
+  });
+
+  app.get<{ Params: { id: string } }>('/api/backtest/runs/:id', (req, reply) => {
+    const run = getBacktestRun(req.params.id);
+    if (!run) return reply.code(404).send({ ok: false, error: '回测记录不存在' });
+    return { ok: true, data: run };
+  });
+
   // ===== 股票搜索联想 =====
   app.get<{ Querystring: { q?: string } }>('/api/search/suggest', async (req, reply) => {
     try {
@@ -644,6 +690,28 @@ async function main() {
       }
     },
   );
+
+  // ===== S9 技术指标库：个股 MACD/KDJ/RSI/BOLL 读数（KlineDialog 副图读数条）=====
+  app.get<{ Params: { code: string } }>('/api/stock/:code/indicators', async (req, reply) => {
+    const code = String(req.params.code || '').trim();
+    if (!/^\d{6}$/.test(code)) return reply.code(400).send({ ok: false, error: '请提供 6 位个股代码' });
+    try {
+      return { ok: true, data: await getStockIndicators(code) };
+    } catch (e) {
+      return reply.code(502).send({ ok: false, error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  // ===== S8 筹码分布：个股获利比例/成本区间/集中度（KlineDialog 筹码 Tab）=====
+  app.get<{ Params: { code: string } }>('/api/stock/:code/chips', async (req, reply) => {
+    const code = String(req.params.code || '').trim();
+    if (!/^\d{6}$/.test(code)) return reply.code(400).send({ ok: false, error: '请提供 6 位个股代码' });
+    try {
+      return { ok: true, data: await getChipDistribution(code) };
+    } catch (e) {
+      return reply.code(502).send({ ok: false, error: e instanceof Error ? e.message : String(e) });
+    }
+  });
 
   // ===== 批量实时行情（计划/盯盘等页面合并展示）=====
   app.get<{ Querystring: { codes?: string } }>('/api/quotes', async (req, reply) => {
@@ -1017,6 +1085,13 @@ async function main() {
 
   // S1 市场情绪周期模块（确定性 0-100 情绪指数 + 周期阶段 + 收盘快照，纯只读，删除此行整模块下线）
   registerSentimentModule(app);
+
+  // 板块新高宽度主线识别（确定性：各板块创新高个股数横向排名 + 持续性判主线 + 收盘快照，删除此行整模块下线）
+  registerBreadthModule(app);
+
+  // S6 龙头/连板梯队模块（确定性连板梯队 + 龙头辨识分层，纯只读，删除此行整模块下线）
+  registerDragonModule(app);
+  registerCapitalModule(app);
 
   // 战法前向验证（收盘样本采集 + 前向统计 + 自动模拟总闸，自动买入默认关闭，删除此行整模块下线）
   registerStrategyForward(app);

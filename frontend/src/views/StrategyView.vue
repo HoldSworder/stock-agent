@@ -18,6 +18,7 @@ import type {
   StrategySnapshot,
   StreamEvent,
   TaskRun,
+  VsSimReport,
 } from '@stock-agent/shared';
 
 const list = ref<StrategyListItem[]>([]);
@@ -164,7 +165,25 @@ async function select(id: string) {
 async function refreshAll() {
   await Promise.all([loadList(), loadSnap(), loadTasks(), loadRuns(), loadDaily(), loadForward()]);
   await loadSkills();
+  void loadVsSim();
 }
+
+// ===== 真实 vs 模拟绩效对照（只读，不反哺调参）=====
+const vsSim = ref<VsSimReport | null>(null);
+const vsSimLoading = ref(false);
+async function loadVsSim() {
+  vsSimLoading.value = true;
+  try {
+    vsSim.value = await api.vsSim();
+  } catch {
+    vsSim.value = null;
+  } finally {
+    vsSimLoading.value = false;
+  }
+}
+const pctText = (v: number | null, withSign = true) =>
+  v == null ? '—' : `${withSign && v > 0 ? '+' : ''}${(v * 100).toFixed(2)}%`;
+const numPctText = (v: number | null) => (v == null ? '—' : `${v > 0 ? '+' : ''}${v}%`);
 
 const kindLabel = (k: StrategyKind) => (k === 'miaoxiang' ? '妙想镜像' : '本地虚拟');
 
@@ -641,6 +660,7 @@ onMounted(() => {
   loadList();
   loadAutoSim();
   loadNlStrategies();
+  void loadVsSim();
   ws = openWs('/ws/runs');
   ws.onmessage = async (ev) => {
     const e: StreamEvent = JSON.parse(ev.data);
@@ -678,6 +698,48 @@ onUnmounted(() => ws?.close());
     </div>
     <div class="page-sub">
       每个战法是独立的本地虚拟账户，买卖仅记录在本系统（不下真实/妙想单），强制涨跌停/100股/T+1/资金校验。
+    </div>
+
+    <!-- 真实 vs 模拟绩效对照（只读，仅展示不反哺调参） -->
+    <div v-if="vsSim" class="vs-sim" v-loading="vsSimLoading">
+      <div class="vs-head">
+        <span class="vs-title">真实 vs 模拟绩效对照</span>
+        <span class="vs-meta">只读对照 · 不反哺调参</span>
+      </div>
+      <div class="vs-grid">
+        <div class="vs-card real">
+          <div class="vs-card-head">真实账户</div>
+          <template v-if="vsSim.real">
+            <div class="vs-row"><span>当日盈亏</span><b class="num" :class="dir(vsSim.real.todayProfit)">{{ pctText(vsSim.real.todayRate) }}</b></div>
+            <div class="vs-row"><span>累计持有盈亏</span><b class="num" :class="dir(vsSim.real.totalHoldProfit)">{{ Math.round(vsSim.real.totalHoldProfit) }}</b></div>
+            <div class="vs-row"><span>最大集中度</span><b class="num">{{ pctText(vsSim.real.topConcentration, false) }}</b></div>
+            <div class="vs-row"><span>持仓数</span><b class="num">{{ vsSim.real.positionCount }}</b></div>
+          </template>
+          <div v-else class="vs-empty">{{ vsSim.realError || '真实持仓数据不可用' }}</div>
+        </div>
+        <div class="vs-card">
+          <div class="vs-card-head">模拟战法（{{ vsSim.strategies.length }}）</div>
+          <el-table v-if="vsSim.strategies.length" :data="vsSim.strategies" size="small" style="width: 100%">
+            <el-table-column prop="strategyName" label="战法" min-width="110" />
+            <el-table-column label="区间收益" align="right" min-width="84">
+              <template #default="{ row }"><span class="num" :class="dir(row.cumReturn ?? 0)">{{ numPctText(row.cumReturn) }}</span></template>
+            </el-table-column>
+            <el-table-column label="Alpha" align="right" min-width="78">
+              <template #default="{ row }"><span class="num" :class="dir(row.alpha ?? 0)">{{ numPctText(row.alpha) }}</span></template>
+            </el-table-column>
+            <el-table-column label="回撤" align="right" min-width="72">
+              <template #default="{ row }"><span class="num down">{{ numPctText(row.maxDrawdown) }}</span></template>
+            </el-table-column>
+            <el-table-column label="胜率" align="right" min-width="68">
+              <template #default="{ row }"><span class="num">{{ row.winRate != null ? `${row.winRate}%` : '—' }}</span></template>
+            </el-table-column>
+            <el-table-column label="选股口径" min-width="100">
+              <template #default="{ row }"><span class="vs-screen">{{ row.screenStrategyName || '—' }}</span></template>
+            </el-table-column>
+          </el-table>
+          <div v-else class="vs-empty">暂无本地战法</div>
+        </div>
+      </div>
     </div>
 
     <div class="layout">
@@ -805,6 +867,14 @@ onUnmounted(() => ws?.close());
                 {{ forward?.sinceDate ? `自 ${forward.sinceDate} · ${forward.days} 个样本日` : '尚无样本（收盘后自动采集）' }}
               </span>
               <el-tag
+                v-if="forward?.screenStrategyName"
+                size="small"
+                effect="plain"
+                type="warning"
+              >
+                选股口径：{{ forward.screenStrategyName }}
+              </el-tag>
+              <el-tag
                 size="small"
                 effect="plain"
                 :type="forward?.autoSimEnabled ? 'success' : 'info'"
@@ -817,6 +887,15 @@ onUnmounted(() => ws?.close());
                 <span class="fwd-label">区间收益</span>
                 <span class="fwd-value num" :class="dir(forward.cumReturn ?? 0)">
                   {{ forward.cumReturn != null ? `${forward.cumReturn > 0 ? '+' : ''}${forward.cumReturn}%` : '—' }}
+                </span>
+              </div>
+              <div class="fwd-item">
+                <span class="fwd-label">超额 Alpha（vs 沪深300）</span>
+                <span class="fwd-value num" :class="dir(forward.alpha ?? 0)">
+                  {{ forward.alpha != null ? `${forward.alpha > 0 ? '+' : ''}${forward.alpha}%` : '—' }}
+                </span>
+                <span class="fwd-sub num">
+                  沪深300 {{ forward.csi300Return != null ? `${forward.csi300Return > 0 ? '+' : ''}${forward.csi300Return}%` : '—' }}
                 </span>
               </div>
               <div class="fwd-item">
@@ -1448,6 +1527,79 @@ onUnmounted(() => ws?.close());
 .fwd-value {
   font-size: 16px;
   font-weight: 600;
+}
+.fwd-sub {
+  font-size: 11px;
+  color: var(--text-2);
+}
+
+/* ---- 真实 vs 模拟对照 ---- */
+.vs-sim {
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+}
+.vs-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.vs-title {
+  font-size: 14.5px;
+  font-weight: 600;
+}
+.vs-meta {
+  font-size: 12px;
+  color: var(--text-2);
+}
+.vs-grid {
+  display: grid;
+  grid-template-columns: 220px 1fr;
+  gap: 14px;
+}
+@media (max-width: 860px) {
+  .vs-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.vs-card {
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  background: var(--bg-3);
+}
+.vs-card.real {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.vs-card-head {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-1);
+  margin-bottom: 6px;
+}
+.vs-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.vs-row b {
+  font-weight: 600;
+}
+.vs-empty {
+  font-size: 12.5px;
+  color: var(--text-2);
+  padding: 8px 0;
+}
+.vs-screen {
+  font-size: 12px;
+  color: var(--text-2);
 }
 .forward-gate {
   display: flex;

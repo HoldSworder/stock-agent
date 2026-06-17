@@ -6,7 +6,12 @@ import { Refresh, MagicStick } from '@element-plus/icons-vue';
 import { api } from '@/api';
 import AiAnalysisDialog from '@/components/AiAnalysisDialog.vue';
 import StockLink from '@/components/StockLink.vue';
-import type { DisciplineReport, DisciplineStatus, RealPortfolio } from '@stock-agent/shared';
+import type {
+  DisciplineReport,
+  DisciplineStatus,
+  PositionAttributionReport,
+  RealPortfolio,
+} from '@stock-agent/shared';
 
 // embedded：作为「持仓与自选」父页的 Tab 面板嵌入时隐藏自身 page-head。
 defineProps<{ embedded?: boolean }>();
@@ -17,6 +22,8 @@ const error = ref('');
 // 纪律体检（确定性硬规则，只读不下单）
 const discipline = ref<DisciplineReport | null>(null);
 const discLoading = ref(false);
+// 当日盈亏归因（确定性只读，收盘后落库；无 date 取最近一日）
+const attribution = ref<PositionAttributionReport | null>(null);
 
 // 纪律状态 → 标签文案 + ElTag 类型
 const DISC_LABEL: Record<DisciplineStatus, string> = {
@@ -88,7 +95,16 @@ async function load() {
   } finally {
     loading.value = false;
   }
+  // 归因为只读旁路，失败不影响持仓主视图
+  try {
+    attribution.value = await api.attribution();
+  } catch {
+    attribution.value = null;
+  }
 }
+
+// 贡献（小数）格式化为百分点文本：+0.42pct / -0.18pct
+const contribText = (v: number) => (v >= 0 ? '+' : '') + (v * 100).toFixed(2) + 'pct';
 
 const money = (v: number) =>
   v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -188,6 +204,56 @@ onMounted(load);
                 </el-tag>
                 <StockLink :code="it.code" :name="it.name" />
                 <span class="disc-advice">{{ it.advice }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="attribution && attribution.items.length" class="attr-panel">
+            <div class="attr-head">
+              <span class="attr-title">当日盈亏归因</span>
+              <span class="attr-sub">
+                {{ attribution.date }} · 账户当日贡献
+                <b class="num" :class="dir(attribution.totalDayPnl)">
+                  {{ contribText(attribution.totalDayRate) }}（{{ signed(attribution.totalDayPnl) }}）
+                </b>
+              </span>
+            </div>
+            <div class="attr-topline">
+              <span v-if="attribution.topWinner" class="attr-top win">
+                最大赢家
+                <StockLink :code="attribution.topWinner.code" :name="attribution.topWinner.name" />
+                <b class="num up">{{ contribText(attribution.topWinner.contribution) }}</b>
+              </span>
+              <span v-if="attribution.topLoser" class="attr-top lose">
+                最大输家
+                <StockLink :code="attribution.topLoser.code" :name="attribution.topLoser.name" />
+                <b class="num down">{{ contribText(attribution.topLoser.contribution) }}</b>
+              </span>
+            </div>
+            <div class="attr-items">
+              <div v-for="it in attribution.items" :key="it.code" class="attr-item">
+                <StockLink :code="it.code" :name="it.name" />
+                <span class="attr-bar-wrap">
+                  <span
+                    class="attr-bar"
+                    :class="dir(it.contribution)"
+                    :style="{
+                      width:
+                        Math.min(
+                          100,
+                          (Math.abs(it.contribution) /
+                            Math.max(...attribution.items.map((x) => Math.abs(x.contribution)), 1e-6)) *
+                            100,
+                        ) + '%',
+                    }"
+                  />
+                </span>
+                <span class="num attr-val" :class="dir(it.contribution)">
+                  {{ contribText(it.contribution) }}
+                </span>
+                <span class="num sub attr-meta">
+                  当日 {{ pct(it.dayRate) }} · 权重 {{ (it.weight * 100).toFixed(1) }}%
+                </span>
               </div>
             </div>
           </div>
@@ -443,5 +509,76 @@ onMounted(load);
 .disc-advice {
   color: var(--text-2);
   font-size: 12.5px;
+}
+.attr-panel {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+.attr-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.attr-title {
+  font-weight: 600;
+}
+.attr-sub {
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.attr-topline {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  padding-bottom: 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px dashed var(--border);
+}
+.attr-top {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.attr-items {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.attr-item {
+  display: grid;
+  grid-template-columns: 130px 1fr 88px auto;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+}
+.attr-bar-wrap {
+  height: 8px;
+  background: var(--bg-1, rgba(127, 127, 127, 0.12));
+  border-radius: 4px;
+  overflow: hidden;
+}
+.attr-bar {
+  display: block;
+  height: 100%;
+  border-radius: 4px;
+}
+.attr-bar.up {
+  background: var(--up, #f56c6c);
+}
+.attr-bar.down {
+  background: var(--down, #67c23a);
+}
+.attr-val {
+  text-align: right;
+}
+.attr-meta {
+  white-space: nowrap;
 }
 </style>

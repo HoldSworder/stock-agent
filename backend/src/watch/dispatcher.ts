@@ -117,6 +117,8 @@ function triggerNote(type: WatchSignal['type']): string {
       return '本次为【尾盘了结触发】——临近尾盘，战法要求不过夜。';
     case 'strategy_stop':
       return '本次为【战法止损触发】——已跌破战法止损线。';
+    case 'weekly_break':
+      return '本次为【中线趋势破坏触发】——跌破周线均线或自周线高点明显回撤，中线持有逻辑可能已破坏，请按中线纪律评估是否离场（趋势不破不走、破位坚决走）。';
     case 'drawdown_from_high':
       return '本次为【冲高回落触发】——盘中自高点明显回撤。';
     case 'plan_buy':

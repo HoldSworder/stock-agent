@@ -99,7 +99,60 @@ export function queryStock(query: string, opts: QueryOptions = {}): Promise<Json
   return query2data(query, skill, { sourceId: 'iwencai-stock', ...opts });
 }
 
-export const iwencai = { queryEtf, queryStock, query2data };
+/** 个股 L2 独有指标行（DDX/DDY，免费源没有） */
+export interface StockL2Row {
+  code: string;
+  name: string;
+  /** 最新价（best-effort） */
+  price: number | null;
+  /** DDX 大单动向（同花顺 L2 口径） */
+  ddx: number | null;
+  /** DDY 涨跌动因（同花顺 L2 口径） */
+  ddy: number | null;
+}
+
+function toNum(v: unknown): number | null {
+  if (v == null || v === '') return null;
+  const n = typeof v === 'number' ? v : Number(String(v).replace(/,/g, ''));
+  return Number.isFinite(n) ? n : null;
+}
+
+/**
+ * 批量查个股 DDX/DDY（问财个股 skill）。问财列 index_name=ddx/ddy，
+ * 实际 datas 键带日期后缀（如 ddx[20260617]），故按 columns 的 index_name→key 映射取值。
+ * 无 datas（额度/鉴权/skill 未开通）抛 IwencaiError，由调用方降级到妙想。
+ */
+export async function queryStockL2(codes: string[], signal?: AbortSignal): Promise<StockL2Row[]> {
+  const valid = codes.filter((c) => /^\d{6}$/.test(c));
+  if (valid.length === 0) return [];
+  const json = await queryStock(`${valid.join('、')} ddx ddy`, {
+    limit: String(Math.max(valid.length, 10)),
+    signal,
+  });
+  assertEnvelope(json);
+  const columns = Array.isArray(json.columns) ? (json.columns as Json[]) : [];
+  // index_name（ddx/ddy/股票代码…）→ datas 实际键名
+  const keyOf = (indexName: string): string | null => {
+    const col = columns.find((c) => String(c.index_name ?? '') === indexName);
+    return col ? String(col.key ?? col.index_name ?? '') : null;
+  };
+  const codeKey = keyOf('股票代码') ?? '股票代码';
+  const nameKey = keyOf('股票简称') ?? '股票简称';
+  const priceKey = keyOf('最新价') ?? '最新价';
+  const ddxKey = keyOf('ddx');
+  const ddyKey = keyOf('ddy');
+  const rows = Array.isArray(json.datas) ? (json.datas as Json[]) : [];
+  return rows.map((r) => ({
+    // 问财返回 600519.SH，截前 6 位对齐内部代码
+    code: String(r[codeKey] ?? '').slice(0, 6),
+    name: String(r[nameKey] ?? ''),
+    price: toNum(r[priceKey]),
+    ddx: ddxKey ? toNum(r[ddxKey]) : null,
+    ddy: ddyKey ? toNum(r[ddyKey]) : null,
+  }));
+}
+
+export const iwencai = { queryEtf, queryStock, queryStockL2, query2data };
 
 export type IwencaiClient = typeof iwencai;
 

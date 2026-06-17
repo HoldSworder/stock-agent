@@ -11,6 +11,8 @@ import { db, schema } from '../db/client';
 import { getQuoteWithLimits, getQuotes } from '../market/eastmoney';
 import { newId, nowIso } from '../util';
 import { assertTradeAllowed } from '../safety/guard';
+import { broadcastWatch } from '../watch/bus';
+import { sendTelegram } from '../notify/telegram';
 import { syncMiaoxiangStrategy } from './miaoxiangSync';
 
 // 战法模拟引擎：每个战法是一个独立的本地纸上交易账户。
@@ -46,6 +48,10 @@ function rowToStrategy(row: StrategyRow): Strategy {
     autoSimEnabled: row.autoSimEnabled ?? false,
     screenEngine: row.screenEngine ?? null,
     screenStrategyId: row.screenStrategyId ?? null,
+    horizon: (row.horizon as Strategy['horizon']) ?? 'short',
+    pickTopN: row.pickTopN ?? null,
+    maxPositions: row.maxPositions ?? null,
+    rebalanceCron: row.rebalanceCron ?? null,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -93,6 +99,7 @@ export function createStrategy(input: StrategyInput): Strategy {
   const capital = Number(input.initialCapital);
   if (!Number.isFinite(capital) || capital <= 0) throw new StrategyError('初始资金需为正数');
   const kind: Strategy['kind'] = input.kind === 'miaoxiang' ? 'miaoxiang' : 'local';
+  const horizon: Strategy['horizon'] = input.horizon === 'mid' ? 'mid' : 'short';
   const id = newId();
   const now = nowIso();
   db.insert(schema.strategies)
@@ -109,6 +116,10 @@ export function createStrategy(input: StrategyInput): Strategy {
       autoSimEnabled: input.autoSimEnabled ?? false,
       screenEngine: input.screenEngine ?? null,
       screenStrategyId: input.screenStrategyId ?? null,
+      horizon,
+      pickTopN: input.pickTopN ?? null,
+      maxPositions: input.maxPositions ?? null,
+      rebalanceCron: input.rebalanceCron?.trim() || null,
       createdAt: now,
       updatedAt: now,
     })
@@ -125,6 +136,10 @@ export function updateStrategy(
     autoSimEnabled?: boolean;
     screenEngine?: string | null;
     screenStrategyId?: string | null;
+    horizon?: Strategy['horizon'];
+    pickTopN?: number | null;
+    maxPositions?: number | null;
+    rebalanceCron?: string | null;
   },
 ): Strategy | undefined {
   const existing = getStrategy(id);
@@ -144,6 +159,15 @@ export function updateStrategy(
         patch.screenStrategyId !== undefined
           ? patch.screenStrategyId || null
           : existing.screenStrategyId,
+      horizon:
+        patch.horizon !== undefined ? (patch.horizon === 'mid' ? 'mid' : 'short') : existing.horizon,
+      pickTopN: patch.pickTopN !== undefined ? patch.pickTopN : existing.pickTopN,
+      maxPositions:
+        patch.maxPositions !== undefined ? patch.maxPositions : existing.maxPositions,
+      rebalanceCron:
+        patch.rebalanceCron !== undefined
+          ? patch.rebalanceCron?.trim() || null
+          : existing.rebalanceCron,
       updatedAt: nowIso(),
     })
     .where(eq(schema.strategies.id, id))
@@ -333,6 +357,45 @@ export interface ExecuteSimTradeResult {
 }
 
 /**
+ * 自动成交可见性：非手动来源（cron/agent/watch）的成交经盯盘总线广播 trade 事件，
+ * 自动买入额外推一条 Telegram（自动卖出已由盯盘 dispatcher 推送，避免重复故不在此推）。
+ * 全程 best-effort：广播/推送失败不影响成交本身。
+ */
+function emitAutoTrade(strategy: Strategy, trade: SimTrade, source: ExecuteSimTradeInput['source']): void {
+  if (source === 'manual') return;
+  try {
+    broadcastWatch({
+      type: 'trade',
+      trade: {
+        at: trade.createdAt,
+        kind: trade.side === 'buy' ? 'auto_buy' : 'auto_sell',
+        source,
+        code: trade.code,
+        name: trade.name,
+        qty: trade.qty,
+        price: trade.price,
+        amount: trade.amount,
+        realizedProfit: trade.realizedProfit,
+        strategyId: strategy.id,
+        strategyName: strategy.name,
+        reason: trade.reason,
+      },
+    });
+  } catch {
+    /* 广播失败不影响成交 */
+  }
+  if (trade.side === 'buy') {
+    const msg =
+      `🤖 自动建仓（${strategy.name}）：买入 ${trade.name}(${trade.code}) ` +
+      `${trade.qty}股 @${trade.price} 金额${trade.amount.toFixed(2)}` +
+      (trade.reason ? `\n理由：${trade.reason}` : '');
+    void sendTelegram(msg).catch(() => {
+      /* 推送失败忽略 */
+    });
+  }
+}
+
+/**
  * 执行一笔模拟成交：校验通用交易规则后落库并更新现金/持仓。
  * 任何规则不满足都会抛 StrategyError，调用方据此回显原因。
  */
@@ -388,7 +451,9 @@ export async function executeSimTrade(input: ExecuteSimTradeInput): Promise<Exec
         `可用资金不足：需 ${amount.toFixed(2)}，现金 ${strategy.cash.toFixed(2)}`,
       );
     }
-    return applyBuy(strategy, quote.name, code, qty, price, amount, date, input);
+    const result = applyBuy(strategy, quote.name, code, qty, price, amount, date, input);
+    emitAutoTrade(strategy, result.trade, input.source);
+    return result;
   }
 
   // 卖出：跌停不可卖出
@@ -405,7 +470,9 @@ export async function executeSimTrade(input: ExecuteSimTradeInput): Promise<Exec
     );
   }
   const amount = qty * price;
-  return applySell(strategy, pos, qty, price, amount, date, input);
+  const result = applySell(strategy, pos, qty, price, amount, date, input);
+  emitAutoTrade(strategy, result.trade, input.source);
+  return result;
 }
 
 function applyBuy(

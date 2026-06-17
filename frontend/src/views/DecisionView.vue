@@ -6,15 +6,19 @@ import { api, openWs } from '@/api';
 import AgentTrace from '@/components/AgentTrace.vue';
 import MarkdownView from '@/components/MarkdownView.vue';
 import { applyStepEvent, type Step } from '@/composables/agentTrace';
-import type { AiAnalysisHistoryItem, StreamEvent } from '@stock-agent/shared';
+import type { AiAnalysisHistoryItem, DecisionIndexInfo, StreamEvent } from '@stock-agent/shared';
 
 // 决策流水线阶段：描述本页实际执行顺序，供用户预期管理（非实时状态）
 const PHASES = ['分析师研判', '多空辩论', '风控博弈', '组合裁决'];
 
-// 多智能体辩论决策页：输入代码 → 流式跑「分析师→多空辩论→风控→决策」流水线，
-// 复用公共 ai_analyses 历史（kind=decision，refKey=代码）。WS 路径 /ws/decision。
+// 多智能体辩论决策页：输入代码（个股）或选择股指 → 流式跑「分析师→多空辩论→风控→决策」流水线，
+// 复用公共 ai_analyses 历史（kind=decision，refKey=代码/指数key）。WS 路径 /ws/decision。
 
+// 资产类型：个股（6 位代码）/ 股指（白名单 secid 取数）
+const assetType = ref<'stock' | 'index'>('stock');
 const code = ref('');
+const indices = ref<DecisionIndexInfo[]>([]);
+const indexKey = ref('');
 const steps = ref<Step[]>([]);
 const busy = ref(false);
 const history = ref<AiAnalysisHistoryItem[]>([]);
@@ -25,15 +29,20 @@ let ws: WebSocket | null = null;
 let runFinished = true;
 let closingByUser = false;
 
-// 输入合法 6 位代码则按代码过滤，否则列出全部标的的决策历史
+// 个股：合法 6 位代码按代码过滤，否则列全部；股指：按选中 key 过滤，否则列全部
 async function loadHistory() {
-  const c = code.value.trim();
-  const byCode = /^\d{6}$/.test(c);
   loadingHistory.value = true;
   try {
-    history.value = byCode
-      ? await api.listAnalyses('decision', c)
-      : await api.listAnalyses('decision', undefined, 30, true);
+    if (assetType.value === 'index') {
+      history.value = indexKey.value
+        ? await api.listAnalyses('decision', indexKey.value)
+        : await api.listAnalyses('decision', undefined, 30, true);
+    } else {
+      const c = code.value.trim();
+      history.value = /^\d{6}$/.test(c)
+        ? await api.listAnalyses('decision', c)
+        : await api.listAnalyses('decision', undefined, 30, true);
+    }
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : '历史加载失败');
   } finally {
@@ -43,7 +52,7 @@ async function loadHistory() {
 
 // 输入框变化即过滤历史（debounce），与「发起决策」的回车彻底解耦
 let filterTimer: ReturnType<typeof setTimeout> | null = null;
-watch(code, () => {
+watch([code, indexKey, assetType], () => {
   if (filterTimer) clearTimeout(filterTimer);
   filterTimer = setTimeout(loadHistory, 300);
 });
@@ -61,7 +70,12 @@ function teardownWs() {
 
 function start() {
   const c = code.value.trim();
-  if (!/^\d{6}$/.test(c)) {
+  if (assetType.value === 'index') {
+    if (!indexKey.value) {
+      ElMessage.warning('请选择一个股指');
+      return;
+    }
+  } else if (!/^\d{6}$/.test(c)) {
     ElMessage.warning('请输入合法的 6 位股票代码');
     return;
   }
@@ -100,7 +114,10 @@ function start() {
     busy.value = false;
   };
 
-  const payload = JSON.stringify({ action: 'generate', code: c });
+  const payload =
+    assetType.value === 'index'
+      ? JSON.stringify({ action: 'generate', assetType: 'index', code: indexKey.value })
+      : JSON.stringify({ action: 'generate', code: c });
   if (ws.readyState === WebSocket.OPEN) ws.send(payload);
   else ws.addEventListener('open', () => ws?.send(payload), { once: true });
 }
@@ -117,7 +134,18 @@ function fmtTime(iso: string): string {
   return `${d.getMonth() + 1}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-onMounted(loadHistory);
+async function loadIndices() {
+  try {
+    indices.value = await api.decisionAgents.indices();
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '股指列表加载失败');
+  }
+}
+
+onMounted(() => {
+  loadHistory();
+  loadIndices();
+});
 onUnmounted(() => {
   if (filterTimer) clearTimeout(filterTimer);
   teardownWs();
@@ -129,7 +157,12 @@ onUnmounted(() => {
     <div class="page-head">
       <div class="page-title">多智能体辩论决策</div>
       <div class="actions">
+        <el-radio-group v-model="assetType" :disabled="busy" size="default">
+          <el-radio-button value="stock">个股</el-radio-button>
+          <el-radio-button value="index">股指</el-radio-button>
+        </el-radio-group>
         <el-input
+          v-if="assetType === 'stock'"
           v-model="code"
           class="code-input"
           placeholder="6 位股票代码"
@@ -137,6 +170,16 @@ onUnmounted(() => {
           clearable
           @keyup.enter="start"
         />
+        <el-select
+          v-else
+          v-model="indexKey"
+          class="index-select"
+          placeholder="选择股指"
+          filterable
+          clearable
+        >
+          <el-option v-for="it in indices" :key="it.key" :label="it.name" :value="it.key" />
+        </el-select>
         <el-button type="primary" :icon="MagicStick" :loading="busy" @click="start">
           {{ busy ? '决策中' : '发起决策' }}
         </el-button>
@@ -184,7 +227,7 @@ onUnmounted(() => {
           v-else
           class="main-empty"
           :image-size="92"
-          description="输入股票代码点击「发起决策」，或从左侧选择历史记录"
+          description="输入个股代码或选择股指点击「发起决策」，或从左侧选择历史记录"
         />
       </main>
     </div>
@@ -208,6 +251,9 @@ onUnmounted(() => {
 }
 .code-input {
   width: 160px;
+}
+.index-select {
+  width: 180px;
 }
 
 /* ===== 决策流水线 ===== */

@@ -1,16 +1,13 @@
 import type { DecisionMemoryItem } from '@stock-agent/shared';
 import * as gateway from '../agent/gateway';
-import { getKline, getQuoteWithLimits } from '../market/eastmoney';
+import { getQuoteWithLimits } from '../market/eastmoney';
+import { csi300Return } from '../market/csi300';
 import { getMeta, getValue } from '../settings';
 import { shanghaiDate } from '../strategy/sim';
 import { listPending, markReviewed } from './memory';
 
 // 反思闭环：到期的 pending 决策，对比个股 vs 沪深300 区间收益算 Alpha，
 // 再由轻模型 LLM 复盘出 verdict+lesson 回写 reviewed。离线定时路径，非交互。
-
-/** 沪深300 指数 secid（撞码须显式传，1=沪市指数） */
-const CSI300_SECID = '1.000300';
-const CSI300_CODE = '000300';
 
 /** 复盘等待天数（自然日）：决策日距今 ≥ 此值才复盘，默认 5 */
 function reflectionDays(): number {
@@ -29,20 +26,6 @@ function dayDiff(a: string, b: string): number {
   const tb = Date.parse(`${b}T00:00:00+08:00`);
   if (!Number.isFinite(ta) || !Number.isFinite(tb)) return 0;
   return Math.round((tb - ta) / 86400000);
-}
-
-/** 取沪深300 自 decisionDate 起的区间收益率（%）；失败返回 null（降级为绝对收益） */
-async function csi300Return(decisionDate: string, days: number): Promise<number | null> {
-  try {
-    const bars = await getKline(CSI300_CODE, 'day', Math.max(days + 20, 40), CSI300_SECID);
-    if (bars.length < 2) return null;
-    const base = bars.find((b) => b.time >= decisionDate) ?? bars[0];
-    const last = bars[bars.length - 1];
-    if (!base || !last || base.close <= 0) return null;
-    return ((last.close - base.close) / base.close) * 100;
-  } catch {
-    return null;
-  }
 }
 
 function parseReview(text: string): { verdict: DecisionMemoryItem['verdict']; lesson: string } {

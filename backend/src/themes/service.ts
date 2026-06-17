@@ -29,14 +29,49 @@ const MAX_EVIDENCE = 8;
 
 const clamp = (v: number, lo = 0, hi = 100): number => Math.min(hi, Math.max(lo, v));
 
+/** 单条强度历史快照 */
+type StrengthPoint = { date: string; strength: number };
+/** 强度历史保留上限（近 30 个交易/自然日） */
+const MAX_STRENGTH_HISTORY = 30;
+/** 趋势判定阈值（点） */
+const TREND_DELTA = 5;
+
+/** 主线持续天数：首次出现→最近出现（含端点） */
+function calcDurationDays(firstSeen: string, lastSeen: string): number {
+  const a = Date.parse(firstSeen);
+  const b = Date.parse(lastSeen);
+  if (Number.isNaN(a) || Number.isNaN(b) || b < a) return 1;
+  return Math.floor((b - a) / 86400000) + 1;
+}
+
+/** 强度趋势：用历史末值与若干日前对比（旧→新序列） */
+function calcStrengthTrend(history: StrengthPoint[]): MarketTheme['strengthTrend'] {
+  if (history.length < 2) return 'flat';
+  const last = history[history.length - 1].strength;
+  const ref = history[Math.max(0, history.length - 4)].strength;
+  const delta = last - ref;
+  if (delta >= TREND_DELTA) return 'rising';
+  if (delta <= -TREND_DELTA) return 'falling';
+  return 'flat';
+}
+
+/** 追加/更新当日强度快照（同日覆盖，按日去重，保留近 MAX 条，旧→新） */
+function appendStrengthHistory(prev: StrengthPoint[], date: string, strength: number): StrengthPoint[] {
+  const filtered = prev.filter((p) => p.date !== date);
+  filtered.push({ date, strength: Math.round(strength) });
+  return filtered.slice(-MAX_STRENGTH_HISTORY);
+}
+
+function parseJson<T>(raw: string, fallback: T): T {
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
 function rowToTheme(row: typeof schema.marketThemes.$inferSelect): MarketTheme {
-  const parse = <T>(raw: string, fallback: T): T => {
-    try {
-      return JSON.parse(raw) as T;
-    } catch {
-      return fallback;
-    }
-  };
+  const strengthHistory = parseJson<StrengthPoint[]>(row.strengthHistory ?? '[]', []);
   return {
     id: row.id,
     theme: row.theme,
@@ -44,10 +79,13 @@ function rowToTheme(row: typeof schema.marketThemes.$inferSelect): MarketTheme {
     strength: row.strength,
     status: row.status as MarketThemeStatus,
     phase: (row.phase as ThemePhase) ?? '未知',
-    sources: parse<ThemeSource[]>(row.sources, []),
-    evidence: parse<ThemeEvidence[]>(row.evidence, []),
+    sources: parseJson<ThemeSource[]>(row.sources, []),
+    evidence: parseJson<ThemeEvidence[]>(row.evidence, []),
     firstSeenDate: row.firstSeenDate,
     lastSeenDate: row.lastSeenDate,
+    durationDays: calcDurationDays(row.firstSeenDate, row.lastSeenDate),
+    strengthTrend: calcStrengthTrend(strengthHistory),
+    strengthHistory,
     updatedAt: row.updatedAt,
   };
 }
@@ -105,16 +143,18 @@ function upsertTheme(input: UpsertInput): void {
 
   if (!existing) {
     if (input.attachOnly) return; // overlay 源：主线不存在则跳过，不造噪声
+    const initStrength = clamp(input.strengthHint);
     db.insert(schema.marketThemes)
       .values({
         id: newId(),
         theme,
         boardCode: input.boardCode ?? null,
-        strength: clamp(input.strengthHint),
+        strength: initStrength,
         status: 'active',
         phase: input.phase ?? '未知',
         sources: JSON.stringify([input.source]),
         evidence: JSON.stringify([newEvidence]),
+        strengthHistory: JSON.stringify([{ date: input.date, strength: Math.round(initStrength) }]),
         firstSeenDate: input.date,
         lastSeenDate: input.date,
         updatedAt: now,
@@ -133,6 +173,7 @@ function upsertTheme(input: UpsertInput): void {
     newEvidence,
     ...prev.evidence.filter((e) => !(e.source === input.source && e.at === input.date)),
   ].slice(0, MAX_EVIDENCE);
+  const strengthHistory = appendStrengthHistory(prev.strengthHistory, input.date, strength);
 
   db.update(schema.marketThemes)
     .set({
@@ -142,6 +183,7 @@ function upsertTheme(input: UpsertInput): void {
       phase: input.phase ?? prev.phase,
       sources: JSON.stringify(sources),
       evidence: JSON.stringify(evidence),
+      strengthHistory: JSON.stringify(strengthHistory),
       lastSeenDate: input.date,
       updatedAt: now,
     })

@@ -6,7 +6,9 @@ import type {
   WatchSource,
   WatchStatus,
 } from '@stock-agent/shared';
-import { getQuotes, getSectorMoneyFlow, getStockRanking } from '../market/eastmoney';
+import { getQuotes, getSectorMoneyFlow, getStockRanking, getKline } from '../market/eastmoney';
+import { getStockIndicators } from '../market/indicators';
+import type { StockIndicators } from '@stock-agent/shared';
 import { isTradingDay } from '../market/calendar';
 import { fetchRealPositions } from '../realPositions';
 import { listWatch } from '../watchlist';
@@ -14,13 +16,13 @@ import { listStrategies, getStrategySnapshot } from '../strategy/sim';
 import { getWatchConfig } from './config';
 import { broadcastWatch } from './bus';
 import { countAlertsToday } from './store';
-import { approxLimitUp, buildEodSettle, evalQuoteSignals, evalScanSignals } from './rules';
+import { approxLimitUp, buildEodSettle, buildWeeklyBreak, evalQuoteSignals, evalScanSignals } from './rules';
 import { broadcastDisposition, dispatchSignals, retryUndelivered } from './dispatcher';
 import { gateSignals, resetGate } from './gate';
 import { getAtrPct } from './volatility';
 import { evaluateOutcomes } from './reflect';
 import { sendDailyDigest } from './digest';
-import { getProfile } from './strategyProfile';
+import { resolveProfile } from './strategyProfile';
 import { getActivePlanItems } from '../plan/service';
 import type { QuoteCtx, RollState } from './types';
 import type { DailyPlanItem, StrategySellProfile } from '@stock-agent/shared';
@@ -30,6 +32,13 @@ import type { DailyPlanItem, StrategySellProfile } from '@stock-agent/shared';
 const rollState = new Map<string, RollState>();
 let seenLimitUp = new Set<string>();
 let seenEodSettle = new Set<string>();
+/** 当日已告警的中线趋势破坏（按日去重，避免刷屏） */
+let seenWeeklyBreak = new Set<string>();
+/** 周线 K 当日缓存（中线趋势破坏扫描复用，避免每轮重取周 K） */
+const weekBarCache = new Map<string, { day: string; closes: number[] }>();
+/** 日线技术指标当日缓存（S9 中线指标转弱扫描复用，避免每轮重算日线指标） */
+const indCache = new Map<string, { day: string; ind: StockIndicators | null }>();
+let lastMidScanAt = 0;
 let seenDay = '';
 
 let timer: NodeJS.Timeout | null = null;
@@ -80,6 +89,9 @@ function resetIfNewDay(day: string): void {
     rollState.clear();
     seenLimitUp = new Set();
     seenEodSettle = new Set();
+    seenWeeklyBreak = new Set();
+    weekBarCache.clear();
+    indCache.clear();
     resetGate();
   }
 }
@@ -104,6 +116,8 @@ interface PoolMeta {
   strategyName?: string;
   /** 战法卖点档案（有则启用战法专属触发） */
   profile?: StrategySellProfile | null;
+  /** 持仓周期：short 短线（默认）/ mid 中线（中线走趋势破坏档，过滤日内噪声） */
+  horizon?: 'short' | 'mid';
   /** 今日计划标的项（有则启用计划结构化触发价对照） */
   planItem?: DailyPlanItem | null;
 }
@@ -126,7 +140,8 @@ async function collectPool(cfg: WatchConfig, includeWatch: boolean): Promise<Map
     try {
       for (const s of listStrategies().filter((s) => s.kind === 'local')) {
         const snap = await getStrategySnapshot(s.id, { skipSync: true });
-        const profile = getProfile(s.id);
+        const horizon = s.horizon === 'mid' ? 'mid' : 'short';
+        const profile = resolveProfile(s.id, horizon);
         for (const p of snap.positions) {
           if (!meta.has(p.code)) {
             meta.set(p.code, {
@@ -136,6 +151,7 @@ async function collectPool(cfg: WatchConfig, includeWatch: boolean): Promise<Map
               strategyId: s.id,
               strategyName: s.name,
               profile,
+              horizon,
             });
           }
         }
@@ -205,6 +221,135 @@ async function scanSignals(cfg: WatchConfig): Promise<WatchSignal[]> {
   return evalScanSignals(newLimitUps, sectors, cfg);
 }
 
+const mean = (a: number[]): number => a.reduce((s, x) => s + x, 0) / a.length;
+
+/** 取某只标的当日缓存的周线收盘序列（best-effort，失败返回空） */
+async function getWeekCloses(code: string, day: string): Promise<number[]> {
+  const hit = weekBarCache.get(code);
+  if (hit && hit.day === day) return hit.closes;
+  let closes: number[] = [];
+  try {
+    const bars = await getKline(code, 'week', 120);
+    closes = bars.map((b) => b.close).filter((c) => Number.isFinite(c) && c > 0);
+  } catch {
+    closes = [];
+  }
+  weekBarCache.set(code, { day, closes });
+  return closes;
+}
+
+/** 取某只标的当日缓存的日线技术指标（S9，best-effort，失败返回 null） */
+async function getDailyIndicators(code: string, day: string): Promise<StockIndicators | null> {
+  const hit = indCache.get(code);
+  if (hit && hit.day === day) return hit.ind;
+  let ind: StockIndicators | null = null;
+  try {
+    ind = await getStockIndicators(code);
+  } catch {
+    ind = null;
+  }
+  indCache.set(code, { day, ind });
+  return ind;
+}
+
+/**
+ * 中线趋势破坏扫描（低频，M3 中线盯盘档）：对中线战法持仓算周线均线/高点回撤，
+ * 跌破 maBreakPeriod 周线或周线高点回撤超 trailingStop 即产 weekly_break。按日去重。
+ * best-effort：单只取数失败跳过，不影响主监控。
+ */
+async function midTrendScan(
+  metas: Array<{ code: string; meta: PoolMeta; price: number; pct: number; prevClose: number }>,
+  day: string,
+): Promise<WatchSignal[]> {
+  const out: WatchSignal[] = [];
+  for (const { code, meta, price, pct, prevClose } of metas) {
+    if (meta.horizon !== 'mid' || seenWeeklyBreak.has(code)) continue;
+    const profile = meta.profile;
+    const period = profile?.maBreakPeriod ?? 0;
+    const trail = profile?.trailingStop ?? 0;
+    if (period <= 0 && trail <= 0) continue;
+
+    const closes = await getWeekCloses(code, day);
+    if (closes.length < Math.max(period, 1)) continue;
+
+    const ctx = {
+      code,
+      name: meta.name,
+      source: meta.source,
+      price,
+      pct,
+      prevClose,
+      dayHigh: price,
+      prevPrice: null,
+      strategyId: meta.strategyId,
+      strategyName: meta.strategyName,
+      horizon: meta.horizon,
+    } as QuoteCtx;
+
+    // ① 跌破周线均线（趋势破坏）
+    if (period > 0 && closes.length >= period) {
+      const ma = mean(closes.slice(closes.length - period));
+      if (price < ma) {
+        seenWeeklyBreak.add(code);
+        out.push(
+          buildWeeklyBreak(
+            ctx,
+            `跌破 ${period} 周线 ${ma.toFixed(2)}（现价 ${price.toFixed(2)}），中线趋势破坏，评估是否离场`,
+            'ma',
+          ),
+        );
+        continue;
+      }
+    }
+
+    // ② 周线高点回撤超移动止盈阈值（锁趋势利润）
+    if (trail > 0) {
+      const lookback = period > 0 ? Math.min(period, closes.length) : closes.length;
+      const peak = Math.max(...closes.slice(closes.length - lookback), price);
+      if (peak > 0) {
+        const dd = ((peak - price) / peak) * 100;
+        if (dd >= trail) {
+          seenWeeklyBreak.add(code);
+          out.push(
+            buildWeeklyBreak(
+              ctx,
+              `从周线高点 ${peak.toFixed(2)} 回撤 ${dd.toFixed(1)}%（现价 ${price.toFixed(2)}，移动止盈线 ${trail}%），趋势走弱`,
+              'trail',
+            ),
+          );
+          continue;
+        }
+      }
+    }
+
+    // ③ 日线技术指标转弱（S9）：MACD 死叉 / KDJ 高位死叉，作为中线趋势破坏的指标佐证。
+    // 死叉为「当根穿越」状态，次日转空头不再复发；叠加按日去重，不刷屏。
+    const ind = await getDailyIndicators(code, day);
+    if (ind?.macd?.state === '死叉') {
+      seenWeeklyBreak.add(code);
+      out.push(
+        buildWeeklyBreak(
+          ctx,
+          `日线 MACD 死叉（DIF ${ind.macd.dif} 下穿 DEA ${ind.macd.dea}），中线动能转弱，评估是否减仓`,
+          'ma',
+        ),
+      );
+      continue;
+    }
+    if (ind?.kdj && ind.kdj.signal === '超买' && ind.kdj.k < ind.kdj.d) {
+      seenWeeklyBreak.add(code);
+      out.push(
+        buildWeeklyBreak(
+          ctx,
+          `日线 KDJ 高位死叉（K ${ind.kdj.k} 下穿 D ${ind.kdj.d}，J ${ind.kdj.j}），短期见顶风险，评估止盈`,
+          'trail',
+        ),
+      );
+    }
+  }
+  return out;
+}
+
 /** 单轮 tick */
 async function tick(cfg: WatchConfig): Promise<void> {
   const { day, minutes } = shanghaiNow();
@@ -220,6 +365,10 @@ async function tick(cfg: WatchConfig): Promise<void> {
   const meta = await collectPool(cfg, includeWatch);
   const codes = [...meta.keys()];
   const quotes = codes.length > 0 ? await getQuotes(codes) : [];
+
+  // 中线趋势破坏扫描分频：每 max(pollSec, 1800s)=30min 一次（周线慢变 + 按日去重，不刷屏）
+  const doMidScan = now - lastMidScanAt >= Math.max(cfg.pollSec, 1800) * 1000;
+  if (doMidScan) lastMidScanAt = now;
 
   const quoteItems: WatchQuoteItem[] = [];
   const signals: WatchSignal[] = [];
@@ -252,13 +401,15 @@ async function tick(cfg: WatchConfig): Promise<void> {
       atrPct: getAtrPct(q.code, day),
       strategyId: m.strategyId,
       strategyName: m.strategyName,
+      horizon: m.horizon,
       profile: m.profile,
       planItem: m.planItem,
     };
     signals.push(...evalQuoteSignals(ctx, cfg));
 
     // 尾盘了结：到达战法档案 eodCutoffMin 后，每日一次提示该战法持仓不过夜
-    if (m.profile && minutes >= m.profile.eodCutoffMin && !seenEodSettle.has(q.code)) {
+    // （中线档 eodCutoffMin=0 表示持有过夜，不产尾盘了结）
+    if (m.profile && m.profile.eodCutoffMin > 0 && minutes >= m.profile.eodCutoffMin && !seenEodSettle.has(q.code)) {
       seenEodSettle.add(q.code);
       signals.push(buildEodSettle(ctx));
     }
@@ -278,6 +429,25 @@ async function tick(cfg: WatchConfig): Promise<void> {
   }
 
   if (doScan) signals.push(...(await scanSignals(cfg)));
+
+  // 中线趋势破坏：低频对中线持仓算周线均线/高点回撤（复用本轮已取的现价）
+  if (doMidScan) {
+    const midMetas = quotes
+      .map((q) => {
+        const m = meta.get(q.code);
+        return m && m.horizon === 'mid' && q.price > 0
+          ? { code: q.code, meta: m, price: q.price, pct: q.pct, prevClose: q.prevClose }
+          : null;
+      })
+      .filter((x): x is { code: string; meta: PoolMeta; price: number; pct: number; prevClose: number } => x != null);
+    if (midMetas.length > 0) {
+      try {
+        signals.push(...(await midTrendScan(midMetas, day)));
+      } catch (e) {
+        console.warn('[watch] 中线趋势扫描异常:', e instanceof Error ? e.message : e);
+      }
+    }
+  }
 
   lastSignalCount = signals.length;
   lastPollAt = new Date().toISOString();

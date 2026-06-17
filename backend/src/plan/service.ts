@@ -89,11 +89,12 @@ export const PLAN_REVIEW_PROMPT =
   '对今日【作战计划】做收盘复盘闭环。本任务只复盘不下单。\n\n' +
   '交易日校验（默认放行）：仅周一至周五触发，默认按交易日执行；接口异常一律按交易日继续。\n\n' +
   '第1步 读计划：用 get_today_plan 读今日计划（含各标的方向/触发价/盘中已触发状态与备注）。若今日无计划，直接说明并结束。\n' +
-  '第2步 读实际：用 real_positions 读真实持仓，用 market_snapshot 看收盘盘面；对计划内标的用 mx_finance_data 核验当日表现。\n' +
+  '第2步 读实际：用 real_positions 读真实持仓，用 market_snapshot 看收盘盘面；对计划内标的用 mx_finance_data 核验当日表现；' +
+  '并调用 get_attribution 一次，读当日【持仓归因】（账户当日盈亏/贡献、最大赢家/输家、逐票当日盈亏贡献=当日盈亏率×仓位权重），作为账户层得失的确定性事实基础。\n' +
   '第3步 逐项评估：对每只计划标的判断「计划 vs 实际」——是否触发、是否兑现、结果对错；调用 update_plan_item(code, status, note) 回写：' +
   '已按计划完成/已了结=done，逻辑已破坏/全天未触发且失效=invalid，仍有效待续=保持 pending，note 写一句结果点评。\n' +
-  '第4步 收盘归档：调用 close_today_plan(reviewSummary) 回填复盘总结。reviewSummary 用 Markdown 覆盖：①大盘与情绪小结 ②计划命中率与得失 ' +
-  '③逐只标的结果 ④战法/打法改进建议 ⑤次日预案草稿（重点关注方向与应对）。\n' +
+  '第4步 收盘归档：调用 close_today_plan(reviewSummary) 回填复盘总结。reviewSummary 用 Markdown 覆盖：①大盘与情绪小结（结合持仓归因点出当日账户是谁在贡献/谁在拖累，给出最大赢家与最大输家及其贡献）②计划命中率与得失 ' +
+  '③逐只标的结果（持仓标的结合其当日盈亏贡献评价）④战法/打法改进建议 ⑤次日预案草稿（重点关注方向与应对）。\n' +
   '推送禁止 Markdown 表格，用竖排清单。';
 
 export const PLAN_REEVAL_PROMPT =

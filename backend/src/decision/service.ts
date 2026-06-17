@@ -14,14 +14,21 @@ import * as trendradar from '../trendradar/service';
 import { buildOverview } from '../market/overview';
 import type { KlineBar } from '@stock-agent/shared';
 import {
+  getIndexSnapshot,
   getKline,
   getQuoteWithLimits,
   getSectorMoneyFlow,
+  getStockDragonStatus,
   getStockFundFlow,
   getStockIndustry,
   getTrends,
   searchBoard,
 } from '../market/eastmoney';
+import { formatStockDragon } from '../dragon/service';
+import { getStockCapital, formatCapitalForAgent } from '../capital/service';
+import { computeIndicators, getStockIndicators, formatIndicatorsForAgent } from '../market/indicators';
+import { indexSecidCandidates, type IndexDef } from './indices';
+import { getChipDistribution, formatChipForAgent } from '../market/chip';
 import { getDragonTiger, getFinancialStatements, getLockupAndHolders, getStockValuation } from '../market/datacenter';
 import { fetchRealPositions } from '../realPositions';
 import { listReviews } from '../repo';
@@ -535,6 +542,14 @@ interface PrefetchContext {
   newsNote: string;
   /** 龙虎榜上榜明细+席位资金（东财 datacenter 结构化，游资追踪） */
   dragonNote: string;
+  /** 当日连板梯队定位 + 龙头角色（S6，东财涨停池规则化，游资追踪） */
+  ladderNote: string;
+  /** 龙虎榜资金面深挖：净额趋势 + 最近一次席位拆分（S7，东财+akshare，游资追踪） */
+  capitalNote: string;
+  /** 技术指标库：MACD/KDJ/RSI/BOLL 读数（S9，日线规则化，技术分析） */
+  indicatorsNote: string;
+  /** 筹码分布：获利比例/成本区间/集中度（S8，东财筹码，技术分析） */
+  chipsNote: string;
   /** 财报主表（营收/净利/毛利/EPS/现金流/ROE 及同比，东财 F10 结构化，基本面） */
   statementsNote: string;
   /** 限售解禁/大股东增减持/股权质押（东财 datacenter 结构化为主 + 妙想增补，A股特有供给冲击） */
@@ -609,6 +624,10 @@ async function prefetch(input: DecisionInput, opts: RunDecisionOptions): Promise
     intradayNote,
     fundFlowNote,
     valuationNote,
+    ladderNote,
+    capitalNote,
+    indicatorsNote,
+    chipsNote,
     klineBundle,
   ] = await Promise.all([
     safe(
@@ -762,6 +781,14 @@ async function prefetch(input: DecisionInput, opts: RunDecisionOptions): Promise
     safe(() => computeFundFlowNote(input.code, queryName, opts.signal, mxReady), '资金流多日数据不可用。', 1800),
     // 估值（东财当前PE/PB/PEG/PS/PCF免MX + 妙想历史分位/同业增补）：喂基本面（高估/低估锚点）
     safe(() => computeValuationNote(input.code, queryName, opts.signal, mxReady), '估值数据不可用。', 1800),
+    // 连板梯队定位（东财涨停池，免 MX）：当日连板/龙头角色/封板时间/封单，喂游资（龙头辨识）
+    safe(async () => formatStockDragon(await getStockDragonStatus(input.code)), '连板梯队数据不可用。', 2000),
+    // 龙虎榜资金面（东财净额趋势 + akshare 席位拆分，免 MX）：谁在买谁在卖/游资接力，喂游资（资金证据）
+    safe(async () => formatCapitalForAgent(await getStockCapital(input.code, opts.signal)), '龙虎榜资金面数据不可用。', 2500),
+    // 技术指标库（trading-signals 从日线衍生，免 MX）：MACD/KDJ/RSI/BOLL 读数，喂技术分析师（指标共振）
+    safe(async () => formatIndicatorsForAgent(await getStockIndicators(input.code, opts.signal)), '技术指标数据不可用。', 1200),
+    // 筹码分布（东财筹码，免 MX）：获利比例/成本区间/集中度，喂技术分析师（套牢盘/锁筹/主力成本）
+    safe(async () => formatChipForAgent(await getChipDistribution(input.code, 6, opts.signal)), '筹码分布数据不可用。', 1500),
     // 块1+块3 K 线衍生：个股 + 沪深300 一次取齐，产出 kline/序列/相对强弱/大盘序列（never throw）
     computeKlineBundle(input.code, opts.signal),
   ]);
@@ -790,6 +817,10 @@ async function prefetch(input: DecisionInput, opts: RunDecisionOptions): Promise
     marketNote,
     newsNote,
     dragonNote,
+    ladderNote,
+    capitalNote,
+    indicatorsNote,
+    chipsNote,
     statementsNote,
     lockupNote,
     policyNote,
@@ -827,6 +858,10 @@ type AnalystDataKey =
   | 'marketSeries'
   | 'stance'
   | 'dragon'
+  | 'ladder'
+  | 'capital'
+  | 'indicators'
+  | 'chips'
   | 'statements';
 // 角色元数据（key/中文名/dataKeys）静态固定；职责（focus）由 agentConfig.getInstruction(key)
 // 运行时取生效值（覆盖优先，回退默认），dataKeys 与 ANALYST_KEYS 顺序一一对应。
@@ -837,8 +872,8 @@ interface AnalystMeta {
 }
 const ANALYST_ROLES: AnalystMeta[] = [
   { key: 'analyst.fundamental', role: '基本面分析师', dataKeys: ['statements', 'valuation', 'quote', 'research'] },
-  { key: 'analyst.technical', role: '技术面分析师', dataKeys: ['kline', 'series', 'relStrength', 'intraday', 'quote'] },
-  { key: 'analyst.capital', role: '游资情绪分析师', dataKeys: ['dragon', 'hotspot', 'fundFlow', 'series', 'sector', 'intraday', 'quote', 'news'] },
+  { key: 'analyst.technical', role: '技术面分析师', dataKeys: ['kline', 'indicators', 'chips', 'series', 'relStrength', 'intraday', 'quote'] },
+  { key: 'analyst.capital', role: '游资情绪分析师', dataKeys: ['dragon', 'ladder', 'capital', 'hotspot', 'fundFlow', 'series', 'sector', 'intraday', 'quote', 'news'] },
   { key: 'analyst.news', role: '新闻分析师', dataKeys: ['news', 'research'] },
   { key: 'analyst.policy', role: '政策分析师', dataKeys: ['policy', 'market', 'marketSeries', 'stance'] },
   { key: 'analyst.sentiment', role: '舆情分析师', dataKeys: ['hotspot', 'news', 'market'] },
@@ -866,6 +901,10 @@ function buildAnalystPrompt(roleFocus: AnalystMeta, code: string, ctx: PrefetchC
     marketSeries: ctx.marketSeriesNote,
     stance: ctx.marketStanceNote,
     dragon: ctx.dragonNote,
+    ladder: ctx.ladderNote,
+    capital: ctx.capitalNote,
+    indicators: ctx.indicatorsNote,
+    chips: ctx.chipsNote,
     statements: ctx.statementsNote,
   };
   const header: Record<AnalystDataKey, string> = {
@@ -886,6 +925,10 @@ function buildAnalystPrompt(roleFocus: AnalystMeta, code: string, ctx: PrefetchC
     marketSeries: '=== 大盘多日序列（沪深300）===',
     stance: '=== 最近大盘复盘结论 ===',
     dragon: '=== 龙虎榜明细/席位资金（东财）===',
+    ladder: '=== 连板梯队定位/龙头角色（东财涨停池）===',
+    capital: '=== 龙虎榜资金面深挖：净额趋势+席位拆分（东财+akshare）===',
+    indicators: '=== 技术指标库：MACD/KDJ/RSI/BOLL 读数（东财日线）===',
+    chips: '=== 筹码分布：获利比例/成本区间/集中度（东财）===',
     statements: '=== 财报主表/盈利质量（东财 F10）===',
   };
   const data = roleFocus.dataKeys
@@ -1375,4 +1418,509 @@ export function mapDecisionToVerdict(r: DecisionResult): DecisionVerdict {
     verdict,
     advice: r.narrative,
   };
+}
+
+// ===== 股指辩论决策（独立精简链路）=====
+// 指数无财报/筹码/龙虎榜/解禁/估值/资金流，且不可直接买卖（Trader 拟单/手数/涨跌停无意义）。
+// 故走独立链路：指数行情/K线/技术指标/大盘宏观/消息政策 → 指数分析师并行 → 多空辩论 + 研究总监
+// → (可选)三方风控 → 组合裁决。复用 stage/clip/safe/纯函数/RISK_STYLES/getInstruction，
+// 跳过 Trader 与交易记忆/裁决缓存（不进个股反思 Alpha 闭环）。action 复用 DecisionAction 但语义为
+// 对指数（及对应赛道 ETF）的方向：buy/add=看多加配 / hold=中性观望 / reduce/sell=看空减配。
+
+/** 指数动作语义标签（区别于个股买卖措辞） */
+const INDEX_ACTION_LABELS: Record<DecisionAction, string> = {
+  buy: '看多（建仓对应赛道ETF）',
+  add: '看多加配',
+  hold: '中性观望',
+  reduce: '看空减配',
+  sell: '看空清仓',
+};
+
+/** 指数 60 日线衍生技术位文本（复用纯函数，never throw 由调用方 best-effort 收口） */
+function computeIndexKlineNote(bars: KlineBar[]): string {
+  if (bars.length < 5) return '';
+  const last = bars[bars.length - 1];
+  const closes = bars.map((b) => b.close);
+  const vols = bars.map((b) => b.volume);
+  const ma5 = maOf(closes, 5);
+  const ma10 = maOf(closes, 10);
+  const ma20 = maOf(closes, 20);
+  const ma60 = maOf(closes, 60);
+  const hi = Math.max(...bars.map((b) => b.high));
+  const lo = Math.min(...bars.map((b) => b.low));
+  const posInRange = hi > lo ? ((last.close - lo) / (hi - lo)) * 100 : 50;
+  const avgVol20 = avg(vols.slice(-20));
+  const volRatio = avgVol20 > 0 ? last.volume / avgVol20 : 1;
+  const maOrder =
+    ma5 >= ma10 && ma10 >= ma20 && ma20 >= ma60 ? '多头排列' : ma5 <= ma10 && ma10 <= ma20 ? '空头排列' : '均线纠缠';
+  const prevCloses = closes.slice(0, -1);
+  const isNewHigh = prevCloses.length > 0 && last.close >= Math.max(...prevCloses);
+  let peak = closes[0];
+  let mdd = 0;
+  for (const c of closes) {
+    peak = Math.max(peak, c);
+    if (peak > 0) mdd = Math.min(mdd, c / peak - 1);
+  }
+  let streak = 0;
+  let dir = 0;
+  for (let i = bars.length - 1; i >= 1; i -= 1) {
+    const d = bars[i].close >= bars[i - 1].close ? 1 : -1;
+    if (dir === 0) dir = d;
+    if (d === dir) streak += 1;
+    else break;
+  }
+  const streakDesc = streak >= 2 ? `${dir > 0 ? '连阳' : '连阴'} ${streak} 日` : '无明显连续';
+  return [
+    `现点位 ${last.close}（${last.time}）`,
+    `MA5/10/20/60 = ${ma5.toFixed(2)}/${ma10.toFixed(2)}/${ma20.toFixed(2)}/${ma60.toFixed(2)}（${maOrder}），现价${last.close >= ma20 ? '站上' : '跌破'} MA20`,
+    `60 日区间 [${lo.toFixed(2)}, ${hi.toFixed(2)}]，位置约 ${posInRange.toFixed(0)}%，${isNewHigh ? '创60日新高' : '未创新高'}，区间最大回撤 ${(mdd * 100).toFixed(1)}%`,
+    `近5日 ${fmtPct(pctReturn(closes, 5))}，近20日 ${fmtPct(pctReturn(closes, 20))}，近60日 ${fmtPct(pctReturn(closes, 60))}，当前${streakDesc}`,
+    `量能：最新量/20日均量 ≈ ${volRatio.toFixed(2)}`,
+  ].join('\n');
+}
+
+/** 指数近 20 日逐日量价序列文本 */
+function computeIndexSeriesNote(bars: KlineBar[]): string {
+  if (bars.length < 5) return '';
+  const avgVol20 = avg(bars.map((b) => b.volume).slice(-20));
+  const start = Math.max(1, bars.length - 20);
+  const rows: string[] = [];
+  for (let i = start; i < bars.length; i += 1) {
+    const b = bars[i];
+    const prevClose = bars[i - 1].close;
+    const pct = prevClose > 0 ? (b.close / prevClose - 1) * 100 : 0;
+    const vr = avgVol20 > 0 ? b.volume / avgVol20 : 1;
+    rows.push(`${b.time.slice(5)} 收${b.close.toFixed(2)} ${fmtPct(pct)} 量比${vr.toFixed(2)}`);
+  }
+  return `近20日逐日（日期 收盘 涨跌幅 量比）：\n${rows.join('\n')}`;
+}
+
+/** 预取的指数上下文（注入指数分析师） */
+interface IndexPrefetchContext {
+  name: string;
+  /** 指数实时快照：现点位/涨跌/今开高低/昨收/振幅 */
+  quoteNote: string;
+  /** 60 日线衍生技术位（点位/均线排列/区间位置/新高回撤/量能） */
+  klineNote: string;
+  /** 近 20 日逐日量价序列 */
+  seriesNote: string;
+  /** 技术指标库：MACD/KDJ/RSI/BOLL 读数 */
+  indicatorsNote: string;
+  /** 大盘宏观环境（A股指数 + 外盘 + 期货 + 情绪/资金） */
+  marketNote: string;
+  /** 最近一次大盘复盘结论 */
+  marketStanceNote: string;
+  /** 消息面（热榜 + 妙想增补） */
+  newsNote: string;
+  /** 政策/产业面 */
+  policyNote: string;
+  /** 全网热点话题 + 相关热榜新闻 */
+  hotspotNote: string;
+}
+
+// 指数命中市场号缓存（key=指数 key）：首次探测到有数据的 secid 后复用，避免重复试错
+const indexHitSecid = new Map<string, string>();
+
+/** 候选 secid 回退取指数日线：依次尝试，返回首个非空 bars，并缓存命中 secid */
+async function fetchIndexBars(def: IndexDef): Promise<KlineBar[]> {
+  const hit = indexHitSecid.get(def.key);
+  const candidates = hit
+    ? [hit, ...indexSecidCandidates(def).filter((s) => s !== hit)]
+    : indexSecidCandidates(def);
+  for (const secid of candidates) {
+    const code = secid.split('.')[1] ?? def.key;
+    const bars = await getKline(code, 'day', 60, secid).catch(() => [] as KlineBar[]);
+    if (bars.length > 0) {
+      indexHitSecid.set(def.key, secid);
+      return bars;
+    }
+  }
+  return [];
+}
+
+/** 候选 secid 回退取指数实时快照：依次尝试，返回首个成功文本（空数据会抛错被捕获） */
+async function fetchIndexSnapshot(def: IndexDef): Promise<string> {
+  const hit = indexHitSecid.get(def.key);
+  const candidates = hit
+    ? [hit, ...indexSecidCandidates(def).filter((s) => s !== hit)]
+    : indexSecidCandidates(def);
+  for (const secid of candidates) {
+    try {
+      return await getIndexSnapshot(secid);
+    } catch {
+      /* 该市场号无数据：试下一个候选 */
+    }
+  }
+  throw new Error(`指数快照全部候选 secid 失败: ${def.key}`);
+}
+
+/** 并行预取指数数据（全部 best-effort 降级，不占辩论 step） */
+async function prefetchIndex(def: IndexDef, opts: RunDecisionOptions): Promise<IndexPrefetchContext> {
+  ensureNotAborted(opts.signal);
+  const id = newId();
+  opts.onEvent?.({ type: 'tool_call', id, name: '指数数据预取', args: `${def.name}(${def.secid})` });
+
+  const mxReady = !!getValue('mxApiKey');
+  // 指数 K 线：多市场号候选回退（快照/K线真实市场号因指数而异，命中首个有数据者）
+  const bars = await fetchIndexBars(def);
+
+  const [quoteNote, marketNote, marketStanceNote, newsNote, policyNote, hotspotNote] = await Promise.all([
+    safe(() => fetchIndexSnapshot(def), '指数实时快照不可用。', 600),
+    // 大盘宏观环境（复用 buildOverview 已抓的外盘/期货/情绪）
+    safe(async () => {
+      const ov = await buildOverview();
+      return JSON.stringify({
+        indices: ov.indices,
+        globalIndices: ov.globalIndices?.slice(0, 12),
+        futures: ov.futures?.slice(0, 12),
+        turnoverTotal: ov.turnoverTotal,
+        emotion: ov.emotion,
+        hotIndustries: ov.hotIndustries?.slice(0, 6),
+        hotConcepts: ov.hotConcepts?.slice(0, 6),
+      });
+    }, '大盘快照不可用。', 3000),
+    // 最近一次大盘复盘结论（宏观背景）
+    safe(async () => {
+      const rows = listReviews(1);
+      const text = rows[0]?.outputText;
+      if (!text) return '暂无最近大盘复盘。';
+      let r: Record<string, unknown>;
+      try {
+        r = JSON.parse(text) as Record<string, unknown>;
+      } catch {
+        return '大盘复盘解析失败。';
+      }
+      const parts: string[] = [];
+      if (typeof r.marketTrend === 'string' && r.marketTrend) parts.push(`大盘走势：${r.marketTrend}`);
+      const cs = r.comprehensiveStance as { bias?: string; summary?: string } | null | undefined;
+      if (cs && (cs.bias || cs.summary)) parts.push(`综合定调：${cs.bias ?? ''} ${cs.summary ?? ''}`.trim());
+      const themes = Array.isArray(r.mainThemes) ? (r.mainThemes as Array<{ name?: string; strength?: string }>) : [];
+      if (themes.length) parts.push('主线题材：' + themes.slice(0, 4).map((m) => `${m.name ?? ''}(${m.strength ?? ''})`).join('、'));
+      return parts.join('\n') || '暂无大盘复盘要点。';
+    }, '大盘复盘不可用。', 2000),
+    // 消息面：TrendRadar 热榜（免 MX）+ 妙想增补
+    safe(async () => {
+      const news = await trendradar.searchNews(def.name, 20).catch(() => []);
+      const parts: string[] = [];
+      if (news.length) {
+        parts.push('热榜新闻：\n' + news.map((n) => `[${n.platformName || n.platform}] ${n.title}`).join('\n'));
+      }
+      if (mxReady) {
+        try {
+          parts.push('妙想消息面：\n' + clip(await miaoxiang.search(`${def.name} 最近的重要新闻、成分股动态、机构观点`, opts.signal), 2000));
+        } catch {
+          /* MX 增补失败：仅用热榜 */
+        }
+      }
+      return parts.join('\n\n') || '暂无消息面数据。';
+    }, '消息面不可用。', 3000),
+    // 政策/产业面：TrendRadar 政策热榜（免 MX）+ 妙想增补
+    safe(async () => {
+      const news = await trendradar.searchNews(`${def.name} 政策 产业`, 15).catch(() => []);
+      const parts: string[] = [];
+      if (news.length) {
+        parts.push('政策相关热榜：\n' + news.map((n) => `[${n.platformName || n.platform}] ${n.title}`).join('\n'));
+      }
+      if (mxReady) {
+        try {
+          parts.push('妙想政策面：\n' + clip(await miaoxiang.search(`${def.name} 相关行业最新政策、监管动向与产业趋势`, opts.signal), 2000));
+        } catch {
+          /* MX 增补失败：仅用热榜 */
+        }
+      }
+      return parts.join('\n\n') || '暂无政策面数据。';
+    }, '政策面不可用。', 2500),
+    // 全网热点：高频话题 + 相关热榜新闻
+    safe(async () => {
+      const [topics, news] = await Promise.all([
+        trendradar.trending(15).catch(() => []),
+        trendradar.searchNews(def.name, 20).catch(() => []),
+      ]);
+      const parts: string[] = [];
+      if (topics.length) {
+        parts.push('全网热点话题：' + topics.map((t) => `${t.keyword}(热度${t.frequency}/命中${t.matchedNews})`).join('  '));
+      }
+      if (news.length) {
+        parts.push('相关热榜新闻：\n' + news.map((n) => `[${n.platformName || n.platform}] ${n.title}`).join('\n'));
+      }
+      return parts.join('\n\n') || '暂无热点数据。';
+    }, 'TrendRadar 热点不可用。', 3000),
+  ]);
+
+  const klineNote = clip(computeIndexKlineNote(bars) || 'K 线数据不可用。', 1500);
+  const seriesNote = clip(computeIndexSeriesNote(bars), 1500);
+  const indicatorsNote = bars.length
+    ? clip(formatIndicatorsForAgent(computeIndicators(def.name, bars, 'day')), 1200)
+    : '技术指标数据不可用。';
+
+  opts.onEvent?.({
+    type: 'tool_result',
+    id,
+    name: '指数数据预取',
+    ok: true,
+    preview: `已取齐 ${def.name} 行情/K线(技术位+20日序列)/技术指标/大盘宏观(含外盘期货+复盘)/消息/政策/热点`,
+  });
+
+  return {
+    name: def.name,
+    quoteNote,
+    klineNote,
+    seriesNote,
+    indicatorsNote,
+    marketNote,
+    marketStanceNote,
+    newsNote,
+    policyNote,
+    hotspotNote,
+  };
+}
+
+// 指数分析师（独立精简，内联职责，不写入 agentConfig 个股注册表）：
+// 趋势 / 技术面 / 宏观环境 / 消息政策。dataKeys 标注重点引用的预取数据块，控 token。
+type IndexDataKey =
+  | 'quote'
+  | 'kline'
+  | 'series'
+  | 'indicators'
+  | 'market'
+  | 'stance'
+  | 'news'
+  | 'policy'
+  | 'hotspot';
+interface IndexAnalystMeta {
+  role: string;
+  focus: string;
+  dataKeys: IndexDataKey[];
+}
+const INDEX_ANALYST_ROLES: IndexAnalystMeta[] = [
+  {
+    role: '趋势分析师',
+    focus: '判断指数当前所处的中线趋势阶段（上升/震荡/下降、主升浪/回调/筑底），结合均线排列、区间位置、量价配合与新高回撤给出趋势强弱与拐点信号',
+    dataKeys: ['kline', 'series', 'quote'],
+  },
+  {
+    role: '技术面分析师',
+    focus: '基于 MACD/KDJ/RSI/BOLL 指标共振与关键技术位（支撑/压力、超买超卖）判断短中期方向与风险位',
+    dataKeys: ['indicators', 'kline', 'quote'],
+  },
+  {
+    role: '宏观环境分析师',
+    focus: '从大盘整体环境、外盘联动、情绪与资金面判断该指数所处的宏观背景是顺风还是逆风',
+    dataKeys: ['market', 'stance'],
+  },
+  {
+    role: '消息政策分析师',
+    focus: '从相关行业消息面、政策/监管动向与全网热点判断指数题材的催化与压制因素',
+    dataKeys: ['news', 'policy', 'hotspot'],
+  },
+];
+
+/** 组装指数分析师 prompt：按 dataKeys 精简注入预取上下文，首行表态 */
+function buildIndexAnalystPrompt(meta: IndexAnalystMeta, def: IndexDef, ctx: IndexPrefetchContext): string {
+  const note: Record<IndexDataKey, string> = {
+    quote: ctx.quoteNote,
+    kline: ctx.klineNote,
+    series: ctx.seriesNote,
+    indicators: ctx.indicatorsNote,
+    market: ctx.marketNote,
+    stance: ctx.marketStanceNote,
+    news: ctx.newsNote,
+    policy: ctx.policyNote,
+    hotspot: ctx.hotspotNote,
+  };
+  const header: Record<IndexDataKey, string> = {
+    quote: '=== 指数实时快照 ===',
+    kline: '=== 指数K线技术位（东财60日线）===',
+    series: '=== 近20日逐日量价序列 ===',
+    indicators: '=== 技术指标库：MACD/KDJ/RSI/BOLL ===',
+    market: '=== 大盘宏观环境（含外盘/期货/情绪）===',
+    stance: '=== 最近大盘复盘结论 ===',
+    news: '=== 消息面 ===',
+    policy: '=== 政策/产业面 ===',
+    hotspot: '=== 全网热点 ===',
+  };
+  const data = meta.dataKeys
+    .map((k) => (note[k]?.trim() ? `${header[k]}\n${note[k]}` : ''))
+    .filter(Boolean)
+    .join('\n\n');
+  return (
+    `你是一名【${meta.role}】，负责对股指 ${def.name} 做单一维度的中线趋势/择时研判（非个股）。\n` +
+    `只聚焦：${meta.focus}。\n` +
+    '基于下方已取好的数据，给出该维度结论，务必精炼（≤200 字），首行用「倾向：偏多/偏空/中性」表态，' +
+    '其后分点列依据。禁止编造未出现的数字，数据缺失则明说。\n\n' +
+    data
+  );
+}
+
+/** 组装指数研判的 Markdown 叙述（去掉 Trader 段，措辞为指数研判） */
+function buildIndexNarrative(r: DecisionResult): string {
+  const lines: string[] = [];
+  lines.push(`## ${r.name} 指数研判：${INDEX_ACTION_LABELS[r.action]}（置信度 ${r.confidence}）`);
+  const kv: string[] = [];
+  if (r.targetPrice != null) kv.push(`目标点位 ${r.targetPrice}`);
+  if (r.stopLoss != null) kv.push(`止损点位 ${r.stopLoss}`);
+  if (r.positionPct != null) kv.push(`对应赛道建议仓位 ${r.positionPct}%`);
+  if (kv.length) lines.push(kv.join(' ｜ '));
+  lines.push('', `**核心逻辑**：${r.thesis}`);
+  if (r.keyRisks.length) lines.push('', '**关键风险**', ...r.keyRisks.map((x) => `- ${x}`));
+  lines.push('', '### 分析师研判');
+  for (const a of r.analystReports) lines.push(`- **${a.role}（${a.stance}）**：${a.summary}`);
+  lines.push('', '### 多空辩论', `**多头**：${r.bullView}`, '', `**空头**：${r.bearView}`, '', `**研究总监裁决**：${r.judgeView}`);
+  if (r.riskDebate) {
+    lines.push(
+      '',
+      '### 三方风险辩论',
+      `**激进派**：${r.riskDebate.aggressive}`,
+      '',
+      `**中立派**：${r.riskDebate.neutral}`,
+      '',
+      `**保守派**：${r.riskDebate.conservative}`,
+      '',
+      `**风控组长裁决**：${r.riskDebate.verdict}`,
+    );
+  }
+  return lines.join('\n');
+}
+
+/**
+ * 运行一次股指辩论决策（独立精简链路）。永不裸抛业务错误（取数已降级）；
+ * abort 时抛 AbortError 由调用方收口。不写交易记忆/裁决缓存（指数不进个股反思闭环）。
+ */
+export async function runIndexDecision(def: IndexDef, opts: RunDecisionOptions = {}): Promise<DecisionResult> {
+  const cfg = readConfig();
+
+  // 1) 数据预取
+  const ctx = await prefetchIndex(def, opts);
+
+  // 2) 指数分析师层（全部并行，轻模型）
+  const analystOutputs = await Promise.all(
+    INDEX_ANALYST_ROLES.map((meta) => stage(meta.role, buildIndexAnalystPrompt(meta, def, ctx), cfg.quickModel, opts)),
+  );
+  const analystReports = INDEX_ANALYST_ROLES.map((meta, i) => {
+    const out = analystOutputs[i];
+    const firstLine = out.split('\n')[0] ?? '';
+    const m = firstLine.match(/倾向[：:]\s*(偏多|偏空|中性|看多|看空)/);
+    return { role: meta.role, stance: m?.[1] ?? '中性', summary: out };
+  });
+  const analystDigest = analystReports.map((a) => `【${a.role}】\n${a.summary}`).join('\n\n');
+
+  // 3) 多空辩论（多轮，轻模型）
+  let bullView = '';
+  let bearView = '';
+  let transcript = '';
+  for (let round = 1; round <= cfg.rounds; round += 1) {
+    const roundTag = cfg.rounds > 1 ? `（第${round}/${cfg.rounds}轮）` : '';
+    bullView = await stage(
+      `多头研究员${roundTag}`,
+      `${getInstruction(AGENT_KEYS.bull)}\n标的：股指 ${def.name}（判断指数中线方向，非个股）` +
+        (bearView ? `\n\n空头上一轮观点（需反驳）：\n${bearView}` : '') +
+        `\n\n=== 分析师结论 ===\n${analystDigest}`,
+      cfg.quickModel,
+      opts,
+    );
+    bearView = await stage(
+      `空头研究员${roundTag}`,
+      `${getInstruction(AGENT_KEYS.bear)}\n标的：股指 ${def.name}（判断指数中线方向，非个股）` +
+        `\n\n多头本轮观点（需反驳）：\n${bullView}` +
+        `\n\n=== 分析师结论 ===\n${analystDigest}`,
+      cfg.quickModel,
+      opts,
+    );
+    transcript += `${roundTag || `第${round}轮`}\n多头：${bullView}\n空头：${bearView}\n\n`;
+  }
+
+  // 研究总监裁决（重模型）
+  const judgeView = await stage(
+    '研究总监',
+    `${getInstruction(AGENT_KEYS.judge)}\n标的：股指 ${def.name}（判断指数中线方向，非个股）` +
+      `\n\n=== 多空辩论 ===\n${transcript}\n=== 分析师结论 ===\n${analystDigest}`,
+    cfg.deepModel,
+    opts,
+  );
+
+  // 4) 三方风险辩论 + 风控组长裁决（可关闭；轻模型）
+  let riskDebate: DecisionRiskDebate | null = null;
+  if (cfg.riskEnabled) {
+    const views: Partial<Record<keyof Omit<DecisionRiskDebate, 'verdict'>, string>> = {};
+    for (let round = 1; round <= cfg.riskRounds; round += 1) {
+      const roundTag = cfg.riskRounds > 1 ? `（第${round}/${cfg.riskRounds}轮）` : '';
+      for (const s of RISK_STYLES) {
+        const prior = RISK_STYLES.filter((x) => views[x.key])
+          .map((x) => `${x.role}：${views[x.key]}`)
+          .join('\n');
+        views[s.key] = await stage(
+          `${s.role}${roundTag}`,
+          `你是【${s.role}】，风格：${getInstruction(s.agentKey)}。针对股指 ${def.name} 的方向研判，` +
+            '从对应赛道仓位控制、回撤风险、盈亏比角度审查下方裁决，给出你的风险立场与建议仓位/止损位（≤140 字）。' +
+            `\n\n=== 研究总监裁决 ===\n${judgeView}` +
+            (prior ? `\n\n=== 其他风控观点 ===\n${prior}` : ''),
+          cfg.quickModel,
+          opts,
+        );
+      }
+    }
+    const verdict = await stage(
+      '风控组长裁决',
+      `${getInstruction(AGENT_KEYS.riskChair)}` +
+        `\n\n=== 三方风控观点 ===\n` +
+        RISK_STYLES.map((s) => `【${s.role}】${views[s.key] ?? ''}`).join('\n'),
+      cfg.quickModel,
+      opts,
+    );
+    riskDebate = {
+      aggressive: views.aggressive ?? '',
+      neutral: views.neutral ?? '',
+      conservative: views.conservative ?? '',
+      verdict,
+    };
+  }
+
+  // 5) 最终结构化决策（重模型）
+  const decisionText = await stage(
+    '最终决策',
+    `${getInstruction(AGENT_KEYS.pm)}\n标的：股指 ${def.name}` +
+      '\n这是对【股指】的中线趋势/择时研判（不可直接买卖指数）：action 表示对该指数及其对应赛道 ETF 的方向——' +
+      'buy/add=看多加配 / hold=中性观望 / reduce/sell=看空减配；targetPrice/stopLoss 为指数点位，positionPct 为对应赛道建议仓位。' +
+      '\n【严格输出】只输出一个合法 JSON 对象（闭合所有括号），不要任何额外文字或 Markdown 围栏，结构如下：\n' +
+      '{"action":"buy|add|hold|reduce|sell","confidence":0-100的整数,' +
+      '"targetPrice":数字或null,"stopLoss":数字或null,"positionPct":0-100数字或null,' +
+      '"thesis":"核心逻辑(≤80字)","keyRisks":["风险1","风险2"]}\n' +
+      '点位类字段必须基于已确认的真实点位，无依据则置 null。\n\n' +
+      `=== 研究总监裁决 ===\n${judgeView}\n\n` +
+      (riskDebate ? `=== 风控组长裁决 ===\n${riskDebate.verdict}\n\n` : '') +
+      `=== 指数行情参考 ===\n${ctx.quoteNote}`,
+    cfg.deepModel,
+    opts,
+  );
+
+  const parsed = parseDecisionJson(decisionText) ?? {};
+  const action = asAction(parsed.action);
+  const confidenceNum = asNum(parsed.confidence);
+  const result: DecisionResult = {
+    code: def.key,
+    name: def.name,
+    action,
+    confidence: confidenceNum != null ? Math.max(0, Math.min(100, Math.round(confidenceNum))) : 50,
+    targetPrice: asNum(parsed.targetPrice),
+    stopLoss: asNum(parsed.stopLoss),
+    positionPct: asNum(parsed.positionPct),
+    thesis: typeof parsed.thesis === 'string' && parsed.thesis ? parsed.thesis : judgeView.slice(0, 120),
+    keyRisks: Array.isArray(parsed.keyRisks)
+      ? (parsed.keyRisks as unknown[]).map((x) => String(x)).filter(Boolean).slice(0, 6)
+      : [],
+    analystReports,
+    bullView,
+    bearView,
+    judgeView,
+    traderPlan: null,
+    riskDebate,
+    memoryUsed: [],
+    narrative: '',
+  };
+  result.narrative = buildIndexNarrative(result);
+
+  // 末尾合成 token 事件：把最终叙述推给前端实时态展示
+  opts.onEvent?.({ type: 'token', text: `\n\n${result.narrative}` });
+  await sleep(0);
+  return result;
 }
