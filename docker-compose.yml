@@ -1,9 +1,11 @@
 services:
   stock-agent:
+    # 群晖部署：docker compose pull 直接拉 GHCR 镜像（由 GitHub Actions 构建）。
+    # 本地需自行构建时：docker compose up -d --build（会用下方 build 段重建同名镜像）。
+    image: ghcr.io/holdsworder/stock-agent:latest
     build:
       context: .
       dockerfile: backend/Dockerfile
-    image: stock-agent:latest
     container_name: stock-agent
     restart: unless-stopped
     ports:
