@@ -280,18 +280,18 @@ async function buildCandidates(industries: IndustryStrength[]): Promise<MidCandi
   return out.sort((a, b) => b.strengthScore - a.strengthScore).slice(0, 12);
 }
 
-/** 组装中线雷达总览（行业 + 持仓 + 候选池），各块 best-effort 降级 */
+/** 组装中线雷达总览。
+ * 注：前端 BoardStrengthPanel 仅渲染 `industries`，「持仓趋势」「中线候选池」分别与 /positions、/screener
+ * 重叠且无任何消费方（agent 工具直接调 computeIndustryRadar；本模块无定时/TG）。故此处只算行业强弱，
+ * positions/candidates 返回空数组以保持 DTO 形态；computePositionTrends/buildCandidates 保留在代码中可随时复接（G2 可逆）。
+ * 收益：每次 /radar/overview 不再白拉真实持仓+逐只K线与 ETF 信号。 */
 export async function buildRadarOverview(): Promise<RadarOverview> {
-  const [industries, positions] = await Promise.all([
-    computeIndustryRadar().catch(() => [] as IndustryStrength[]),
-    computePositionTrends().catch(() => [] as PositionTrend[]),
-  ]);
-  const candidates = await buildCandidates(industries).catch(() => [] as MidCandidate[]);
+  const industries = await computeIndustryRadar().catch(() => [] as IndustryStrength[]);
   return {
     asOf: nowIso(),
     industries,
-    positions,
-    candidates,
+    positions: [],
+    candidates: [],
     note: '中线趋势研判（确定性指标，仅供参考，不构成下单建议）',
   };
 }

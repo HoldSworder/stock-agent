@@ -141,6 +141,22 @@ onMounted(load);
               <span v-if="i.strategyId" class="meta-chip">战法绑定</span>
               <span v-if="modelSummary(i)" class="meta-chip">{{ modelSummary(i) }}</span>
             </div>
+            <div v-if="i.supersededBy || i.risk === 'time_conflict'" class="name-meta">
+              <el-tooltip
+                v-if="i.supersededBy"
+                content="此任务已停用，职能由下方说明的对象承担；打开右侧开关即可恢复本地副本"
+                placement="top"
+              >
+                <span class="superseded-chip">已并入：{{ i.supersededBy }}</span>
+              </el-tooltip>
+              <el-tooltip
+                v-if="i.risk === 'time_conflict'"
+                :content="`与其他启用任务在同一 cron 时刻（${i.cronExpr}）触发，可能重复研判 / 推送，建议停用其一`"
+                placement="top"
+              >
+                <span class="conflict-chip">⚠ 同刻重复</span>
+              </el-tooltip>
+            </div>
           </div>
 
           <div class="c-cron">
@@ -299,6 +315,21 @@ onMounted(load);
   color: var(--text-2);
   background: var(--bg-1);
   border: 1px solid var(--border-soft);
+  border-radius: 4px;
+  padding: 0 6px;
+}
+.superseded-chip {
+  font-size: 10.5px;
+  color: var(--text-2);
+  background: var(--bg-1);
+  border: 1px dashed var(--border);
+  border-radius: 4px;
+  padding: 0 6px;
+}
+.conflict-chip {
+  font-size: 10.5px;
+  color: var(--warning, #e6a23c);
+  border: 1px solid color-mix(in srgb, var(--warning, #e6a23c) 45%, transparent);
   border-radius: 4px;
   padding: 0 6px;
 }

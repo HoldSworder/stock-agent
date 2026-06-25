@@ -317,6 +317,87 @@ export const watchAlerts = sqliteTable(
   }),
 );
 
+/** ETF 多周期分层盯盘告警（独立于个股盯盘 watch_alerts） */
+export const etfWatchSignals = sqliteTable(
+  'etf_watch_signals',
+  {
+    id: text('id').primaryKey(),
+    code: text('code').notNull(),
+    name: text('name').notNull(),
+    /** buy_layer | sell_layer | hard_stop */
+    signalType: text('signal_type').notNull(),
+    /** 1 | 2 | 3 */
+    layer: integer('layer').notNull().default(1),
+    /** 30m | 60m | day */
+    timeframe: text('timeframe').notNull(),
+    /** 该层目标仓位 / 撤出比例 % */
+    positionPct: real('position_pct').notNull().default(0),
+    detail: text('detail').notNull(),
+    triggerPrice: real('trigger_price').notNull().default(0),
+    dif: real('dif').notNull().default(0),
+    dea: real('dea').notNull().default(0),
+    /** 0-100 混合置信度（仅买点） */
+    confidence: real('confidence'),
+    /** 最终裁决：建仓|观察|放弃|撤层|硬止损 */
+    verdict: text('verdict'),
+    /** agent 一句话研判（仅买点） */
+    advice: text('advice'),
+    /** 触发周期最新收盘 K 线时间（区分检测时刻 created_at） */
+    barTime: text('bar_time'),
+    runId: text('run_id'),
+    delivered: integer('delivered', { mode: 'boolean' }).notNull().default(false),
+    /** 资金/量价确认读数 JSON（EtfConfirm） */
+    confirmJson: text('confirm_json'),
+    /** 可闭眼照做的执行指令 JSON（EtfExecInstruction） */
+    instructionJson: text('instruction_json'),
+    /** 触发时趋势阶段 */
+    trendStage: text('trend_stage'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({
+    byCreated: index('idx_etf_watch_signals_created').on(t.createdAt),
+    byCode: index('idx_etf_watch_signals_code').on(t.code),
+  }),
+);
+
+/** ETF 多周期盯盘逻辑层状态（按引擎自身信号维护「建议持仓层」） */
+export const etfWatchState = sqliteTable('etf_watch_state', {
+  code: text('code').primaryKey(),
+  name: text('name').notNull(),
+  /** 已建层 JSON 数组，如 [1,2] */
+  heldLayers: text('held_layers').notNull().default('[]'),
+  /** 各层建仓价 JSON，如 {"1":1.23} */
+  layerEntryPrice: text('layer_entry_price').notNull().default('{}'),
+  /** 各层建仓时间 JSON，如 {"1":"2026-06-23T..."}（持仓起始日/隔日标识用） */
+  layerEntryAt: text('layer_entry_at').notNull().default('{}'),
+  /** 持有以来最高价 */
+  peakPrice: real('peak_price').notNull().default(0),
+  /** 趋势阶段（确定性合成，每轮评估刷新） */
+  trendStage: text('trend_stage'),
+  updatedAt: text('updated_at').notNull(),
+});
+
+/** ETF 份额日快照（按日累积，份额无历史接口，趋势从上线起累积） */
+export const etfShareDaily = sqliteTable(
+  'etf_share_daily',
+  {
+    code: text('code').notNull(),
+    /** 上海交易日 YYYY-MM-DD */
+    date: text('date').notNull(),
+    /** 最新份额（份） */
+    shares: real('shares').notNull().default(0),
+    /** 当日收盘价（量价对照） */
+    close: real('close').notNull().default(0),
+    /** 当日成交量（手） */
+    volume: real('volume').notNull().default(0),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.code, t.date] }),
+    byCode: index('idx_etf_share_daily_code').on(t.code),
+  }),
+);
+
 /** LLM 调用记录（统一计量：每一次 chat.completions 请求一行，按用途区分） */
 export const llmCalls = sqliteTable(
   'llm_calls',
@@ -359,6 +440,10 @@ export const dailyPlans = sqliteTable('daily_plans', {
   externalContext: text('external_context'),
   /** 完整作战图（Markdown，供人阅读与推送） */
   narrative: text('narrative'),
+  /** 今日风险清单 string[] JSON（AI 产出） */
+  keyRisks: text('key_risks').notNull().default('[]'),
+  /** 盘中分时作战指引 IntradayGuide JSON（AI 产出，可空） */
+  intradayGuide: text('intraday_guide'),
   /** 生成它的 agent 运行 id */
   runId: text('run_id'),
   /** 盘后复盘总结（收盘复盘回填） */

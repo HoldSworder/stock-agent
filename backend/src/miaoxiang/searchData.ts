@@ -31,6 +31,20 @@ export function extractDataTableDTOList(json: unknown): unknown[] | null {
   return null;
 }
 
+/**
+ * 判断错误/响应文案是否为妙想日配额耗尽（新门户 code=403「使用次数已达上限」）。
+ * 供调用方做「当日熔断」与工具层「优雅降级」识别，区别于普通网络抖动错误。
+ */
+export function isQuotaExhaustedMessage(message: string): boolean {
+  if (!message) return false;
+  return (
+    /code=403\b/.test(message) ||
+    message.includes('使用次数已达上限') ||
+    message.includes('已达上限') ||
+    message.includes('次数已用完')
+  );
+}
+
 /** 校验业务状态：code/status 命中成功集合视为通过，否则返回错误信息 */
 export function checkBusinessStatus(json: unknown): string | null {
   if (!isObject(json)) return '接口返回不是 JSON 对象';

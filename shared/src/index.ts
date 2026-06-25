@@ -542,6 +542,161 @@ export interface MarketOverview {
   dataAsOf?: string;
 }
 
+// ===== 宏观·资金面底稿（低频全局指标：日频/EOD，与实时盘面分离）=====
+// 各块 best-effort，上游失败为 null。note=该指标的「影响力 + 如何使用」固定说明，
+// 同时用于 UI 展示与注入 agent prompt。统一定性为「环境/背景/护栏」，非择时信号。
+
+/** 单个股指期货基差项（期货主连 vs 对应现货指数） */
+export interface MacroBasisItem {
+  /** 品种名，如 IF·沪深300 */
+  name: string;
+  /** 期货主连最新收盘 */
+  future: number;
+  /** 对应现货指数最新点位 */
+  spot: number;
+  /** 基差 = 期货 − 现货（负=贴水，正=升水） */
+  basis: number;
+  /** 基差率 % = 基差 / 现货 * 100 */
+  basisPct: number;
+}
+
+/** 股指期货基差（IF/IH/IC/IM） */
+export interface MacroBasis {
+  /** 数据时间（期货主连日线最新日） */
+  asOf: string;
+  items: MacroBasisItem[];
+  note: string;
+}
+
+/** 资金面利率（SHIBOR 隔夜/1周） */
+export interface MacroShibor {
+  /** 报价日 */
+  date: string;
+  /** 隔夜 O/N（%） */
+  overnight: number | null;
+  /** 1 周（%） */
+  week1: number | null;
+  note: string;
+}
+
+/** 最近一次降准（存款准备金率） */
+export interface MacroRrr {
+  /** 公布时间 */
+  announceDate: string;
+  /** 生效时间 */
+  effectiveDate: string;
+  /** 大型金融机构调整后比率（%） */
+  bigBankAfter: number | null;
+  /** 调整幅度（%，负=降准） */
+  bigBankDelta: number | null;
+  note: string;
+}
+
+/** 两融余额（融资余额合计 + 近期趋势） */
+export interface MacroMargin {
+  /** 信用交易日期 */
+  date: string;
+  /** 融资余额合计（亿元，含沪深可得部分） */
+  financeBalance: number;
+  /** 覆盖范围说明（如 沪市 / 沪深合计） */
+  scope: string;
+  /** 较上一交易日变化（亿元；不可得为 null） */
+  changeAmount: number | null;
+  /** 近 N 日趋势 */
+  trend: '上升' | '下降' | '走平';
+  note: string;
+}
+
+/** 南向资金（港股通净流入） */
+export interface MacroSouthbound {
+  /** 交易日 */
+  date: string;
+  /** 南向净流入（亿元，沪+深港股通成交净买额合计） */
+  netInflow: number;
+  note: string;
+}
+
+/** 沪深300 估值分位（滚动市盈率历史分位） */
+export interface MacroValuation {
+  /** 数据日 */
+  date: string;
+  /** 当前滚动市盈率 */
+  pe: number;
+  /** 历史分位 0-100（越低越便宜） */
+  percentile: number;
+  note: string;
+}
+
+/** 单品种股指期货持仓（中信单家 + 前20席位合计，含日增减） */
+export interface CffexVarietyRank {
+  /** 品种代码 IF/IH/IC/IM */
+  variety: string;
+  /** 展示名（如 IF·沪深300） */
+  name: string;
+  /** 中信期货持买单量合计 */
+  citicLong: number;
+  /** 中信期货持卖单量合计 */
+  citicShort: number;
+  /** 中信净持仓（持买−持卖；负=偏空） */
+  citicNet: number;
+  /** 中信净持仓日增减 */
+  citicNetChg: number;
+  /** 前20席位持买单量合计 */
+  top20Long: number;
+  /** 前20席位持卖单量合计 */
+  top20Short: number;
+  /** 前20席位净持仓 */
+  top20Net: number;
+  /** 前20席位净持仓日增减 */
+  top20NetChg: number;
+}
+
+/** 中金所股指期货持仓榜（前20会员持仓排名） */
+export interface MacroCffexRank {
+  /** 交易日 YYYY-MM-DD */
+  date: string;
+  items: CffexVarietyRank[];
+  note: string;
+}
+
+/** 美股行业/主题 ETF（一只 ETF = 一个板块代理）隔夜行情 + A股映射桥接 */
+export interface UsSectorEtf {
+  /** ETF 名称（东财 f58） */
+  name: string;
+  /** 东财 secid，如 105.SMH */
+  secid: string;
+  /** 隔夜涨跌幅 % */
+  pct: number;
+  /** 主题大类，如 半导体/AI算力 */
+  theme: string;
+  /** 对应 A股概念名（供消费 agent 关联真实板块） */
+  aConcept: string;
+  /** 对应 A股 ETF（代码+名） */
+  aEtfs: { code: string; name: string }[];
+}
+
+/** 美股映射总览（隔夜美股行业/主题 ETF 排名 → A股概念·ETF 桥接） */
+export interface UsMappingOverview {
+  /** 数据时间 ISO */
+  asOf: string;
+  /** 按隔夜涨跌幅降序排列的美股板块 ETF（含 A股桥接） */
+  sectors: UsSectorEtf[];
+  note: string;
+}
+
+/** 宏观·资金面总览（各块可选，分块容错；失败为 null） */
+export interface MacroOverview {
+  /** 数据时间 ISO */
+  asOf: string;
+  basis: MacroBasis | null;
+  shibor: MacroShibor | null;
+  rrr: MacroRrr | null;
+  margin: MacroMargin | null;
+  southbound: MacroSouthbound | null;
+  valuation: MacroValuation | null;
+  cffexRank: MacroCffexRank | null;
+}
+
 /** 首页模块显隐配置项 */
 export interface HomeModule {
   id: string;
@@ -2127,6 +2282,41 @@ export interface BoardBreadthHistoryItem {
   rank: number;
 }
 
+// ===== 主线共识（跨源对齐：breadth 确定性判定 ⋈ themes 多源协同 ⋈ radar 中线趋势）=====
+
+/** 三方共识档：resonance 共振（同向）/ diverge 分歧（背离）/ watch 观察（仅锚成立） */
+export type MainlineConsensusLevel = 'resonance' | 'diverge' | 'watch';
+
+/** 单条主线的三源对齐结果（以 breadth 新高宽度为确定性锚） */
+export interface MainlineConsensusItem {
+  /** 板块名（以 breadth 锚板块为准） */
+  board: string;
+  /** 对应代表 ETF（无映射为 null） */
+  etf: { code: string; name: string } | null;
+  // —— breadth（确定性硬证据，权重最高）——
+  breadthVerdict: BoardBreadthVerdict | null;
+  newHighCount: number | null;
+  topDays: number | null;
+  // —— themes（多源协同度）——
+  themeStrength: number | null;
+  themeTrend: 'rising' | 'flat' | 'falling' | null;
+  themePhase: string | null;
+  // —— radar（中线趋势强度）——
+  radarTrend: TrendState | null;
+  radarStrength: number | null;
+  /** 三方共识判定 */
+  consensus: MainlineConsensusLevel;
+  /** 一行人话说明（拼三源结论） */
+  note: string;
+}
+
+/** 主线共识总览（决策层聚合，仅研判不下单） */
+export interface MainlineConsensus {
+  asOf: string;
+  items: MainlineConsensusItem[];
+  note: string;
+}
+
 /** 设置项（key-value）。模型为任意 OpenAI 兼容服务，非固定 DeepSeek。 */
 export interface AppSettings {
   /** OpenAI 兼容服务的 Base URL */
@@ -2173,6 +2363,10 @@ export interface AppSettings {
   akshareBaseUrl: string;
   /** AKShare 数据源启停，默认开启 */
   akshareEnabled: string;
+  /** 中金所股指期货持仓榜（直连 CFFEX CSV）启停，默认开启 */
+  cffexEnabled: string;
+  /** 美股映射（隔夜美股龙头/行业 → A股概念·ETF·个股）启停，默认开启 */
+  usMapEnabled: string;
   /** 华泰证券 AI 网关 apiKey（HT_APIKEY，五技能共用），明文回显 */
   htApiKey: string;
   /** 华泰证券 AI 网关 Base URL（可选覆盖，默认 https://ai.zhangle.com） */
@@ -2195,6 +2389,10 @@ export interface AppSettings {
   clsEnabled: string;
   /** 雪球数据源启停（经 AKShare 透传），默认开启 */
   xueqiuEnabled: string;
+  /** a-stock-data sidecar 基址，如 http://a-stock-data:9119（同 compose 网络服务名） */
+  astockBaseUrl: string;
+  /** a-stock-data 数据源启停，默认开启 */
+  astockEnabled: string;
 }
 
 // ===== 数据源中心（统一管理所有外部取数）=====
@@ -2586,6 +2784,307 @@ export type WatchEvent =
   | { type: 'alert'; alert: WatchAlert }
   | { type: 'trade'; trade: WatchTradeEvent };
 
+// ===== ETF 多周期分层盯盘（独立模块，与个股盯盘解耦）=====
+
+/** 多周期框架：30 分钟 / 60 分钟 / 日线 */
+export type EtfWatchTimeframe = '30m' | '60m' | 'day';
+
+/** 信号类型：建层买点 / 撤层卖点 / 硬止损 */
+export type EtfWatchSignalType = 'buy_layer' | 'sell_layer' | 'hard_stop';
+
+/** 仓位层级（L1 试探 / L2 加仓 / L3 确认） */
+export type EtfWatchLayer = 1 | 2 | 3;
+
+/** 信号去向（确定性管道落点，纯展示） */
+export type EtfWatchDisposition = 'cooldown' | 'low_confidence' | 'to_ai' | 'emitted';
+
+/** 最终裁决（买点由 AI 裁决，卖点/硬止损为确定性动作） */
+export type EtfWatchVerdict = '建仓' | '观察' | '放弃' | '撤层' | '硬止损';
+
+/** 趋势阶段（确定性合成：均线排列 + MACD 零轴 + 收盘相对 MA60 位置） */
+export type EtfTrendStage = '趋势初期' | '主升中' | '高位钝化' | '震荡' | '趋势破坏' | '未知';
+
+/** 资金/量价确认读数（确定性证据：量价健康度 + 份额趋势 + 量比/换手/主力净流入） */
+export interface EtfConfirm {
+  /** 0-100 确认分（量价健康度 + 份额趋势 + 量比） */
+  score: number;
+  /** 确认标签：健康（量价配合）/ 背离（缩量上涨）/ 派发警惕（滞涨放量）/ 数据不足 */
+  label: '健康' | '背离' | '派发警惕' | '数据不足';
+  /** 量价一行读数（人类可读） */
+  volPriceNote: string;
+  /** 份额趋势一行读数（人类可读） */
+  shareTrendNote: string;
+  /** 量比（无数据为 null） */
+  volRatio: number | null;
+  /** 换手率 %（无数据为 null） */
+  turnover: number | null;
+  /** 主力净流入（亿元，东财口径弱证据；无数据为 null） */
+  mainNetInflow: number | null;
+  /** 最新份额（份；无数据为 null） */
+  shares: number | null;
+  /** 数据时点 ISO */
+  asOf: string;
+}
+
+/** 执行指令动作（可闭眼照做的明确动作） */
+export type EtfExecActionType = '建仓' | '加仓' | '持有' | '减仓' | '清仓' | '观望';
+
+/**
+ * 可闭眼照做的执行指令（agent 主导填写方向/轻重/价位，确定性护栏兜底改写）。
+ * 卖点/硬止损为确定性直接构造，买点由 agent 产出后经护栏校验。
+ */
+export interface EtfExecInstruction {
+  /** 明确动作 */
+  action: EtfExecActionType;
+  /** 涉及层级（无则 null） */
+  layer: number | null;
+  /** 建议买入价区间下沿（无则 null） */
+  entryLow: number | null;
+  /** 建议买入价区间上沿（无则 null） */
+  entryHigh: number | null;
+  /** 本次操作占总仓位 %（减/清仓为撤出比例） */
+  sizePct: number;
+  /** 操作后预计总仓位 %（无则 null） */
+  totalAfterPct: number | null;
+  /** 止损价（建/加/持仓必给；无则 null） */
+  stopLoss: number | null;
+  /** 失效条件（一句话，触发即离场/作废） */
+  invalidation: string;
+  /** 一句话依据 */
+  reason: string;
+  /** 若被确定性护栏改写/限制，写明原因；未改写为 null */
+  guardrailNote: string | null;
+}
+
+/** 一条 ETF 多周期信号（确定性产出，买点再经置信度增信） */
+export interface EtfWatchSignal {
+  code: string;
+  name: string;
+  type: EtfWatchSignalType;
+  /** 对应层级（buy/sell 为该层；hard_stop 为清到的最高层） */
+  layer: EtfWatchLayer;
+  /** 触发周期（hard_stop 归 day） */
+  timeframe: EtfWatchTimeframe;
+  /** 建议仓位百分比（buy_layer：该层目标仓位；sell/hard_stop：撤出比例） */
+  positionPct: number;
+  /** 触发时现价 */
+  price: number;
+  /** 当日涨跌幅 % */
+  pct: number;
+  /** 触发周期 MACD DIF */
+  dif: number;
+  /** 触发周期 MACD DEA */
+  dea: number;
+  /** 人类可读触发说明 */
+  detail: string;
+  /** 触发时间 ISO（检测时刻，非 K 线收盘时刻） */
+  at: string;
+  /** 触发周期最新收盘 K 线的时间（与 at/检测时刻区分，定位是哪根 bar） */
+  barTime: string;
+  /** 去向标签（广播附带，纯展示） */
+  disposition?: EtfWatchDisposition;
+}
+
+/** 落库的 ETF 盯盘告警（买点含混合置信度 + agent 研判） */
+export interface EtfWatchAlert {
+  id: string;
+  code: string;
+  name: string;
+  signalType: EtfWatchSignalType;
+  layer: number;
+  timeframe: EtfWatchTimeframe;
+  positionPct: number;
+  detail: string;
+  /** 触发时现价 */
+  triggerPrice: number;
+  dif: number;
+  dea: number;
+  /** 0-100 混合置信度（仅买点；卖点/硬止损为 null） */
+  confidence: number | null;
+  /** 最终裁决（买点由 AI 裁决并经置信门校准；卖点/硬止损为确定性动作） */
+  verdict: EtfWatchVerdict | null;
+  /** agent 一句话研判（买点；卖点可空） */
+  advice: string | null;
+  /** 资金/量价确认读数（确定性证据；无则 null） */
+  confirm: EtfConfirm | null;
+  /** 可闭眼照做的执行指令（买点经 agent+护栏；卖点/硬止损确定性构造） */
+  instruction: EtfExecInstruction | null;
+  /** 触发时趋势阶段（确定性合成；无则 null） */
+  trendStage: EtfTrendStage | null;
+  /** 触发周期最新收盘 K 线的时间（区分检测时刻 createdAt） */
+  barTime: string | null;
+  /** 关联 agent 运行 id（买点调 agent 时有值） */
+  runId: string | null;
+  /** Telegram 是否已投递 */
+  delivered: boolean;
+  createdAt: string;
+}
+
+/** 单只 ETF 的逻辑层状态（告警模式：按引擎自身发出的信号维护「建议持仓层」） */
+export interface EtfWatchLayerState {
+  code: string;
+  name: string;
+  /** 已建层集合（升序） */
+  heldLayers: EtfWatchLayer[];
+  /** 各层建仓价（撤层/硬止损基准），键为层号字符串 */
+  layerEntryPrice: Record<string, number>;
+  /** 各层建仓时间 ISO（键为层号字符串），供「持仓起始日 / 隔日」过期标识展示 */
+  layerEntryAt?: Record<string, string>;
+  /** 持有以来最高价（移动止盈 / 移动止损参考） */
+  peakPrice: number;
+  /** 趋势阶段（确定性合成，每轮评估刷新；用于「该持有还是该防守」基调） */
+  trendStage?: EtfTrendStage | null;
+  updatedAt: string;
+}
+
+/** ETF 多周期盯盘配置（独立持久化，etfwatch_* 键前缀） */
+export interface EtfWatchConfig {
+  /** 引擎总开关 */
+  enabled: boolean;
+  /** 轮询间隔（秒） */
+  pollSec: number;
+  /** 标的来源：纳入真实持仓中的场内 ETF */
+  includePositions: boolean;
+  /** 标的来源：纳入 ETF 跟踪池 */
+  includePool: boolean;
+  /** 额外盯盘代码白名单（逗号分隔） */
+  extraCodes: string;
+  /** L1 试探仓目标仓位 %（默认 40） */
+  layer1Pct: number;
+  /** L2 加仓目标仓位 %（默认 40） */
+  layer2Pct: number;
+  /** L3 确认仓目标仓位 %（默认 20） */
+  layer3Pct: number;
+  /** 零轴过滤：水下金叉(DIF<0)降级观察不建仓 */
+  zeroAxisFilter: boolean;
+  /** 大周期方向过滤（L1 需 60m 多头 / L2 需日线多头 / L3 需周线多头） */
+  higherTfFilter: boolean;
+  /** 硬止损：跌破建仓均价 % 立即清该层及以下 */
+  hardStopPct: number;
+  /** 移动止损回看根数：30m 死叉时若 60m 仍多头，改提移动止损（跌破近 N 根 30m 低点才撤） */
+  trailLookback: number;
+  /** 移动止盈：持仓盈利状态下从持有高点回撤 ≥ 此 % 触发减/撤层（守主升浪利润；0=关闭） */
+  trailTakeProfitPct: number;
+  /** 禁追高护栏：当日涨幅 ≥ 此 % 时禁止新建/加仓（降级观望；0=关闭） */
+  chaseGuardPct: number;
+  /** 最大总仓位 %：执行指令的累计目标仓位不得超过此值（护栏削减；0=不限制） */
+  maxTotalPct: number;
+  /** 买点是否调 agent 给混合置信度 */
+  agentConfirmBuy: boolean;
+  /** 置信度门：买点低于此值降级观察不推送（0=不拦截） */
+  minConfidence: number;
+  /** 同标的同类信号冷却（分钟） */
+  cooldownMin: number;
+  /** 是否推送 Telegram */
+  pushTelegram: boolean;
+}
+
+/** ETF 盯盘引擎状态（心跳） */
+export interface EtfWatchStatus {
+  enabled: boolean;
+  running: boolean;
+  /** 当前是否交易时段 */
+  inSession: boolean;
+  /** 上次轮询时间 ISO */
+  lastPollAt: string | null;
+  /** 上次轮询命中信号数 */
+  lastSignalCount: number;
+  /** 当前跟踪标的数 */
+  trackedCount: number;
+  config: EtfWatchConfig;
+}
+
+/** ETF 盯盘 WebSocket 推送事件（独立于 WatchEvent / StreamEvent） */
+export type EtfWatchEvent =
+  | { type: 'status'; status: EtfWatchStatus }
+  | { type: 'signal'; signal: EtfWatchSignal }
+  | { type: 'alert'; alert: EtfWatchAlert }
+  | { type: 'states'; at: string; states: EtfWatchLayerState[] };
+
+/** 手动检测的动作建议（含持仓视角的减/清仓） */
+export type EtfWatchProbeAction = '建仓' | '加仓' | '观察' | '减仓' | '清仓' | '放弃';
+
+/** 单周期 MACD 读数（手动检测报告用） */
+export interface EtfWatchTfReadout {
+  timeframe: '30m' | '60m' | 'day' | 'week';
+  /** 形态：金叉/死叉/多头/空头 */
+  state: MacdReadout['state'];
+  dif: number;
+  dea: number;
+  /** DIF ≥ DEA（多头排列） */
+  bullish: boolean;
+  /** DIF > 0（零轴上方） */
+  aboveZero: boolean;
+  /** 最新已收盘 bar 时间 */
+  barTime: string;
+  /** 最新收盘价 */
+  close: number;
+}
+
+/** 即时检测的确定性部分（先于 AI 立即可得，用于先渲染读数表/持仓） */
+export interface EtfWatchProbeBase {
+  code: string;
+  name: string;
+  /** 现价（取数失败回退日线收盘） */
+  price: number;
+  /** 当日涨跌幅 % */
+  pct: number;
+  /** 当前已建层（引擎逻辑状态） */
+  heldLayers: EtfWatchLayer[];
+  /** 各层建仓价 */
+  layerEntryPrice: Record<string, number>;
+  /** 多周期读数（30m/60m/day，含 week 若有） */
+  readouts: EtfWatchTfReadout[];
+  /** 30m/60m/日线多头共振数（0-3） */
+  resonance: number;
+  /** 资金/量价确认读数（确定性证据；无则 null） */
+  confirm: EtfConfirm | null;
+  /** 趋势阶段（确定性合成；无则 null） */
+  trendStage: EtfTrendStage | null;
+  /** 检测时间 ISO */
+  at: string;
+}
+
+/** 单只 ETF 的即时多周期检测 + AI 研判报告（只读，不落库/不推送/不改层状态） */
+export interface EtfWatchProbe {
+  code: string;
+  name: string;
+  /** 现价（取数失败回退日线收盘） */
+  price: number;
+  /** 当日涨跌幅 % */
+  pct: number;
+  /** 当前已建层（引擎逻辑状态） */
+  heldLayers: EtfWatchLayer[];
+  /** 各层建仓价 */
+  layerEntryPrice: Record<string, number>;
+  /** 多周期读数（30m/60m/day，含 week 若有） */
+  readouts: EtfWatchTfReadout[];
+  /** 30m/60m/日线多头共振数（0-3） */
+  resonance: number;
+  /** 0-100 混合置信度（AI 失败时为 null） */
+  confidence: number | null;
+  /** AI 动作裁决 */
+  action: EtfWatchProbeAction;
+  /** AI 一句话研判（markdown） */
+  advice: string;
+  /** 资金/量价确认读数（确定性证据；无则 null） */
+  confirm: EtfConfirm | null;
+  /** 趋势阶段（确定性合成；无则 null） */
+  trendStage: EtfTrendStage | null;
+  /** 可闭眼照做的执行指令（agent 主导 + 护栏兜底；无则 null） */
+  instruction: EtfExecInstruction | null;
+  /** 关联 agent 运行 id */
+  runId: string | null;
+  /** 检测时间 ISO */
+  at: string;
+}
+
+/** /ws/etf-watch/probe 流式事件：复用 StreamEvent（agent 轨迹）+ 检测专属帧 */
+export type EtfWatchProbeStreamEvent =
+  | { type: 'probe_base'; base: EtfWatchProbeBase }
+  | { type: 'probe_done'; probe: EtfWatchProbe }
+  | StreamEvent;
+
 // ===================== LLM 调用记录分析 =====================
 
 /** LLM 调用用途分类 */
@@ -2680,6 +3179,18 @@ export interface PlanFocusSector {
   reason: string;
 }
 
+/** 盘中分时作战指引（四段，各一句话关注点；缺省段为 undefined） */
+export interface IntradayGuide {
+  /** 集合竞价（9:15-9:25）：高开/低开与外盘映射关注 */
+  auction?: string;
+  /** 早盘（9:30-11:30）：主线分歧/承接关注 */
+  morning?: string;
+  /** 午盘（13:00-14:30）：持续性/量能关注 */
+  midday?: string;
+  /** 尾盘（14:30-15:00）：资金回流/获利了结关注 */
+  tail?: string;
+}
+
 /** 计划标的项 */
 export interface DailyPlanItem {
   id: string;
@@ -2737,6 +3248,10 @@ export interface DailyPlan {
   focusSectors: PlanFocusSector[];
   externalContext: string;
   narrative: string;
+  /** 今日风险清单（AI 产出，3-5 条；旧计划为空数组） */
+  keyRisks: string[];
+  /** 盘中分时作战指引（AI 产出；旧计划为 null） */
+  intradayGuide: IntradayGuide | null;
   runId: string | null;
   reviewSummary: string | null;
   createdAt: string;
@@ -2929,6 +3444,12 @@ export interface ScheduleOverviewItem {
   duplicateGroup?: string | null;
   /** 重复风险：none=无 / time_conflict=同刻同类 / purpose_conflict=疑似同用途 */
   risk?: 'none' | 'time_conflict' | 'purpose_conflict';
+  /**
+   * 去重归属标注（G2 不静默失联）：本任务已停用、其职能由别处承担时给出人读说明，
+   * 如「已迁至外部 OpenClaw · 旺财 ETF 编排」「已并入 research.dailyAnalysis 模块定时」。
+   * 右侧启用开关即「一键恢复」。仅对 enabled=false 的项填充，否则为 null。
+   */
+  supersededBy?: string | null;
 }
 
 /** 全局安全控制状态（交易/模拟总闸） */
@@ -3312,6 +3833,20 @@ export const SCREEN_FACTOR_LABELS: Record<ScreenFactorKey, string> = {
   dragonRank: '龙头分',
 };
 
+/** 选股因子白话说明（前端 tooltip：给无量化背景用户解释每个因子看什么、越高代表什么） */
+export const SCREEN_FACTOR_DESC: Record<ScreenFactorKey, string> = {
+  midTrend: '中期上升趋势是否成立：价格站上中期均线、均线多头排列的程度。看的是中线方向，不是当天涨跌。分越高＝中线越走多。',
+  value: '估值贵不贵：市盈率 / 市净率等是否偏低。越便宜分越高（成长股策略可能弱化此项）。',
+  liquidity: '买卖好不好成交：成交额 / 换手是否充足。越活跃越不容易被一两笔大单砸盘，分越高。',
+  size: '流通市值大小：偏好中大盘还是中小盘由策略决定。分高代表更贴合该策略想要的体量。',
+  momentum: '近期涨得强不强：过去一段时间的涨幅强弱。越强分越高（追强势思路）。',
+  activity: '盘面活跃度：换手率 / 振幅等，资金参与是否积极。分越高代表当下越有人气。',
+  themeHeat: '是否踩中热门题材：结合你填的「题材上下文」与市场热点。命中当前主线题材分越高。',
+  trend: '短中期趋势方向：结合均线斜率判断向上还是向下。趋势向上分越高。',
+  fundFlow: '资金在不在买：主力 / 大单净流入情况。净流入越多分越高。',
+  dragonRank: '是不是板块龙头：在所属板块 / 题材里的龙头地位（涨幅排名、连板等）。越靠龙头分越高。',
+};
+
 /** 自然语言选股预设（nl 链路：一段自然语言 keyword 直喂妙想 mx_screener，与战法定时任务同源） */
 export interface ScreenNlStrategy {
   id: string;
@@ -3502,7 +4037,7 @@ export interface ThemesRefreshResult {
 // ===== 驾驶舱（紧凑概览 + 急停 + 事件时间线）=====
 
 /** 事件来源域 */
-export type CockpitEventKind = 'discipline' | 'trade' | 'watch' | 'decision';
+export type CockpitEventKind = 'discipline' | 'trade' | 'watch' | 'decision' | 'plan';
 
 /** 统一事件时间线条目（跨模块聚合，确定性只读） */
 export interface CockpitEvent {

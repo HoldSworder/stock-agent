@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref } from 'vue';
+import { useRoute } from 'vue-router';
 import dayjs from 'dayjs';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { Refresh, MagicStick, Plus, Delete, Setting } from '@element-plus/icons-vue';
@@ -10,6 +11,7 @@ import AiAnalysisDialog from '@/components/AiAnalysisDialog.vue';
 import BoardReviewConclusion from '@/components/BoardReviewConclusion.vue';
 import ScoreBreakdownPopover from '@/components/ScoreBreakdownPopover.vue';
 import StrengthMethodologyDrawer from '@/components/StrengthMethodologyDrawer.vue';
+import MetricScaleHint from '@/components/MetricScaleHint.vue';
 import { QuestionFilled } from '@element-plus/icons-vue';
 import { useKlineStore } from '@/stores/kline';
 import type {
@@ -31,7 +33,12 @@ const msg = (e: unknown) => (e instanceof Error ? e.message : '请求失败');
 const kline = useKlineStore();
 const openKline = (it: EtfListItem) => kline.open(it.code, it.name, it.secid);
 
-const tab = ref<'overview' | 'pool' | 'rotation'>('overview');
+// 支持外部快捷入口带 query 直达：?tab=rotation 切到轮动榜，&drill=1 自动跑「强赛道→龙头」中线下钻
+const route = useRoute();
+const initTab = route.query.tab;
+const tab = ref<'overview' | 'pool' | 'rotation'>(
+  initTab === 'rotation' || initTab === 'pool' ? initTab : 'overview',
+);
 const status = ref<EtfStatus | null>(null);
 
 // ===== Tab1 市场总览 =====
@@ -248,6 +255,11 @@ let timer: ReturnType<typeof setInterval> | undefined;
 onMounted(async () => {
   await Promise.all([loadStatus(), loadModules()]);
   await Promise.all([loadOverview(), refreshPool()]);
+  // 快捷入口直达轮动 Tab：拉轮动榜，带 drill 标志则一键跑中线下钻（强赛道→成分股→中线龙头）
+  if (tab.value === 'rotation') {
+    void loadRotation();
+    if (route.query.drill === '1') void runDrilldown();
+  }
   // 交易时段静默轮询市场总览（仅当前在总览 Tab 时刷新，省请求）
   // 轮询不强刷：仅按 TTL 检查，未过期为纯内存命中（不发请求），过期则后台静默刷新一次
   timer = setInterval(() => {
@@ -628,7 +640,10 @@ onUnmounted(() => {
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="强度" width="120">
+            <el-table-column width="120">
+              <template #header>
+                <span>强度<MetricScaleHint name="轮动强度（RS+5态）" note="相对沪深300超额 + 趋势态势，非当日涨幅。" /></span>
+              </template>
               <template #default="{ row }">
                 <ScoreBreakdownPopover
                   :title="`${row.name} 轮动强度构成`"

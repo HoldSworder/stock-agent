@@ -21,6 +21,7 @@ services:
       # 必须落在 NAS 本地磁盘（btrfs/ext4），切勿用网络挂载，否则 SQLite WAL 会损坏。
       - ${DATA_DIR:-./data}:/app/data
 
-  # 注：AKShare HTTP 服务（aktools）作为独立基础设施容器部署（与 trendradar/scrapling 一致），
-  # 建议仅绑本机端口并经反向代理以 HTTPS 暴露，故不并入本 compose。
-  # 数据源页 Base URL 填该反代地址即可。
+  # 注：AKShare HTTP 服务（aktools）与 a-stock-data sidecar 均作为独立基础设施容器部署
+  # （与 trendradar/scrapling 一致），不并入本 compose；后端在「数据源」页填各自暴露地址即可。
+  # a-stock-data 独立部署见 sidecar/a-stock-data/DEPLOY.md（mootdx 需国内 IP，部署在 NAS）。
+  # a-stock-data 稳定后可逐步替代 aktools（见 docs/aktools-to-astockdata-migration.md）。

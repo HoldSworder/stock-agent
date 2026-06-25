@@ -3,6 +3,7 @@ import type {
   MarketReviewResult,
   MarketTheme,
   MarketThemeStatus,
+  ResearchReport,
   ThemeEvidence,
   ThemePhase,
   ThemeSource,
@@ -12,14 +13,15 @@ import type {
 import { db, schema } from '../db/client';
 import { getTodayDetail } from '../plan/service';
 import { trending } from '../trendradar/service';
+import { listReports, discoverWindowDays } from '../research/service';
 import { getSectorRanking, getSectorMoneyFlow } from '../market/eastmoney';
 import { shanghaiDateStr } from '../market/calendar';
 import { newId, nowIso } from '../util';
 
 // 结构化市场主线聚合：以「东财真实板块（行业+概念涨幅榜 + 主力净流入）」为主源沉淀主线，
-// 「复盘计划 focusSectors / 热点雷达 trending」作为证据 overlay（只增强已有板块主线、不凭关键词造噪声），
+// 「复盘计划 focusSectors / 热点雷达 trending / 机构研报评级」作为证据 overlay（只增强已有板块主线、不凭关键词造噪声），
 // 按主线名归并到 market_themes，多源叠加强度、留证据痕迹，供计划/决策/板块研判统一复用。
-// 纯结构化沉淀，不调用 LLM。研报源预留同模式钩子（见 ingestFromResearch 注释）。
+// 纯结构化沉淀，不调用 LLM。四源：board（主源）+ review/hotspot/research（attachOnly overlay）。
 
 /** 退潮/归档的空闲天数阈值（按自然日近似交易日，足够区分新鲜度） */
 const FADING_AFTER_DAYS = 5;
@@ -403,9 +405,51 @@ export function ingestFromReview(jsonText: string): number {
   return n;
 }
 
-// 适配器④（预留）：研报主线 ingestFromResearch
-// 研报产出按个股/行业维度散落在 ai_analyses，结构与本模块归并键（板块名）不直接对齐，
-// 接入时在此新增 adapter 调 upsertTheme({ source: 'research', ... }) 即可，无需改其它逻辑。
+/** 适配器④（overlay）：机构研报 → 仅给「已存在的板块主线」补研报评级证据（attachOnly），
+ * 与 hotspot 同纪律——只增强已沉淀的板块主线、不凭研报凭空造主线。
+ * 仅用 listReports 元数据（行业研报 + 个股研报按 industryName 归并，统计覆盖篇数 / 评级上调数），
+ * 不抓正文，零额外 LLM 与限流成本；行业名与东财板块主源同源，归并键天然对齐。 */
+async function ingestFromResearch(date: string): Promise<number> {
+  let stock: ResearchReport[];
+  let industry: ResearchReport[];
+  try {
+    const days = discoverWindowDays();
+    [stock, industry] = await Promise.all([
+      listReports({ type: 'stock', days, pageSize: 100, page: 1 }),
+      listReports({ type: 'industry', days, pageSize: 50, page: 1 }),
+    ]);
+  } catch {
+    return 0; // 研报源异常不影响其它来源
+  }
+  const sector = new Map<string, { reports: number; upgrades: number }>();
+  const bump = (name: string | undefined, r: ResearchReport) => {
+    const key = (name ?? '').trim();
+    if (!key) return;
+    const s = sector.get(key) ?? { reports: 0, upgrades: 0 };
+    s.reports += 1;
+    const c = r.ratingChange || '';
+    if (c.includes('上调') || c.includes('首次') || ['买入', '增持'].includes(r.rating)) s.upgrades += 1;
+    sector.set(key, s);
+  };
+  for (const r of stock) bump(r.industryName, r);
+  for (const r of industry) bump(r.industryName || r.title, r);
+
+  let n = 0;
+  for (const [name, s] of sector) {
+    if (s.reports < 2 && s.upgrades < 1) continue; // 覆盖过少视为噪声
+    const strengthHint = clamp(38 + s.upgrades * 6 + s.reports * 2, 38, 70);
+    upsertTheme({
+      theme: name,
+      source: 'research',
+      strengthHint,
+      evidence: `研报：${s.reports} 篇覆盖${s.upgrades ? `·${s.upgrades} 条上调/买入` : ''}`,
+      date,
+      attachOnly: true,
+    });
+    n += 1;
+  }
+  return n;
+}
 
 /** 退潮/归档：依据 lastSeenDate 空闲天数推进状态（不删除，保留历史） */
 function archiveStale(today: string): number {
@@ -435,9 +479,15 @@ export async function refreshThemes(): Promise<ThemesRefreshResult> {
   const fromBoards = await ingestFromBoards(date);
   const fromPlan = ingestFromPlan(date);
   const fromHot = await ingestFromHotspots(date);
+  const fromResearch = await ingestFromResearch(date);
   const archived = archiveStale(date);
   const activeTotal = listThemes(false).filter((t) => t.status === 'active').length;
-  return { asOf: nowIso(), ingested: fromBoards + fromPlan + fromHot, archived, activeTotal };
+  return {
+    asOf: nowIso(),
+    ingested: fromBoards + fromPlan + fromHot + fromResearch,
+    archived,
+    activeTotal,
+  };
 }
 
 // ===== 板块主线研判（agent 过滤层）=====

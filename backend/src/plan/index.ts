@@ -40,7 +40,7 @@ export function registerPlanModule(app: FastifyInstance): void {
             {
               id: null,
               name: svc.PLAN_REEVAL_TASK_NAME,
-              prompt: svc.PLAN_REEVAL_PROMPT,
+              prompt: svc.getPlanReevalPrompt(),
               modelConfig: { thinking: false, maxSteps: 16 },
               notifyChannels: ['webui'],
               timeoutSec: 600,
@@ -58,7 +58,7 @@ export function registerPlanModule(app: FastifyInstance): void {
             {
               id: null,
               name: svc.PLAN_REVIEW_TASK_NAME,
-              prompt: svc.PLAN_REVIEW_PROMPT,
+              prompt: svc.getPlanReviewPrompt(),
               modelConfig: { thinking: false, maxSteps: 18 },
               notifyChannels: ['webui', 'telegram'],
               timeoutSec: 700,
@@ -130,7 +130,7 @@ export function registerPlanModule(app: FastifyInstance): void {
         {
           id: null,
           name: svc.PLAN_REEVAL_TASK_NAME,
-          prompt: svc.PLAN_REEVAL_PROMPT,
+          prompt: svc.getPlanReevalPrompt(),
           modelConfig: { thinking: false, maxSteps: 16 },
           notifyChannels: ['webui'],
           timeoutSec: 600,

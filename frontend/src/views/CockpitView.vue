@@ -75,10 +75,19 @@ const KIND_LABEL: Record<CockpitEvent['kind'], string> = {
   trade: '模拟成交',
   watch: '盯盘',
   decision: '研判',
+  plan: '计划',
 };
 // 类型标签仅作分类（不参与涨跌色语义），严重度由左侧语义色点表达
 const kindTag = (k: CockpitEvent['kind']) =>
-  k === 'discipline' ? 'warning' : k === 'watch' ? 'danger' : k === 'decision' ? 'primary' : 'info';
+  k === 'discipline'
+    ? 'warning'
+    : k === 'watch'
+      ? 'danger'
+      : k === 'decision'
+        ? 'primary'
+        : k === 'plan'
+          ? 'success'
+          : 'info';
 const sevDot = (s: CockpitEvent['severity']) =>
   s === 'high' ? 'high' : s === 'warn' ? 'warn' : 'info';
 // 强度热度分级，与中线雷达保持一致（hot/mid/low）
@@ -170,6 +179,20 @@ async function toggleAutoExternalSim(on: boolean) {
   }
 }
 
+// 手动强制成交闸：开启后手动单可跳过「非交易日/非交易时段」校验（如收盘后按收盘价补录）；关闭则手动强制单亦被拒。急停时一票否决，与本闸无关。
+async function toggleManualForce(on: boolean) {
+  try {
+    acting.value = true;
+    const s = await api.safety.update({ allowManualForceTrade: on });
+    if (data.value) data.value.safety = s;
+    ElMessage.success(on ? '已允许手动强制成交' : '已禁用手动强制成交');
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : String(e));
+  } finally {
+    acting.value = false;
+  }
+}
+
 const TRADE_KIND_LABEL: Record<'auto_buy' | 'auto_sell' | 'rejected', string> = {
   auto_buy: '自动买入',
   auto_sell: '自动卖出',
@@ -234,13 +257,43 @@ onUnmounted(() => {
                     />
                   </span>
                   <span class="sep">/</span>
-                  <span>手动强制 <b :class="safety.allowManualForceTrade ? 'on' : 'off'">{{ safety.allowManualForceTrade ? '允许' : '禁用' }}</b></span>
+                  <span class="sw">
+                    手动强制成交
+                    <el-switch
+                      :model-value="safety.allowManualForceTrade"
+                      :disabled="acting || safety.killSwitch"
+                      size="small"
+                      @change="(v: boolean) => toggleManualForce(v)"
+                    />
+                  </span>
+                  <span class="sep">/</span>
+                  <el-popover placement="bottom-start" :width="440" trigger="hover">
+                    <template #reference>
+                      <span class="gate-help">闸门流向 &amp; 全部开关位置 ⓘ</span>
+                    </template>
+                    <div class="gate-map">
+                      <div class="gm-title">自动模拟下单 —— 逐层放行（任一层关 = 拒单）</div>
+                      <ol>
+                        <li>① <b>未急停</b><span class="gm-loc">本驾驶舱 · 急停按钮</span></li>
+                        <li>② <b>自动本地 / 外部模拟</b> 开<span class="gm-loc">本驾驶舱 · 安全条开关</span></li>
+                        <li>
+                          ③ <b>自动模拟总闸</b> + 该战法 <b>白名单</b> 同时开
+                          <span class="gm-loc">「战法」页 · 总闸在前向验证区，白名单在战法编辑弹窗</span>
+                        </li>
+                        <li>④ <b>交易日 + 交易时段</b><span class="gm-loc">系统自动判定，无开关</span></li>
+                      </ol>
+                      <div class="gm-title">手动强制成交（本驾驶舱开关）</div>
+                      <div class="gm-note">
+                        仅放开「非交易日 / 非交易时段」校验，供收盘后按收盘价补录手动单；急停拉下时仍一票否决，与本闸无关。
+                      </div>
+                    </div>
+                  </el-popover>
                   <template v-if="safety.killSwitch && safety.killReason">
                     <span class="sep">/</span><span>原因 {{ safety.killReason }}</span>
                   </template>
                 </div>
                 <div v-if="!safety.autoLocalSimEnabled" class="safety-hint">
-                  开启后，定时任务（尾盘 1445 / 妙想 0933）方可自动为本地战法账户建仓；还需在「中枢 · 调度」启用对应任务。仅影响虚拟战法账户，绝不触及真实持仓。
+                  开启后，定时任务（尾盘 1445 / 妙想 0933）方可自动为本地战法账户建仓；还需在「中枢 · 调度」启用对应任务，并在「战法」页开自动模拟总闸 + 战法白名单。仅影响虚拟战法账户，绝不触及真实持仓。
                 </div>
               </div>
             </div>
@@ -523,6 +576,37 @@ onUnmounted(() => {
   color: var(--text-2);
   line-height: 1.5;
   max-width: 760px;
+}
+.gate-help {
+  cursor: help;
+  color: var(--brand, #409eff);
+  border-bottom: 1px dashed currentColor;
+}
+.gate-map {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text-1);
+}
+.gate-map .gm-title {
+  font-weight: 600;
+  margin: 2px 0 4px;
+}
+.gate-map ol {
+  margin: 0 0 8px;
+  padding-left: 4px;
+  list-style: none;
+}
+.gate-map ol li {
+  margin-bottom: 4px;
+}
+.gate-map .gm-loc {
+  display: block;
+  font-size: 11px;
+  color: var(--text-2);
+  padding-left: 14px;
+}
+.gate-map .gm-note {
+  color: var(--text-2);
 }
 
 /* ---- 自动成交实时流 ---- */

@@ -168,7 +168,8 @@ function buildPrompt(s: WatchSignal, cfg: WatchConfig): string {
     adversarial +
     '【严格输出】最终只输出一个 JSON 对象，无任何额外文字或代码围栏：\n';
 
-  if (s.source === 'position') {
+  // 加仓买点（plan_buy）即便落在持仓标的上，也按【买点研判】框架，避免被当卖点研判
+  if (s.source === 'position' && s.type !== 'plan_buy') {
     // 战法持仓：结论会被盯盘自动执行模拟卖出，提示 AI 审慎给结论
     const autoExecNote = s.strategyId
       ? '\n注意：你的 verdict 将被用于自动模拟卖出——【减仓】=卖出当前可卖数量的一半，【清仓】=全部可卖；不卖请给【持有】或【观望】。请严格依据本战法卖出标准审慎决定。\n'
@@ -183,10 +184,14 @@ function buildPrompt(s: WatchSignal, cfg: WatchConfig): string {
       history
     );
   }
-  // watch / scan 均按买点研判
+  // watch / scan 按买点研判；持仓 plan_buy 为「计划加仓买点」，明确这是已持仓标的的加仓机会
+  const buyIntro =
+    s.source === 'position'
+      ? '这是我【已持仓】标的的计划加仓买点信号，请研判此刻是否宜按计划加仓。\n'
+      : '这是我【自选/异动】标的的买点信号，请做买点研判。\n';
   return (
     head +
-    '这是我【自选/异动】标的的买点信号，请做买点研判。\n' +
+    buyIntro +
     common +
     '{"shouldAlert":布尔(是否值得推送提醒),"verdict":"关注|买入|跳过","advice":"一句话结论+关键依据+买点建议(竖排要点,禁用表格)"}' +
     history

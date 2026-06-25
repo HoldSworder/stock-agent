@@ -43,6 +43,21 @@ export const MID_PROFILE: StrategySellProfile = {
   trailingStop: 18,
 };
 
+/**
+ * 真实持仓 ETF 默认中线档：与战法中线档同口径（10 周线破位 / 周线高点回撤 18% / MACD 死叉告警，
+ * 过滤日内噪声、不尾盘了结），独立常量以便后续单独调参，不与战法 MID_PROFILE 耦合。
+ * 波段高抛低吸由「今日计划」的结构化触发价负责，此档仅管中线趋势破坏 + 硬止损安全垫。
+ */
+export const ETF_MID_PROFILE: StrategySellProfile = {
+  takeProfitPct: 50,
+  intradayDrawdownPct: 99,
+  stopLossPct: 12,
+  eodCutoffMin: 0,
+  maBreakPeriod: 10,
+  maBreakTimeframe: 'week',
+  trailingStop: 18,
+};
+
 /** 写回尾盘套利的卖出标准，统一 cron 与 watch 研判口径 */
 const WEIPAN_SELL_STANDARD = `T+1 尾盘动能套利卖出标准（持有不超 1-2 日）：
 1. 止盈：次日冲高，盈利达 +5%（强势主线可看 +8%）即分批/全部兑现，不贪回调。

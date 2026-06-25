@@ -10,6 +10,7 @@ import { buildDeepReviewPrompt, DEEP_REVIEW_TASK_NAME, onDeepReviewComplete } fr
 import { buildMarketBoardPrompt, buildOverview, MARKET_BOARD_TASK_NAME } from '../market/overview';
 import { ETF_ANALYZE_PROMPT, ETF_ANALYZE_TASK_NAME } from '../etf/service';
 import { INTEL_PROMPT, INTEL_TASK_NAME } from '../research/service';
+import { listWatch } from '../watchlist';
 import type { AnalysisRunCtx, AnalysisRunResult } from './registry';
 import { registerKind } from './registry';
 
@@ -132,6 +133,67 @@ registerKind('intel', {
   skipAutoSave: true,
   loadHistory: (limit) => taskRunHistory('intel', listIntelReviews(limit)),
   scheduleRef: { module: 'research', jobId: 'research.dailyAnalysis' },
+});
+
+// ===== 自选：单只研判（perStock）+ 组合轮动研判（global） =====
+// 原 server.ts 内联 POST /api/watchlist/:code/analyze 与 /api/watchlist/analyze 两条同步路由收编为统一 kind，
+// 复用 /ws/analyze 流式轨迹 + /api/analyses 历史，server.ts 瘦身。默认路径自动落 ai_analyses（按 refKey 作用域）。
+
+/** 自选单只研判 prompt：命中自选则带标签/备注，否则按通用个股研判。 */
+function buildWatchlistStockPrompt(params: Record<string, unknown>): string {
+  const code = String(params.code ?? '').trim();
+  if (!code) throw new Error('缺少标的代码');
+  const item = listWatch().find((i) => i.code === code);
+  const name = item?.name ?? code;
+  return (
+    `请对关注标的 ${name}(${code}) 做个股研判：` +
+    '用 mx_finance_data 查实时量价/资金流/估值与涨跌停价，用 mx_search 查最新消息面与公告，' +
+    (item?.tags ? `结合标签【${item.tags}】所属主线，` : '') +
+    (item?.note ? `参考我的备注【${item.note}】，` : '') +
+    '给出：当前所处位置与趋势、关键支撑/压力位、买卖点建议、主要风险提示。' +
+    '结论精炼、分点、给依据，禁止 Markdown 表格。'
+  );
+}
+
+registerKind('watchlist-stock', {
+  taskName: '自选个股研判',
+  title: '自选个股研判',
+  group: '持仓',
+  scope: 'perStock',
+  buildPrompt: buildWatchlistStockPrompt,
+  preflight: (p) => {
+    if (!String(p.code ?? '').trim()) throw new Error('缺少标的代码');
+  },
+  deriveRefKey: (p) => String(p.code ?? '').trim() || null,
+  modelConfig: { thinking: false, maxSteps: 10 },
+  timeoutSec: 300,
+});
+
+/** 自选组合轮动研判 prompt：取全部关注标的做组合层面研判。 */
+function buildWatchlistComboPrompt(): string {
+  const items = listWatch();
+  if (items.length === 0) throw new Error('关注列表为空');
+  const list = items
+    .map((i) => `${i.name}(${i.code})${i.tags ? ` [${i.tags}]` : ''}`)
+    .join('、');
+  return (
+    `以下是我的关注标的清单：${list}。` +
+    '请逐只用 mx_finance_data 查实时量价/资金/估值，必要时用 mx_search 补充消息面，' +
+    '做一次组合层面的轮动研判：逐只给当前位置与买卖点倾向，再综合排序当前最值得关注/最该回避的标的及理由，并给风险提示。' +
+    '结论精炼、分点、给依据，禁止 Markdown 表格。'
+  );
+}
+
+registerKind('watchlist-combo', {
+  taskName: '自选组合研判',
+  title: '自选组合研判',
+  group: '持仓',
+  buildPrompt: buildWatchlistComboPrompt,
+  preflight: () => {
+    if (listWatch().length === 0) throw new Error('关注列表为空');
+  },
+  modelConfig: { thinking: false, maxSteps: 12 },
+  timeoutSec: 300,
 });
 
 // ===== 决策：仅入目录（perStock）。发起仍走 /ws/decision 自有结构化落库，中心只读其 ai_analyses 历史 =====

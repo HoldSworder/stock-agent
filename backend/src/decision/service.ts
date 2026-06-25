@@ -16,6 +16,7 @@ import type { KlineBar } from '@stock-agent/shared';
 import {
   getIndexSnapshot,
   getKline,
+  getQuotes,
   getQuoteWithLimits,
   getSectorMoneyFlow,
   getStockDragonStatus,
@@ -28,6 +29,7 @@ import { formatStockDragon } from '../dragon/service';
 import { getStockCapital, formatCapitalForAgent } from '../capital/service';
 import { computeIndicators, getStockIndicators, formatIndicatorsForAgent } from '../market/indicators';
 import { indexSecidCandidates, type IndexDef } from './indices';
+import { computeMetrics, fetchEtfQuote, fetchEtfSnapshot, type EtfMetrics } from '../etf/data';
 import { getChipDistribution, formatChipForAgent } from '../market/chip';
 import { getDragonTiger, getFinancialStatements, getLockupAndHolders, getStockValuation } from '../market/datacenter';
 import { fetchRealPositions } from '../realPositions';
@@ -390,6 +392,40 @@ async function computeSectorNote(code: string, signal: AbortSignal | undefined, 
 }
 
 /**
+ * 个股实时行情（本地免费源，免妙想额度）：现价/涨跌幅/昨收/成交额/振幅/换手/量比/涨跌停/当日主力净流入。
+ * 取数与 stock_quotes 工具同款（东财 push2 → 网易自动兜底）；PE/PB 由 valuationNote 覆盖、
+ * 所属行业与概念板块由 sectorNote 覆盖，故不在此查，避免占用妙想日配额。
+ */
+async function computeQuoteNote(code: string, signal?: AbortSignal): Promise<string> {
+  const [quotes, lim, flows] = await Promise.all([
+    getQuotes([code]).catch(() => []),
+    getQuoteWithLimits(code).catch(() => null),
+    getStockFundFlow(code, 1).catch(() => []),
+  ]);
+  if (signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+  const q = quotes[0];
+  if (!q && !lim) return '行情数据不可用（本地免费源请求失败）。';
+  const name = q?.name || lim?.name || '';
+  const price = q?.price ?? lim?.price ?? 0;
+  const parts = [`${name}(${code}) 现价${price}`];
+  if (q) {
+    parts.push(`涨跌幅${q.pct >= 0 ? '+' : ''}${q.pct}%`);
+    parts.push(`昨收${q.prevClose}`);
+    parts.push(`成交额${q.amount.toFixed(1)}亿`);
+    if (q.amplitude != null) parts.push(`振幅${q.amplitude}%`);
+    if (q.turnoverRate != null) parts.push(`换手${q.turnoverRate}%`);
+    if (q.volumeRatio != null) parts.push(`量比${q.volumeRatio}`);
+  }
+  if (lim) parts.push(`涨停${lim.limitUp}`, `跌停${lim.limitDown}`);
+  const last = flows.length ? flows[flows.length - 1] : null;
+  if (last) {
+    const inflow = last.main / 1e8;
+    parts.push(`主力净流入${inflow >= 0 ? '+' : ''}${inflow.toFixed(2)}亿(东财口径)`);
+  }
+  return parts.join(' ');
+}
+
+/**
  * 当日分时/盘口（getTrends，腾讯优先东财兜底）：现价/涨跌、振幅、相对均价线、尾盘约30分钟强弱与量占比。
  * 对"真实持仓-1440-卖点检查"调用方价值最高（盘中尾盘是否还有承接）。空数据降级占位。
  */
@@ -630,15 +666,8 @@ async function prefetch(input: DecisionInput, opts: RunDecisionOptions): Promise
     chipsNote,
     klineBundle,
   ] = await Promise.all([
-    safe(
-      () =>
-        miaoxiang.financeData(
-          `${input.code} 的实时行情：现价、今日涨跌幅、涨停价、跌停价、换手率、量比、主力资金净流入、市盈率、市净率、所属行业与概念板块`,
-          opts.signal,
-        ),
-      '妙想行情数据不可用（未配置 MX_APIKEY 或请求失败）。',
-      3000,
-    ),
+    // 行情：本地免费源组装（东财 push2，免妙想额度）。PE/PB 由 valuationNote、行业概念由 sectorNote 覆盖
+    safe(() => computeQuoteNote(input.code, opts.signal), '行情数据不可用（本地免费源请求失败）。', 3000),
     // 研报增强：个股研报（窗口放宽）+ best-effort 近期行业研报动态
     safe(async () => {
       const [stockReports, industryReports] = await Promise.all([
@@ -1918,6 +1947,486 @@ export async function runIndexDecision(def: IndexDef, opts: RunDecisionOptions =
     narrative: '',
   };
   result.narrative = buildIndexNarrative(result);
+
+  // 末尾合成 token 事件：把最终叙述推给前端实时态展示
+  opts.onEvent?.({ type: 'token', text: `\n\n${result.narrative}` });
+  await sleep(0);
+  return result;
+}
+
+// ===== ETF 辩论决策（独立精简链路，方向研判）=====
+// ETF 是普通 6 位 secid，K线/技术指标/资金流/分时均直接复用个股取数；只把个股基本面块（财报/筹码/
+// 龙虎榜/解禁/估值/连板）换成 ETF 专属块（折溢价/规模/动量/年线偏离/价格分位/波动）。与指数链路同构：
+// 只给方向研判（看多加仓/中性/看空减仓 + 建议仓位 + 目标/止损价），不拟单、不联动持仓、不进反思闭环。
+
+/** ETF 动作语义标签 */
+const ETF_ACTION_LABELS: Record<DecisionAction, string> = {
+  buy: '看多加仓',
+  add: '加仓',
+  hold: '中性观望',
+  reduce: '减仓',
+  sell: '看空清仓',
+};
+
+/** ETF 实时行情/折溢价文本 */
+function formatEtfQuote(q: Awaited<ReturnType<typeof fetchEtfQuote>>): string {
+  const parts: string[] = [];
+  if (q.price != null) {
+    parts.push(`现价 ${q.price}${q.pct != null ? `（${q.pct >= 0 ? '+' : ''}${q.pct}%）` : ''}${q.prevClose != null ? `，昨收 ${q.prevClose}` : ''}`);
+  }
+  if (q.iopv != null) parts.push(`IOPV 参考净值 ${q.iopv}`);
+  if (q.premiumPct != null) {
+    parts.push(`折溢价率 ${q.premiumPct >= 0 ? '+' : ''}${q.premiumPct}%（${q.premiumPct >= 0 ? '溢价' : '折价'}，套利参考）`);
+  } else if (q.iopv != null && q.price != null && q.iopv > 0) {
+    const prem = (q.price / q.iopv - 1) * 100;
+    parts.push(`折溢价率约 ${prem >= 0 ? '+' : ''}${prem.toFixed(2)}%（按 IOPV 估算）`);
+  }
+  return parts.length ? parts.join('\n') : 'ETF 实时行情/折溢价不可用。';
+}
+
+/** ETF 确定性指标文本（年线偏离/价格分位/动量/波动/年内区间） */
+function formatEtfMetrics(m: EtfMetrics): string {
+  if (m.barCount < 20) return 'ETF 历史指标数据不足。';
+  const f2 = (v: number | null): string => (v != null ? v.toFixed(2) : '—');
+  const fp = (v: number | null): string => (v != null ? `${v >= 0 ? '+' : ''}${v.toFixed(2)}%` : '—');
+  const lines = [
+    `均线：MA20 ${f2(m.ma20)} / MA60 ${f2(m.ma60)} / MA250 ${f2(m.ma250)}${m.maDeviation != null ? `（年线偏离 ${fp(m.maDeviation)}）` : ''}`,
+    `区间收益：近20日 ${fp(m.ret20)}，近60日 ${fp(m.ret60)}，近120日 ${fp(m.ret120)}；动量打分 ${m.momentum != null ? m.momentum.toFixed(2) : '—'}（绝对动量${m.absMomentumPositive ? '为正' : '为负/缺失'}）`,
+  ];
+  if (m.pricePercentile != null) lines.push(`价格分位（近2年）约 ${m.pricePercentile.toFixed(0)}%（越低越便宜）`);
+  if (m.volatility != null) lines.push(`年化波动率 ${m.volatility.toFixed(1)}%`);
+  if (m.yearLow != null && m.yearHigh != null) lines.push(`年内区间 [${f2(m.yearLow)}, ${f2(m.yearHigh)}]`);
+  return lines.join('\n');
+}
+
+/** ETF 规模/成交/资金文本 */
+function formatEtfSize(s: Awaited<ReturnType<typeof fetchEtfSnapshot>>): string {
+  const parts: string[] = [];
+  if (s.aum != null) parts.push(`规模 ${s.aum.toFixed(2)} 亿${s.aum < 2 ? '（偏小，留意流动性/清盘风险）' : ''}`);
+  if (s.amount != null) parts.push(`当日成交额 ${s.amount.toFixed(2)} 亿`);
+  if (s.turnoverRate != null) parts.push(`换手率 ${s.turnoverRate.toFixed(2)}%`);
+  if (s.netInflow != null) parts.push(`当日主力净${s.netInflow >= 0 ? '流入' : '流出'} ${Math.abs(s.netInflow).toFixed(2)} 亿`);
+  return parts.length ? parts.join('，') : 'ETF 规模/成交/资金数据不可用。';
+}
+
+/** 预取的 ETF 上下文 */
+interface EtfPrefetchContext {
+  name: string;
+  /** 实时行情 + IOPV/折溢价 */
+  quoteNote: string;
+  /** 确定性指标：年线偏离/价格分位/动量/波动/年内区间 */
+  metricsNote: string;
+  /** 规模/成交额/换手/当日主力净流入 */
+  sizeNote: string;
+  /** 60 日线衍生技术位 */
+  klineNote: string;
+  /** 近 20 日逐日量价序列 */
+  seriesNote: string;
+  /** 技术指标库：MACD/KDJ/RSI/BOLL */
+  indicatorsNote: string;
+  /** 主力资金多日序列（东财，best-effort） */
+  fundFlowNote: string;
+  /** 大盘宏观环境 */
+  marketNote: string;
+  /** 最近一次大盘复盘结论 */
+  marketStanceNote: string;
+  /** 消息面 */
+  newsNote: string;
+  /** 政策/产业面 */
+  policyNote: string;
+  /** 全网热点 */
+  hotspotNote: string;
+}
+
+/** 并行预取 ETF 数据（全部 best-effort 降级，不占辩论 step） */
+async function prefetchEtf(code: string, opts: RunDecisionOptions): Promise<EtfPrefetchContext> {
+  ensureNotAborted(opts.signal);
+  const id = newId();
+  opts.onEvent?.({ type: 'tool_call', id, name: 'ETF 数据预取', args: code });
+
+  const mxReady = !!getValue('mxApiKey');
+  // ETF 行情先取，拿名称与现价（供 computeMetrics 基准价 + 后续检索名）
+  const etfQuote = await fetchEtfQuote(code).catch(() => null);
+  const name = etfQuote?.name || code;
+  // ETF 6 位 K 线免 secid
+  const bars = await getKline(code, 'day', 60).catch(() => [] as KlineBar[]);
+
+  const [quoteNote, metricsNote, sizeNote, fundFlowNote, marketNote, marketStanceNote, newsNote, policyNote, hotspotNote] =
+    await Promise.all([
+      Promise.resolve(etfQuote ? formatEtfQuote(etfQuote) : 'ETF 实时行情/折溢价不可用。'),
+      safe(async () => formatEtfMetrics(await computeMetrics(code, etfQuote?.price ?? null)), 'ETF 指标数据不可用。', 1200),
+      safe(async () => formatEtfSize(await fetchEtfSnapshot(code)), 'ETF 规模/资金数据不可用。', 600),
+      // 主力资金多日序列（东财 fflow，best-effort；ETF 无北向/两融，故不复用 computeFundFlowNote）
+      safe(async () => {
+        const days = await getStockFundFlow(code, 6).catch(() => []);
+        if (!days.length) return '主力资金多日数据不可用。';
+        const yi = (v: number): string => `${v / 1e8 >= 0 ? '+' : ''}${(v / 1e8).toFixed(2)}亿`;
+        const cumMain = days.reduce((a, d) => a + d.main, 0) / 1e8;
+        const posDays = days.filter((d) => d.main > 0).length;
+        const rows = days.map((d) => `${d.date.slice(5)} 收${d.close.toFixed(2)}(${fmtPct(d.pct)}) 主力${yi(d.main)}(占比${d.mainPct.toFixed(1)}%)`);
+        return `近${days.length}日主力资金（东财）：累计净${cumMain >= 0 ? '+' : ''}${cumMain.toFixed(2)}亿，净流入 ${posDays}/${days.length} 日\n${rows.join('\n')}`;
+      }, '主力资金多日数据不可用。', 1500),
+      // 大盘宏观环境（复用 buildOverview）
+      safe(async () => {
+        const ov = await buildOverview();
+        return JSON.stringify({
+          indices: ov.indices,
+          globalIndices: ov.globalIndices?.slice(0, 12),
+          futures: ov.futures?.slice(0, 12),
+          turnoverTotal: ov.turnoverTotal,
+          emotion: ov.emotion,
+          hotIndustries: ov.hotIndustries?.slice(0, 6),
+          hotConcepts: ov.hotConcepts?.slice(0, 6),
+        });
+      }, '大盘快照不可用。', 3000),
+      // 最近一次大盘复盘结论
+      safe(async () => {
+        const reviewRows = listReviews(1);
+        const text = reviewRows[0]?.outputText;
+        if (!text) return '暂无最近大盘复盘。';
+        let r: Record<string, unknown>;
+        try {
+          r = JSON.parse(text) as Record<string, unknown>;
+        } catch {
+          return '大盘复盘解析失败。';
+        }
+        const parts: string[] = [];
+        if (typeof r.marketTrend === 'string' && r.marketTrend) parts.push(`大盘走势：${r.marketTrend}`);
+        const cs = r.comprehensiveStance as { bias?: string; summary?: string } | null | undefined;
+        if (cs && (cs.bias || cs.summary)) parts.push(`综合定调：${cs.bias ?? ''} ${cs.summary ?? ''}`.trim());
+        const themes = Array.isArray(r.mainThemes) ? (r.mainThemes as Array<{ name?: string; strength?: string }>) : [];
+        if (themes.length) parts.push('主线题材：' + themes.slice(0, 4).map((m) => `${m.name ?? ''}(${m.strength ?? ''})`).join('、'));
+        return parts.join('\n') || '暂无大盘复盘要点。';
+      }, '大盘复盘不可用。', 2000),
+      // 消息面
+      safe(async () => {
+        const news = await trendradar.searchNews(name, 20).catch(() => []);
+        const parts: string[] = [];
+        if (news.length) parts.push('热榜新闻：\n' + news.map((n) => `[${n.platformName || n.platform}] ${n.title}`).join('\n'));
+        if (mxReady) {
+          try {
+            parts.push('妙想消息面：\n' + clip(await miaoxiang.search(`${name} 跟踪赛道近期重要新闻、机构观点`, opts.signal), 2000));
+          } catch {
+            /* MX 增补失败：仅用热榜 */
+          }
+        }
+        return parts.join('\n\n') || '暂无消息面数据。';
+      }, '消息面不可用。', 3000),
+      // 政策/产业面
+      safe(async () => {
+        const news = await trendradar.searchNews(`${name} 政策 产业`, 15).catch(() => []);
+        const parts: string[] = [];
+        if (news.length) parts.push('政策相关热榜：\n' + news.map((n) => `[${n.platformName || n.platform}] ${n.title}`).join('\n'));
+        if (mxReady) {
+          try {
+            parts.push('妙想政策面：\n' + clip(await miaoxiang.search(`${name} 跟踪赛道最新政策、监管动向与产业趋势`, opts.signal), 2000));
+          } catch {
+            /* MX 增补失败：仅用热榜 */
+          }
+        }
+        return parts.join('\n\n') || '暂无政策面数据。';
+      }, '政策面不可用。', 2500),
+      // 全网热点
+      safe(async () => {
+        const [topics, news] = await Promise.all([
+          trendradar.trending(15).catch(() => []),
+          trendradar.searchNews(name, 20).catch(() => []),
+        ]);
+        const parts: string[] = [];
+        if (topics.length) parts.push('全网热点话题：' + topics.map((t) => `${t.keyword}(热度${t.frequency}/命中${t.matchedNews})`).join('  '));
+        if (news.length) parts.push('相关热榜新闻：\n' + news.map((n) => `[${n.platformName || n.platform}] ${n.title}`).join('\n'));
+        return parts.join('\n\n') || '暂无热点数据。';
+      }, 'TrendRadar 热点不可用。', 3000),
+    ]);
+
+  const klineNote = clip(computeIndexKlineNote(bars) || 'K 线数据不可用。', 1500);
+  const seriesNote = clip(computeIndexSeriesNote(bars), 1500);
+  const indicatorsNote = bars.length
+    ? clip(formatIndicatorsForAgent(computeIndicators(name, bars, 'day')), 1200)
+    : '技术指标数据不可用。';
+
+  opts.onEvent?.({
+    type: 'tool_result',
+    id,
+    name: 'ETF 数据预取',
+    ok: true,
+    preview: `已取齐 ${name}(${code}) 行情/折溢价/规模资金/动量分位/K线(技术位+20日序列)/技术指标/资金流多日/大盘宏观/消息/政策/热点`,
+  });
+
+  return {
+    name,
+    quoteNote,
+    metricsNote,
+    sizeNote,
+    klineNote,
+    seriesNote,
+    indicatorsNote,
+    fundFlowNote,
+    marketNote,
+    marketStanceNote,
+    newsNote,
+    policyNote,
+    hotspotNote,
+  };
+}
+
+// ETF 分析师（独立精简，内联职责，不写入 agentConfig 个股注册表）
+type EtfDataKey =
+  | 'quote'
+  | 'metrics'
+  | 'size'
+  | 'kline'
+  | 'series'
+  | 'indicators'
+  | 'fundFlow'
+  | 'market'
+  | 'stance'
+  | 'news'
+  | 'policy'
+  | 'hotspot';
+interface EtfAnalystMeta {
+  role: string;
+  focus: string;
+  dataKeys: EtfDataKey[];
+}
+const ETF_ANALYST_ROLES: EtfAnalystMeta[] = [
+  {
+    role: '趋势分析师',
+    focus: '判断 ETF 当前所处的中线趋势阶段（上升/震荡/下降、主升浪/回调/筑底），结合均线排列、年线偏离、价格分位、动量与量价配合给出趋势强弱与拐点信号',
+    dataKeys: ['kline', 'series', 'metrics', 'quote'],
+  },
+  {
+    role: '技术面分析师',
+    focus: '基于 MACD/KDJ/RSI/BOLL 指标共振与关键技术位（支撑/压力、超买超卖）判断短中期方向与风险位',
+    dataKeys: ['indicators', 'kline', 'quote'],
+  },
+  {
+    role: 'ETF特性分析师',
+    focus: '从折溢价（套利信号）、规模与流动性（清盘/冲击风险）、资金流向判断 ETF 自身的交易属性与申赎情绪',
+    dataKeys: ['quote', 'size', 'fundFlow'],
+  },
+  {
+    role: '宏观环境分析师',
+    focus: '从大盘整体环境、外盘联动、情绪与资金面判断该 ETF 跟踪赛道所处的宏观背景是顺风还是逆风',
+    dataKeys: ['market', 'stance'],
+  },
+  {
+    role: '消息政策分析师',
+    focus: '从跟踪赛道相关消息面、政策/监管动向与全网热点判断题材的催化与压制因素',
+    dataKeys: ['news', 'policy', 'hotspot'],
+  },
+];
+
+/** 组装 ETF 分析师 prompt：按 dataKeys 精简注入预取上下文，首行表态 */
+function buildEtfAnalystPrompt(meta: EtfAnalystMeta, code: string, ctx: EtfPrefetchContext): string {
+  const note: Record<EtfDataKey, string> = {
+    quote: ctx.quoteNote,
+    metrics: ctx.metricsNote,
+    size: ctx.sizeNote,
+    kline: ctx.klineNote,
+    series: ctx.seriesNote,
+    indicators: ctx.indicatorsNote,
+    fundFlow: ctx.fundFlowNote,
+    market: ctx.marketNote,
+    stance: ctx.marketStanceNote,
+    news: ctx.newsNote,
+    policy: ctx.policyNote,
+    hotspot: ctx.hotspotNote,
+  };
+  const header: Record<EtfDataKey, string> = {
+    quote: '=== ETF 实时行情/折溢价 ===',
+    metrics: '=== 确定性指标：年线偏离/价格分位/动量/波动/年内区间 ===',
+    size: '=== 规模/成交/资金 ===',
+    kline: '=== K线技术位（东财60日线）===',
+    series: '=== 近20日逐日量价序列 ===',
+    indicators: '=== 技术指标库：MACD/KDJ/RSI/BOLL ===',
+    fundFlow: '=== 主力资金多日序列（东财）===',
+    market: '=== 大盘宏观环境（含外盘/期货/情绪）===',
+    stance: '=== 最近大盘复盘结论 ===',
+    news: '=== 消息面 ===',
+    policy: '=== 政策/产业面 ===',
+    hotspot: '=== 全网热点 ===',
+  };
+  const data = meta.dataKeys
+    .map((k) => (note[k]?.trim() ? `${header[k]}\n${note[k]}` : ''))
+    .filter(Boolean)
+    .join('\n\n');
+  return (
+    `你是一名【${meta.role}】，负责对 ETF ${ctx.name}(${code}) 做单一维度的中线趋势/择时研判（指数化基金，非个股）。\n` +
+    `只聚焦：${meta.focus}。\n` +
+    '基于下方已取好的数据，给出该维度结论，务必精炼（≤200 字），首行用「倾向：偏多/偏空/中性」表态，' +
+    '其后分点列依据。禁止编造未出现的数字，数据缺失则明说。\n\n' +
+    data
+  );
+}
+
+/** 组装 ETF 研判的 Markdown 叙述（去掉 Trader 段，措辞为 ETF 研判） */
+function buildEtfNarrative(r: DecisionResult): string {
+  const lines: string[] = [];
+  lines.push(`## ${r.name}(${r.code}) ETF研判：${ETF_ACTION_LABELS[r.action]}（置信度 ${r.confidence}）`);
+  const kv: string[] = [];
+  if (r.targetPrice != null) kv.push(`目标价 ${r.targetPrice}`);
+  if (r.stopLoss != null) kv.push(`止损价 ${r.stopLoss}`);
+  if (r.positionPct != null) kv.push(`建议仓位 ${r.positionPct}%`);
+  if (kv.length) lines.push(kv.join(' ｜ '));
+  lines.push('', `**核心逻辑**：${r.thesis}`);
+  if (r.keyRisks.length) lines.push('', '**关键风险**', ...r.keyRisks.map((x) => `- ${x}`));
+  lines.push('', '### 分析师研判');
+  for (const a of r.analystReports) lines.push(`- **${a.role}（${a.stance}）**：${a.summary}`);
+  lines.push('', '### 多空辩论', `**多头**：${r.bullView}`, '', `**空头**：${r.bearView}`, '', `**研究总监裁决**：${r.judgeView}`);
+  if (r.riskDebate) {
+    lines.push(
+      '',
+      '### 三方风险辩论',
+      `**激进派**：${r.riskDebate.aggressive}`,
+      '',
+      `**中立派**：${r.riskDebate.neutral}`,
+      '',
+      `**保守派**：${r.riskDebate.conservative}`,
+      '',
+      `**风控组长裁决**：${r.riskDebate.verdict}`,
+    );
+  }
+  return lines.join('\n');
+}
+
+/**
+ * 运行一次 ETF 辩论决策（独立精简链路，方向研判）。永不裸抛业务错误（取数已降级）；
+ * abort 时抛 AbortError 由调用方收口。不写交易记忆/裁决缓存（ETF 不进个股反思闭环）。
+ */
+export async function runEtfDecision(code: string, opts: RunDecisionOptions = {}): Promise<DecisionResult> {
+  const cfg = readConfig();
+
+  // 1) 数据预取
+  const ctx = await prefetchEtf(code, opts);
+  const label = `${ctx.name}(${code})`;
+
+  // 2) ETF 分析师层（全部并行，轻模型）
+  const analystOutputs = await Promise.all(
+    ETF_ANALYST_ROLES.map((meta) => stage(meta.role, buildEtfAnalystPrompt(meta, code, ctx), cfg.quickModel, opts)),
+  );
+  const analystReports = ETF_ANALYST_ROLES.map((meta, i) => {
+    const out = analystOutputs[i];
+    const firstLine = out.split('\n')[0] ?? '';
+    const m = firstLine.match(/倾向[：:]\s*(偏多|偏空|中性|看多|看空)/);
+    return { role: meta.role, stance: m?.[1] ?? '中性', summary: out };
+  });
+  const analystDigest = analystReports.map((a) => `【${a.role}】\n${a.summary}`).join('\n\n');
+
+  // 3) 多空辩论（多轮，轻模型）
+  let bullView = '';
+  let bearView = '';
+  let transcript = '';
+  for (let round = 1; round <= cfg.rounds; round += 1) {
+    const roundTag = cfg.rounds > 1 ? `（第${round}/${cfg.rounds}轮）` : '';
+    bullView = await stage(
+      `多头研究员${roundTag}`,
+      `${getInstruction(AGENT_KEYS.bull)}\n标的：ETF ${label}（判断 ETF 中线方向，非个股）` +
+        (bearView ? `\n\n空头上一轮观点（需反驳）：\n${bearView}` : '') +
+        `\n\n=== 分析师结论 ===\n${analystDigest}`,
+      cfg.quickModel,
+      opts,
+    );
+    bearView = await stage(
+      `空头研究员${roundTag}`,
+      `${getInstruction(AGENT_KEYS.bear)}\n标的：ETF ${label}（判断 ETF 中线方向，非个股）` +
+        `\n\n多头本轮观点（需反驳）：\n${bullView}` +
+        `\n\n=== 分析师结论 ===\n${analystDigest}`,
+      cfg.quickModel,
+      opts,
+    );
+    transcript += `${roundTag || `第${round}轮`}\n多头：${bullView}\n空头：${bearView}\n\n`;
+  }
+
+  // 研究总监裁决（重模型）
+  const judgeView = await stage(
+    '研究总监',
+    `${getInstruction(AGENT_KEYS.judge)}\n标的：ETF ${label}（判断 ETF 中线方向，非个股）` +
+      `\n\n=== 多空辩论 ===\n${transcript}\n=== 分析师结论 ===\n${analystDigest}`,
+    cfg.deepModel,
+    opts,
+  );
+
+  // 4) 三方风险辩论 + 风控组长裁决（可关闭；轻模型）
+  let riskDebate: DecisionRiskDebate | null = null;
+  if (cfg.riskEnabled) {
+    const views: Partial<Record<keyof Omit<DecisionRiskDebate, 'verdict'>, string>> = {};
+    for (let round = 1; round <= cfg.riskRounds; round += 1) {
+      const roundTag = cfg.riskRounds > 1 ? `（第${round}/${cfg.riskRounds}轮）` : '';
+      for (const s of RISK_STYLES) {
+        const prior = RISK_STYLES.filter((x) => views[x.key])
+          .map((x) => `${x.role}：${views[x.key]}`)
+          .join('\n');
+        views[s.key] = await stage(
+          `${s.role}${roundTag}`,
+          `你是【${s.role}】，风格：${getInstruction(s.agentKey)}。针对 ETF ${label} 的方向研判，` +
+            '从仓位控制、回撤风险、盈亏比角度审查下方裁决，给出你的风险立场与建议仓位/止损位（≤140 字）。' +
+            `\n\n=== 研究总监裁决 ===\n${judgeView}` +
+            (prior ? `\n\n=== 其他风控观点 ===\n${prior}` : ''),
+          cfg.quickModel,
+          opts,
+        );
+      }
+    }
+    const verdict = await stage(
+      '风控组长裁决',
+      `${getInstruction(AGENT_KEYS.riskChair)}` +
+        `\n\n=== 三方风控观点 ===\n` +
+        RISK_STYLES.map((s) => `【${s.role}】${views[s.key] ?? ''}`).join('\n'),
+      cfg.quickModel,
+      opts,
+    );
+    riskDebate = {
+      aggressive: views.aggressive ?? '',
+      neutral: views.neutral ?? '',
+      conservative: views.conservative ?? '',
+      verdict,
+    };
+  }
+
+  // 5) 最终结构化决策（重模型）
+  const decisionText = await stage(
+    '最终决策',
+    `${getInstruction(AGENT_KEYS.pm)}\n标的：ETF ${label}` +
+      '\n这是对【ETF】的中线趋势/择时研判：action 表示对该 ETF 的方向——' +
+      'buy/add=看多加仓 / hold=中性观望 / reduce/sell=看空减仓；targetPrice/stopLoss 为 ETF 价位，positionPct 为建议仓位。' +
+      '\n【严格输出】只输出一个合法 JSON 对象（闭合所有括号），不要任何额外文字或 Markdown 围栏，结构如下：\n' +
+      '{"action":"buy|add|hold|reduce|sell","confidence":0-100的整数,' +
+      '"targetPrice":数字或null,"stopLoss":数字或null,"positionPct":0-100数字或null,' +
+      '"thesis":"核心逻辑(≤80字)","keyRisks":["风险1","风险2"]}\n' +
+      '价格类字段必须基于已确认的真实价位，无依据则置 null。\n\n' +
+      `=== 研究总监裁决 ===\n${judgeView}\n\n` +
+      (riskDebate ? `=== 风控组长裁决 ===\n${riskDebate.verdict}\n\n` : '') +
+      `=== ETF 行情参考 ===\n${ctx.quoteNote}`,
+    cfg.deepModel,
+    opts,
+  );
+
+  const parsed = parseDecisionJson(decisionText) ?? {};
+  const action = asAction(parsed.action);
+  const confidenceNum = asNum(parsed.confidence);
+  const result: DecisionResult = {
+    code,
+    name: ctx.name,
+    action,
+    confidence: confidenceNum != null ? Math.max(0, Math.min(100, Math.round(confidenceNum))) : 50,
+    targetPrice: asNum(parsed.targetPrice),
+    stopLoss: asNum(parsed.stopLoss),
+    positionPct: asNum(parsed.positionPct),
+    thesis: typeof parsed.thesis === 'string' && parsed.thesis ? parsed.thesis : judgeView.slice(0, 120),
+    keyRisks: Array.isArray(parsed.keyRisks)
+      ? (parsed.keyRisks as unknown[]).map((x) => String(x)).filter(Boolean).slice(0, 6)
+      : [],
+    analystReports,
+    bullView,
+    bearView,
+    judgeView,
+    traderPlan: null,
+    riskDebate,
+    memoryUsed: [],
+    narrative: '',
+  };
+  result.narrative = buildEtfNarrative(result);
 
   // 末尾合成 token 事件：把最终叙述推给前端实时态展示
   opts.onEvent?.({ type: 'token', text: `\n\n${result.narrative}` });

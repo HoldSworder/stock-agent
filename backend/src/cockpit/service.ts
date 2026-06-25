@@ -7,6 +7,7 @@ import type {
   DecisionVerdictCache,
   DisciplineEvent,
   MarketReviewResult,
+  PlanItemStatus,
   SimTrade,
   WatchAlert,
 } from '@stock-agent/shared';
@@ -115,7 +116,48 @@ function tradeEvents(limit: number): CockpitEvent[] {
   });
 }
 
-/** 合并四类事件，按时间倒序取前 limit 条 */
+// 今日计划标的状态 → 计划事件（确定性派生，时间取标的最近状态变更 updatedAt）：
+// 已触发/已完成（命中）、已失效（逻辑被破），收盘后把仍 pending 的标记「未执行」（盘中不计，避免刷屏）。
+// 直接回应「计划兑现度数据已算但时间线没体现」——把计划 vs 执行的偏离呈现在驾驶舱一屏。
+const PLAN_STATUS_META: Record<
+  Exclude<PlanItemStatus, 'pending'>,
+  { label: string; severity: CockpitEvent['severity'] }
+> = {
+  triggered: { label: '已触发', severity: 'info' },
+  done: { label: '已完成', severity: 'info' },
+  invalid: { label: '已失效', severity: 'warn' },
+};
+
+function planEvents(): CockpitEvent[] {
+  const detail = getTodayDetail();
+  if (!detail) return [];
+  const closed = detail.plan.status === 'closed';
+  const events: CockpitEvent[] = [];
+  for (const it of detail.items) {
+    let label: string;
+    let severity: CockpitEvent['severity'];
+    if (it.status === 'pending') {
+      if (!closed) continue; // 盘中待触发不算事件
+      label = '未执行';
+      severity = 'info';
+    } else {
+      ({ label, severity } = PLAN_STATUS_META[it.status]);
+    }
+    events.push({
+      id: `plan:${it.id}`,
+      at: it.updatedAt,
+      kind: 'plan',
+      severity,
+      title: `计划 · ${it.name || it.code}（${label}）`,
+      detail: it.lastNote || it.thesis || `计划项${label}`,
+      code: it.code,
+      name: it.name,
+    });
+  }
+  return events;
+}
+
+/** 合并五类事件（持仓纪律/盯盘/研判/模拟成交/今日计划），按时间倒序取前 limit 条 */
 export function buildTimeline(limit = 40): CockpitEvent[] {
   const per = Math.min(Math.max(limit, 1), 100);
   const merged = [
@@ -123,6 +165,7 @@ export function buildTimeline(limit = 40): CockpitEvent[] {
     ...watchEvents(per),
     ...decisionEvents(per),
     ...tradeEvents(per),
+    ...planEvents(),
   ];
   merged.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
   return merged.slice(0, per);

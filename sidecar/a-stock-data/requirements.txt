@@ -1,0 +1,11 @@
+# a-stock-data sidecar 依赖。
+# mootdx 不锁版本：按上游 README V3.2.4，靠 tdx_client() helper 规避 0.11.x BESTIP
+# 空串崩溃，锁 0.10.12 反而在部分 Python 下 import 崩。
+mootdx>=0.10
+requests>=2.31
+certifi>=2024.0
+pandas>=2.0
+lxml>=5.0
+stockstats>=0.6
+fastapi>=0.110
+uvicorn[standard]>=0.29

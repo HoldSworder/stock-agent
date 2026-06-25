@@ -5,6 +5,7 @@ import { ElMessage } from 'element-plus';
 import { Refresh, QuestionFilled } from '@element-plus/icons-vue';
 import { api } from '@/api';
 import StrengthMethodologyDrawer from '@/components/StrengthMethodologyDrawer.vue';
+import MetricScaleHint from '@/components/MetricScaleHint.vue';
 import type { MarketTheme, ThemeSource } from '@stock-agent/shared';
 
 // 市场主线明细（确定性下钻）：以东财真实板块为主源沉淀的 market_themes，复盘/热点为证据 overlay。
@@ -75,7 +76,10 @@ onMounted(load);
 <template>
   <div class="panel-block">
     <div class="block-head">
-      <div class="block-title">市场主线明细</div>
+      <div class="block-title">
+        市场主线明细
+        <MetricScaleHint name="多源协同度" note="多源最高强度 + 协同加成，越多源/越靠前越高。" />
+      </div>
       <div class="block-actions">
         <el-button :icon="QuestionFilled" text size="small" @click="methodology?.open('theme')">
           方法论

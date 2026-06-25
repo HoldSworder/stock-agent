@@ -1,5 +1,5 @@
 import type OpenAI from 'openai';
-import { miaoxiang } from '../miaoxiang/client';
+import { miaoxiang, MiaoxiangQuotaError } from '../miaoxiang/client';
 import { sendTelegram } from '../notify/telegram';
 import { fetchRealPositions } from '../realPositions';
 import { evaluateDiscipline } from '../positions/discipline';
@@ -43,8 +43,11 @@ import {
 } from '../market/eastmoney';
 import { getDragonTiger, getFinancialStatements, getLockupAndHolders } from '../market/datacenter';
 import { callAkshare } from '../market/akshare';
+import { callAstock } from '../astock/client';
 import { queryStock as iwencaiQueryStock, queryStockL2 } from '../iwencai/client';
 import { buildSentimentOverview, formatForAgent as formatSentiment } from '../sentiment/service';
+import { buildMacroOverview, formatMacroForAgent } from '../market/macro';
+import { buildUsMapping, formatUsMappingForAgent } from '../market/usMapping';
 import { buildDragonOverview, formatDragonForAgent } from '../dragon/service';
 import { getAttribution, formatAttributionForAgent } from '../positions/attribution';
 import { getStockCapital, formatCapitalForAgent } from '../capital/service';
@@ -85,6 +88,12 @@ export interface ToolDef {
 function asString(v: unknown, fallback = ''): string {
   return typeof v === 'string' ? v : fallback;
 }
+
+// 妙想日配额耗尽时的工具降级文案：不硬报错，引导模型改走免费源并标注深度指标缺失。
+const MX_QUOTA_FALLBACK =
+  '妙想今日配额已用尽（使用次数已达上限），本工具今日不可用。请改用免费源完成本次研判：' +
+  '量价/涨跌停/换手/量比/成交额/主力净流入用 stock_quotes；DDX/DDY 用 stock_l2_indicators（问财）；' +
+  '估值历史分位、北向资金、财务报表等妙想独有的深度指标今日无法获取，请在结论中明确标注该项「数据缺失」，切勿臆造数值。';
 
 /** 解析字符串数组参数（条件清单），过滤非字符串与空串 */
 function asStringArray(v: unknown): string[] {
@@ -143,7 +152,14 @@ export const tools: ToolDef[] = [
         },
       },
     },
-    run: async (args, ctx) => preview(await miaoxiang.financeData(asString(args.query), ctx.signal)),
+    run: async (args, ctx) => {
+      try {
+        return preview(await miaoxiang.financeData(asString(args.query), ctx.signal));
+      } catch (e) {
+        if (e instanceof MiaoxiangQuotaError) return preview(MX_QUOTA_FALLBACK);
+        throw e;
+      }
+    },
   },
   {
     definition: {
@@ -164,13 +180,19 @@ export const tools: ToolDef[] = [
         },
       },
     },
-    run: async (args, ctx) =>
-      preview(
-        await miaoxiang.assistantAsk(asString(args.question), {
-          deepThink: args.deepThink === true,
-          signal: ctx.signal,
-        }),
-      ),
+    run: async (args, ctx) => {
+      try {
+        return preview(
+          await miaoxiang.assistantAsk(asString(args.question), {
+            deepThink: args.deepThink === true,
+            signal: ctx.signal,
+          }),
+        );
+      } catch (e) {
+        if (e instanceof MiaoxiangQuotaError) return preview(MX_QUOTA_FALLBACK);
+        throw e;
+      }
+    },
   },
   {
     definition: {
@@ -798,7 +820,7 @@ export const tools: ToolDef[] = [
       function: {
         name: 'market_snapshot',
         description:
-          '一次性读取 A 股大盘快照（东方财富，无需鉴权）：A 股主要指数点位/涨跌幅、外围关键指数（美股道指/纳指/标普、亚太恒生/日经/韩国、美元指数/离岸人民币/富时A50）、期货价格（国内有色/黑色/贵金属/能化/新能源主力连续 + 外盘商品，用于商品涨价对相关产业链标的的传导判断）、两市成交额、市场情绪温度（涨跌停/炸板率/最高连板）、涨停板梯队、板块主力资金净流入/净流出 TOP、领涨/领跌板块。盘前定调、盘中看大盘、生成今日计划判断大环境趋势时调用。',
+          '一次性读取 A 股大盘快照（东方财富，无需鉴权）：A 股主要指数点位/涨跌幅、外围关键指数（美股道指/纳指/标普、亚太恒生/日经/韩国、美元指数/离岸人民币/富时A50）、期货价格（国内有色/黑色/贵金属/能化/新能源主力连续 + 外盘商品，用于商品涨价对相关产业链标的的传导判断）、两市成交额、市场情绪温度（涨跌停/炸板率/最高连板）、涨停板梯队、板块主力资金净流入/净流出 TOP、领涨/领跌板块，以及宏观·资金面底稿（股指期货基差 IF/IH/IC/IM、SHIBOR 资金面、最近降准、两融融资余额趋势、南向资金、沪深300估值分位，均为环境背景与护栏，非择时信号），以及美股映射底稿（隔夜美股行业/主题 ETF 排名 → A股概念/ETF 桥接，盘前情绪与方向背景，需结合真实A股板块强弱印证，非择时信号）。盘前定调、盘中看大盘、生成今日计划判断大环境趋势时调用。',
         parameters: { type: 'object', properties: {} },
       },
     },
@@ -880,6 +902,24 @@ export const tools: ToolDef[] = [
         lines.push('领涨板块：' + gainSec.map((s) => `${s.name}(${s.pct}%)`).join('  '));
       if (loseSec.length)
         lines.push('领跌板块：' + loseSec.map((s) => `${s.name}(${s.pct}%)`).join('  '));
+      // 宏观·资金面底稿（基差/SHIBOR/降准/两融/南向/估值分位）：best-effort，失败则不追加
+      try {
+        const macro = await buildMacroOverview();
+        const macroText = formatMacroForAgent(macro);
+        if (macroText) lines.push('', macroText);
+      } catch {
+        /* 宏观取数失败：快照退回不含宏观底稿 */
+      }
+      // 美股映射底稿（隔夜美股龙头/行业 → A股概念·ETF·个股）：best-effort，失败则不追加
+      try {
+        const usMap = await buildUsMapping();
+        if (usMap) {
+          const usText = formatUsMappingForAgent(usMap);
+          if (usText) lines.push('', usText);
+        }
+      } catch {
+        /* 美股映射取数失败：快照退回不含映射底稿 */
+      }
       return preview(lines.join('\n') || '暂无大盘数据');
     },
   },
@@ -991,7 +1031,7 @@ export const tools: ToolDef[] = [
       function: {
         name: 'get_plan_context',
         description:
-          '一次性读取五源【最新一次持久化的 AI 分析】，作为生成今日计划的基准：①情报研判（研报机会 + 全网热点 合并）②大盘与板块研判（大盘复盘 + 板块主线 + 期货外盘 合并）③一键复盘（综合方向/外围/主线/次日策略）④ETF 综合研判（操作信号 + 中线赛道轮动 合并）⑤上一计划收盘复盘（含次日预案草稿，闭环反哺）。各源缺失或非当日产出会显式标注时效。盘前生成今日计划时优先调用它取基准，不要再现场重跑情报 / 大盘板块 / ETF 研判。',
+          '一次性读取五源【最新一次持久化的 AI 分析】，作为生成今日计划的基准：①情报研判（研报机会 + 全网热点 合并）②大盘与板块研判（大盘复盘 + 板块主线 + 期货外盘 合并）③一键复盘（综合方向/外围/主线/次日策略）④ETF 综合研判（操作信号 + 中线赛道轮动 合并）⑤上一计划收盘复盘（含次日预案草稿，闭环反哺）。另附⑥【板块新高宽度·最新】确定性底稿（板块内创新高个股数横向排名 + 确认主线 + 居首天数，规则只读非 AI 估算）＝主线的确定性硬证据。各源缺失或非当日产出会显式标注时效。盘前生成今日计划时优先调用它取基准，不要再现场重跑情报 / 大盘板块 / ETF 研判。',
         parameters: { type: 'object', properties: {} },
       },
     },
@@ -1121,7 +1161,7 @@ export const tools: ToolDef[] = [
       function: {
         name: 'save_today_plan',
         description:
-          '保存今日【作战计划】（盘前生成任务调用，一天一份，重复调用覆盖当日计划）。把研报/热点/板块/选股/持仓/大盘综合成结构化计划落库，供盘中盯盘程序化对照与前端作战室展示。务必给 marketStance.timingLevel 择时档位（防守档新开仓 buy 会被后端自动降级为 watch）；每只标的务必给 confidence 置信度(0-100) 与 source 来源（screen_stocks 选出的标 screener）；触发价务必基于已校验的真实价位；尽量给每只标的右侧确认条件 confirmConditions 与逻辑失效条件 invalidConditions。',
+          '保存今日【作战计划】（盘前生成任务调用，一天一份，重复调用覆盖当日计划）。把研报/热点/板块/选股/持仓/大盘综合成结构化计划落库，供盘中盯盘程序化对照与前端作战室展示。务必给 marketStance.timingLevel 择时档位（防守档新开仓 buy 会被后端自动降级为 watch）；每只标的务必给 confidence 置信度(0-100) 与 source 来源（screen_stocks 选出的标 screener）；触发价务必基于已校验的真实价位；尽量给每只标的右侧确认条件 confirmConditions 与逻辑失效条件 invalidConditions。看好 ETF(direction=buy/hold) 必给今日操作建议：持有类必给 positionHint 持仓比例，建仓类必给 buyTrigger 建议点位，缺则降级 watch。ETF 为本计划主体：建仓候选取自 etf_signals 跟踪池；real_positions 中的每一只持仓 ETF 都必须出现并给 hold/add/reduce/sell 操作 + positionHint + stopLoss/takeProfit，不得遗漏。',
         parameters: {
           type: 'object',
           properties: {
@@ -1156,6 +1196,22 @@ export const tools: ToolDef[] = [
               },
             },
             externalContext: { type: 'string', description: '隔夜外围与政策要点' },
+            keyRisks: {
+              type: 'array',
+              items: { type: 'string' },
+              description:
+                '今日风险清单（3-5 条短句，依次覆盖：大盘失守位/缩量风险、主线退潮或分歧信号、个股共性风险、隔夜外盘隐患；每条可盘中对照）',
+            },
+            intradayGuide: {
+              type: 'object',
+              description: '盘中分时作战指引（四段各一句话，结合今日档位给具体动作，无可说的段可省略）',
+              properties: {
+                auction: { type: 'string', description: '集合竞价 9:15-9:25 看高开/低开与外盘映射如何应对' },
+                morning: { type: 'string', description: '早盘 9:30-11:30 看主线分歧与承接' },
+                midday: { type: 'string', description: '午盘 13:00-14:30 看持续性与量能' },
+                tail: { type: 'string', description: '尾盘 14:30-15:00 看资金回流/获利了结' },
+              },
+            },
             narrative: { type: 'string', description: '完整作战图（Markdown，供人阅读与推送）' },
             items: {
               type: 'array',
@@ -1246,12 +1302,28 @@ export const tools: ToolDef[] = [
           stopLoss: asTrigger(it.stopLoss),
           takeProfit: asTrigger(it.takeProfit),
         }));
+      const rawGuide =
+        args.intradayGuide && typeof args.intradayGuide === 'object'
+          ? (args.intradayGuide as Record<string, unknown>)
+          : null;
+      const guide = rawGuide
+        ? (() => {
+            const g: Record<string, string> = {};
+            for (const k of ['auction', 'morning', 'midday', 'tail'] as const) {
+              const v = asString(rawGuide[k]);
+              if (v) g[k] = v;
+            }
+            return Object.keys(g).length ? g : null;
+          })()
+        : null;
       const detail = plan.savePlan(
         {
           marketStance: (args.marketStance as MarketStance | undefined) ?? null,
           focusSectors: (args.focusSectors as PlanFocusSector[] | undefined) ?? [],
           externalContext: asString(args.externalContext),
           narrative: asString(args.narrative),
+          keyRisks: asStringArray(args.keyRisks),
+          intradayGuide: guide,
           items,
         },
         ctx.runId,
@@ -1538,6 +1610,52 @@ export const tools: ToolDef[] = [
         return preview(data);
       } catch (e) {
         return `AKShare 调用失败：${e instanceof Error ? e.message : String(e)}`;
+      }
+    },
+  },
+  {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'astock_call',
+        description:
+          '调用 a-stock-data 专属 sidecar 的 A股数据端点（mootdx 通达信直连，不封 IP；东财端点内置限流防封）。' +
+          'endpoint 传端点名，params 传键值参数。常用端点：' +
+          'mootdx_kline(symbol, category 频率码:0五分/1十五分/2三十分/3六十分/4日/5周/6月, offset)、mootdx_quote(symbols 逗号分隔含五档)、tencent_quote(codes,PE/PB/市值)、baidu_kline_with_ma(code,带MA)、' +
+          'ths_eps_forecast(code 机构一致预期EPS)、eastmoney_reports(code 个股研报)、eastmoney_industry_reports(industry_code)、' +
+          'ths_hot_reason(date 题材归因)、hsgt_realtime(北向实时)、eastmoney_concept_blocks(code 板块归属)、eastmoney_fund_flow_minute(code 资金流)、' +
+          'dragon_tiger_board(code,trade_date 龙虎榜)、daily_dragon_tiger(全市场龙虎榜)、lockup_expiry(code,trade_date 解禁)、industry_comparison(行业排名)、' +
+          'margin_trading(code 两融)、block_trade(code 大宗)、holder_num_change(code 股东户数)、dividend_history(code 分红)、stock_fund_flow_120d(code)、' +
+          'eastmoney_stock_news(code 新闻)、eastmoney_global_news(全球资讯)、eastmoney_stock_info(code 基本面)、sina_financial_report(code,report_type:lrb/fzb/llb)、' +
+          'cninfo_announcements(code 巨潮公告)、full_valuation(code 完整估值)。完整目录可调 endpoint=manifest 或见数据源页说明。',
+        parameters: {
+          type: 'object',
+          properties: {
+            endpoint: { type: 'string', description: 'a-stock-data 端点名，如 mootdx_kline / ths_eps_forecast / cninfo_announcements' },
+            params: {
+              type: 'object',
+              description: '该端点的键值参数对象（值为字符串或数字），无参数可省略',
+              additionalProperties: { type: ['string', 'number'] },
+            },
+          },
+          required: ['endpoint'],
+        },
+      },
+    },
+    run: async (args, ctx) => {
+      const endpoint = asString(args.endpoint).trim();
+      if (!endpoint) return 'astock_call 需提供 endpoint（a-stock-data 端点名）';
+      const params: Record<string, string | number> = {};
+      if (args.params && typeof args.params === 'object') {
+        for (const [k, v] of Object.entries(args.params as Record<string, unknown>)) {
+          if (typeof v === 'string' || typeof v === 'number') params[k] = v;
+        }
+      }
+      try {
+        const data = await callAstock(endpoint, params, ctx.signal);
+        return preview(data);
+      } catch (e) {
+        return `a-stock-data 调用失败：${e instanceof Error ? e.message : String(e)}`;
       }
     },
   },
@@ -1859,6 +1977,7 @@ const TOOL_GROUP: Record<string, string> = {
   sync_ths_watchlist: '行情持仓',
   eastmoney_datacenter: '行情持仓',
   akshare_call: 'AKShare',
+  astock_call: 'A股数据',
   screen_stocks: '选股',
   iwencai_stock_pick: '选股',
   decision_debate: '决策',

@@ -59,6 +59,31 @@ export async function fetchEtfQuote(code: string): Promise<EtfQuoteRaw> {
   };
 }
 
+/** ETF 规模/成交/资金快照（ulist.np：f6 成交额元 / f8 换手% / f21 规模元 / f62 主力净流入元）。单位归一为 亿/%。 */
+export async function fetchEtfSnapshot(code: string): Promise<{
+  aum: number | null;
+  amount: number | null;
+  turnoverRate: number | null;
+  netInflow: number | null;
+}> {
+  const empty = { aum: null, amount: null, turnoverRate: null, netInflow: null };
+  if (!/^\d{6}$/.test(code)) return empty;
+  const url = `${PUSH2}/ulist.np/get?fltt=2&fields=f6,f8,f12,f21,f62&secids=${toSecid(code)}`;
+  const json = await getJson(url, { label: 'ETF规模资金' });
+  const r = toRows(json)[0];
+  if (!r) return empty;
+  const amountYuan = num(r.f6);
+  const aumYuan = num(r.f21);
+  const turnover = num(r.f8);
+  const flowYuan = num(r.f62);
+  return {
+    aum: aumYuan != null && aumYuan > 0 ? aumYuan / 1e8 : null,
+    amount: amountYuan != null && amountYuan > 0 ? amountYuan / 1e8 : null,
+    turnoverRate: turnover != null && turnover > 0 ? turnover : null,
+    netInflow: flowYuan != null ? flowYuan / 1e8 : null,
+  };
+}
+
 export interface EtfMetrics {
   /** 用于计算的基准价（优先实时现价，回退最新收盘） */
   price: number | null;

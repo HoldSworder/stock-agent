@@ -2,10 +2,11 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import dayjs from 'dayjs';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Plus, Refresh } from '@element-plus/icons-vue';
+import { Plus, Refresh, QuestionFilled } from '@element-plus/icons-vue';
 import { api, openWs } from '@/api';
 import TaskEditDialog from '@/components/TaskEditDialog.vue';
 import RunResultDrawer from '@/components/RunResultDrawer.vue';
+import PortfolioKindBadge from '@/components/PortfolioKindBadge.vue';
 import type {
   ScheduledTask,
   ScreenNlStrategy,
@@ -195,7 +196,8 @@ const createForm = ref<{
   initialCapital: number;
   kind: StrategyKind;
   skillEnabled: boolean;
-}>({ name: '', description: '', initialCapital: 100000, kind: 'local', skillEnabled: true });
+  // 打法自迭代默认关闭：14 天 0 提案调用，AI 自动改打法收益不稳、操作负担重；保留手动编辑 playbook，需要时再开
+}>({ name: '', description: '', initialCapital: 100000, kind: 'local', skillEnabled: false });
 const creating = ref(false);
 
 function openCreate() {
@@ -204,7 +206,7 @@ function openCreate() {
     description: '',
     initialCapital: 100000,
     kind: 'local',
-    skillEnabled: true,
+    skillEnabled: false,
   };
   createVisible.value = true;
 }
@@ -688,7 +690,7 @@ onUnmounted(() => ws?.close());
 <template>
   <div class="page">
     <div class="page-head">
-      <div class="page-title">战法模拟</div>
+      <div class="page-title">战法模拟 <PortfolioKindBadge kind="sim" /></div>
       <div class="head-actions">
         <el-button :icon="Plus" type="primary" @click="openCreate">新建战法</el-button>
         <el-button :icon="Refresh" :loading="listLoading || snapLoading" @click="refreshAll">
@@ -724,10 +726,15 @@ onUnmounted(() => ws?.close());
             <el-table-column label="区间收益" align="right" min-width="84">
               <template #default="{ row }"><span class="num" :class="dir(row.cumReturn ?? 0)">{{ numPctText(row.cumReturn) }}</span></template>
             </el-table-column>
-            <el-table-column label="Alpha" align="right" min-width="78">
+            <el-table-column align="right" min-width="92">
+              <template #header>
+                <el-tooltip content="相对沪深300的超额收益（专业称 Alpha）：正=跑赢大盘" placement="top">
+                  <span>超额收益<el-icon class="fwd-q"><QuestionFilled /></el-icon></span>
+                </el-tooltip>
+              </template>
               <template #default="{ row }"><span class="num" :class="dir(row.alpha ?? 0)">{{ numPctText(row.alpha) }}</span></template>
             </el-table-column>
-            <el-table-column label="回撤" align="right" min-width="72">
+            <el-table-column label="最大回撤" align="right" min-width="80">
               <template #default="{ row }"><span class="num down">{{ numPctText(row.maxDrawdown) }}</span></template>
             </el-table-column>
             <el-table-column label="胜率" align="right" min-width="68">
@@ -890,7 +897,15 @@ onUnmounted(() => ws?.close());
                 </span>
               </div>
               <div class="fwd-item">
-                <span class="fwd-label">超额 Alpha（vs 沪深300）</span>
+                <span class="fwd-label">
+                  超额收益（vs 沪深300）
+                  <el-tooltip
+                    content="相对沪深300的超额收益（专业称 Alpha）：正=同期跑赢大盘，负=跑输"
+                    placement="top"
+                  >
+                    <el-icon class="fwd-q"><QuestionFilled /></el-icon>
+                  </el-tooltip>
+                </span>
                 <span class="fwd-value num" :class="dir(forward.alpha ?? 0)">
                   {{ forward.alpha != null ? `${forward.alpha > 0 ? '+' : ''}${forward.alpha}%` : '—' }}
                 </span>
@@ -919,8 +934,9 @@ onUnmounted(() => ws?.close());
               <span class="fwd-label">自动模拟总闸</span>
               <el-switch :model-value="autoSimGlobal" size="small" @change="toggleAutoSim" />
               <span class="form-tip">
-                总闸 + 白名单同时开启才会自动下单；当前
-                {{ autoSimGlobal ? '已开启' : '关闭（默认）' }}，自动买入受底座急停约束
+                当前{{ autoSimGlobal ? '已开启' : '关闭（默认）' }}。自动模拟下单需逐层放行：本页<b>总闸</b>
+                + 本战法<b>白名单</b>（战法编辑弹窗内）同时开 → 驾驶舱<b>自动本地/外部模拟</b>开且<b>未急停</b>
+                → 交易日/交易时段；任一层关即被安全底座拦截，绝不触及真实持仓。
               </span>
             </div>
           </div>
@@ -1300,7 +1316,7 @@ onUnmounted(() => ws?.close());
         <el-form-item v-if="!isMiaoxiang" label="自动模拟">
           <el-switch v-model="editForm.autoSimEnabled" />
           <span class="form-tip">
-            纳入自动模拟白名单；仅当上方「自动模拟总闸」也开启时才会自动下单（默认关闭）
+            纳入自动模拟白名单（闸门③下半）；须本页「自动模拟总闸」+ 驾驶舱「自动本地/外部模拟」均开、且未急停，才会自动下单（默认关闭）
           </span>
         </el-form-item>
       </el-form>
@@ -1523,6 +1539,13 @@ onUnmounted(() => ws?.close());
 .fwd-label {
   font-size: 12px;
   color: var(--text-2);
+}
+.fwd-q {
+  font-size: 12px;
+  vertical-align: -1px;
+  margin-left: 2px;
+  color: var(--text-2);
+  cursor: help;
 }
 .fwd-value {
   font-size: 16px;

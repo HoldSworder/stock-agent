@@ -22,7 +22,7 @@ import { gateSignals, resetGate } from './gate';
 import { getAtrPct } from './volatility';
 import { evaluateOutcomes } from './reflect';
 import { sendDailyDigest } from './digest';
-import { resolveProfile } from './strategyProfile';
+import { resolveProfile, ETF_MID_PROFILE } from './strategyProfile';
 import { getActivePlanItems } from '../plan/service';
 import type { QuoteCtx, RollState } from './types';
 import type { DailyPlanItem, StrategySellProfile } from '@stock-agent/shared';
@@ -131,7 +131,16 @@ async function collectPool(cfg: WatchConfig, includeWatch: boolean): Promise<Map
     try {
       const pf = await fetchRealPositions(false);
       for (const p of pf.positions) {
-        if (p.qty > 0) meta.set(p.code, { source: 'position', name: p.name, avgCost: p.avgCost });
+        if (p.qty <= 0) continue;
+        // 真实持仓 ETF（场内基金 1/5 开头，无战法归属）默认走中线档：
+        // 享受周线破位/回撤/MACD死叉告警，过滤日内噪声（拿得住主升浪）；个股持仓保持短线档。
+        const isEtf = /^[15]/.test(p.code);
+        meta.set(p.code, {
+          source: 'position',
+          name: p.name,
+          avgCost: p.avgCost,
+          ...(isEtf ? { horizon: 'mid' as const, profile: ETF_MID_PROFILE } : {}),
+        });
       }
     } catch {
       /* 降级 */

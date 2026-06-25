@@ -18,7 +18,7 @@ const MIN_BARS = 35;
 const r2 = (n: number): number => Math.round(n * 100) / 100;
 
 /** MACD（12,26,9）：迭代喂收盘，捕获末两根用于金叉/死叉判断（CN 口径 DIF/DEA/MACD柱） */
-function calcMacd(closes: number[]): MacdReadout | null {
+export function calcMacd(closes: number[]): MacdReadout | null {
   const macd = new MACD(new EMA(12), new EMA(26), new EMA(9));
   let prevDiff: number | null = null;
   let last: { dif: number; dea: number } | null = null;

@@ -12,6 +12,8 @@ const SETTING_KEY = 'home_modules';
 export const MODULE_DEFS: ReadonlyArray<{ id: string; label: string; defaultOn: boolean }> = [
   { id: 'indices', label: '大盘指数', defaultOn: true },
   { id: 'globalIndices', label: '外围关键指数', defaultOn: true },
+  { id: 'macro', label: '宏观·资金面', defaultOn: true },
+  { id: 'usmap', label: '美股映射', defaultOn: true },
   { id: 'futures', label: '期货价格', defaultOn: true },
   { id: 'turnoverTotal', label: '两市成交额', defaultOn: true },
   { id: 'emotion', label: '市场情绪温度', defaultOn: true },

@@ -14,8 +14,8 @@ import {
   setAgentOverride,
   setEngineConfig,
 } from './agentConfig';
-import { debateRealPositions } from './sellcheck';
-import { runDecision, runIndexDecision } from './service';
+import { debateRealPositions, debateRealEtfPositions } from './sellcheck';
+import { runDecision, runEtfDecision, runIndexDecision } from './service';
 import { listIndexDefs, resolveIndex } from './indices';
 import { reviewPending } from './reflection';
 import { listVerdicts } from './verdictCache';
@@ -67,10 +67,12 @@ export function registerDecisionModule(app: FastifyInstance): void {
         send({ type: 'run_finished', runId: '', status: 'error' });
         return;
       }
+      // ETF 辩论（独立精简链路）：6 位 ETF 代码
+      const isEtf = payload.assetType === 'etf';
 
       const code = indexDef ? indexDef.key : normalizeCode(payload.code);
       if (!code) {
-        send({ type: 'error', message: '请输入合法的 6 位股票代码' });
+        send({ type: 'error', message: isEtf ? '请输入合法的 6 位 ETF 代码' : '请输入合法的 6 位股票代码' });
         send({ type: 'run_finished', runId: '', status: 'error' });
         return;
       }
@@ -83,19 +85,21 @@ export function registerDecisionModule(app: FastifyInstance): void {
       try {
         const result = indexDef
           ? await runIndexDecision(indexDef, { onEvent: send, signal: abort.signal, purpose: 'decision' })
-          : await runDecision(
-              {
-                code,
-                name: typeof payload.name === 'string' ? payload.name : undefined,
-                context: typeof payload.context === 'string' ? payload.context : undefined,
-              },
-              { onEvent: send, signal: abort.signal, purpose: 'decision' },
-            );
-        // 成功结果落公共历史库（供弹窗历史列表切换查看），refKey 作用域为股票代码/指数 key
+          : isEtf
+            ? await runEtfDecision(code, { onEvent: send, signal: abort.signal, purpose: 'decision' })
+            : await runDecision(
+                {
+                  code,
+                  name: typeof payload.name === 'string' ? payload.name : undefined,
+                  context: typeof payload.context === 'string' ? payload.context : undefined,
+                },
+                { onEvent: send, signal: abort.signal, purpose: 'decision' },
+              );
+        // 成功结果落公共历史库（供弹窗历史列表切换查看），refKey 作用域为股票代码/指数 key/ETF 码
         saveAnalysis({
           kind: ANALYSIS_KIND,
           refKey: code,
-          title: indexDef ? `${result.name} 指数研判` : `${result.name}(${code}) 决策`,
+          title: indexDef ? `${result.name} 指数研判` : isEtf ? `${result.name}(${code}) ETF研判` : `${result.name}(${code}) 决策`,
           runId: null,
           content: result.narrative,
         });
@@ -180,6 +184,28 @@ export function registerDecisionModule(app: FastifyInstance): void {
     }
   };
 
+  // 持仓 ETF 卖点复核：逐只 ETF 走 runEtfDecision 方向研判后汇总，落公共历史库（kind=real-positions，
+  // 与持仓页弹窗共享）并条件推送；无 ETF 持仓则静默跳过。手动可经中枢·调度页一键触发。
+  const etfSellCheckJob = (title: string) => async () => {
+    let report;
+    try {
+      report = await debateRealEtfPositions();
+    } catch (e) {
+      console.warn(`[decision] ${title} 跳过：`, e instanceof Error ? e.message : e);
+      return;
+    }
+    saveAnalysis({
+      kind: 'real-positions',
+      refKey: null,
+      title,
+      runId: null,
+      content: report.outputText,
+    });
+    if (report.alertCount > 0) {
+      await sendTelegram(`📌 ${title}\n\n${report.outputText}`);
+    }
+  };
+
   // 反思定时任务：收盘后（默认 30 16 * * 1-5）复盘到期 pending 决策，算个股 vs CSI300 Alpha 并回写教训。
   // 离线路径、非交互；默认开启，cron/enabled 经 /api/decision/schedules 运行时可配。
   defineModuleSchedules({
@@ -197,6 +223,12 @@ export function registerDecisionModule(app: FastifyInstance): void {
         label: '持仓辩论·持仓日终监控（1600）',
         defaultCron: '0 16 * * 1-5',
         run: sellCheckJob('持仓辩论·持仓日终监控'),
+      },
+      {
+        id: 'decision.sellcheck.etf',
+        label: '持仓ETF卖点复核（1450）',
+        defaultCron: '50 14 * * 1-5',
+        run: etfSellCheckJob('持仓ETF卖点复核'),
       },
       {
         id: 'decision.reflection',

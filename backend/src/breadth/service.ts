@@ -13,7 +13,9 @@ import {
   type NewHighWindow,
 } from './data';
 import {
+  getLatestSnapshotDate,
   listRecentSnapshots,
+  listSnapshotsByDate,
   upsertSnapshots,
   type BoardBreadthSnapshotRow,
 } from './repo';
@@ -43,8 +45,49 @@ const PERSIST_TOP_DAYS = 3;
 const FADE_DROP_PCT = 50;
 /** 榜单展示/落库上限（按新高数降序截取） */
 const MAX_BOARDS = 40;
-/** 板块成分并发取数上限（控制对 aktools 的瞬时压力） */
-const FETCH_CONCURRENCY = 8;
+
+// ===== ETF 盯盘·中长期主线口径（仅供 ETF 多周期盯盘研判用，独立于上方当日/短期口径）=====
+/** 中长期回看交易日窗口（约一个半月，贴中线主升浪聚焦） */
+const MID_WINDOW_DAYS = 30;
+/** 中长期「居前」口径：窗口内排名 ≤ 此值算居前（比当日 TOP_RANK=1 略宽，容忍轮动内的名次波动） */
+const MID_TOP_RANK = 3;
+/** 窗口内居前 ≥ 此天数 → 认定为中长期主线 */
+const MID_PERSIST_DAYS = 10;
+/** 中长期主线展示上限 */
+const MID_MAX_MAINLINES = 6;
+/** 板块成分并发取数上限（控制对 aktools/东财的瞬时压力，避免触发 push2 反爬 IP 限流） */
+const FETCH_CONCURRENCY = 3;
+/** 每次取成分前的随机抖动区间（毫秒），错峰发包，进一步降低瞬时 req/s */
+const FETCH_JITTER_MS: readonly [number, number] = [50, 120];
+
+/** 在区间内随机睡眠，用于错峰取数 */
+function jitterDelay([lo, hi]: readonly [number, number]): Promise<void> {
+  const ms = lo + Math.floor(Math.random() * Math.max(0, hi - lo));
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+/**
+ * 板块新高宽度采集的「板块宇宙」过滤：剔除非主线的伪概念（通道/宽基/风格/交易行为类），
+ * 既减半 push2 取数量（~580→~250，降低反爬风险），又避免「深股通/小盘股」等霸榜污染主线识别。
+ * 命中即剔除；行业板块（industry）天然不含这些词，主要作用于概念板块。可按需增改。
+ */
+const JUNK_BOARD_PATTERNS: readonly RegExp[] = [
+  // 资金通道 / 指数纳入（与赛道无关）
+  /股通|陆股通|QFII|MSCI|富时罗素|标普道琼斯|标普|道琼斯|纳入|成份股|成分股/i,
+  // 宽基 / 市值风格
+  /小盘股|中盘股|大盘股|微盘股|蓝筹|白马股|绩优股|超大盘|中字头|央企|国企改革|地方国企/,
+  // 交易行为 / 异动（昨日涨停、连板、振幅、新高破净等）
+  /昨日|连板|涨停|跌停|触板|打板|多板|振幅|新高|新低|破净|破发|高送转|送转|举牌|回购|增持|减持|质押|商誉|预盈|预增|预亏|预减|扭亏|摘帽|ST/,
+  // 上市/板块归属类（非题材）
+  /次新|注册制|创业板综|科创板块?|北交所|转债|可转债|融资融券|两融|股权转让|参股|参控股/,
+  // 时间/统计类噪声
+  /近期|最近|破发|高股息|分红|股息/,
+];
+
+/** 板块是否为应剔除的伪概念（任一模式命中即剔除） */
+function isJunkBoard(name: string): boolean {
+  return JUNK_BOARD_PATTERNS.some((re) => re.test(name));
+}
 
 /** 板块名关键词 → 代表 ETF（展示用，best-effort；无命中返回 null。可按需增改） */
 const BOARD_ETF_KEYWORDS: ReadonlyArray<{ kw: RegExp; code: string; name: string }> = [
@@ -119,6 +162,53 @@ const VERDICT_LABEL: Record<BoardBreadthVerdict, string> = {
   fading: '退潮',
 };
 
+/** 持续性 + 判定结果（由当日计数 + 该板块历史快照算出） */
+interface Persistence {
+  streakDays: number;
+  topDays: number;
+  delta: number | null;
+  verdict: BoardBreadthVerdict;
+}
+
+/**
+ * 由「当日计数 + 该板块近端历史快照（新→旧）」算持续性与主线判定。
+ * 供实时总览与今日计划底稿复用，保证两处口径一致（DRY）。
+ */
+function assessPersistence(
+  rank: number,
+  count: number,
+  ratio: number,
+  hist: BoardBreadthSnapshotRow[],
+): Persistence {
+  const prevCount = hist[0]?.newHighCount ?? null;
+  const delta = prevCount != null ? count - prevCount : null;
+  // 连续达标天数：今日 + 历史中连续满足地板的天数
+  const flooredSeq = [meetsFloor(count, ratio), ...hist.map((h) => meetsFloor(h.newHighCount, h.ratio))];
+  let streakDays = 0;
+  for (const ok of flooredSeq) {
+    if (!ok) break;
+    streakDays += 1;
+  }
+  // 近端居榜首天数：今日 + 历史中排名 ≤ TOP_RANK 的天数（限 LOOKBACK_DAYS+1 窗口）
+  const topSeq = [rank, ...hist.map((h) => h.rank)].slice(0, LOOKBACK_DAYS + 1);
+  const topDays = topSeq.filter((rk) => rk <= TOP_RANK).length;
+  const wasMainline = hist.some((h) => h.rank <= TOP_RANK);
+  const verdict = judge({ count, ratio, rank, prevCount, topDays, wasMainline });
+  return { streakDays, topDays, delta, verdict };
+}
+
+/** 按 boardCode 把历史快照分组并按交易日新→旧排序 */
+function groupHistory(history: BoardBreadthSnapshotRow[]): Map<string, BoardBreadthSnapshotRow[]> {
+  const map = new Map<string, BoardBreadthSnapshotRow[]>();
+  for (const row of history) {
+    const arr = map.get(row.boardCode) ?? [];
+    arr.push(row);
+    map.set(row.boardCode, arr);
+  }
+  for (const arr of map.values()) arr.sort((a, b) => (a.tradeDate < b.tradeDate ? 1 : -1));
+  return map;
+}
+
 /**
  * 主线判定：
  *  - 先判退潮（曾居首 + 新高数腰斩/跌出榜首/掉地板）；
@@ -130,7 +220,6 @@ function judge(args: {
   ratio: number;
   rank: number;
   prevCount: number | null;
-  streakDays: number;
   topDays: number;
   wasMainline: boolean;
 }): BoardBreadthVerdict {
@@ -165,19 +254,26 @@ export async function buildBreadthOverview(persist = true): Promise<BoardBreadth
   }
   if (newHighSet.size === 0) stale = true;
 
-  // 2) 板块清单（行业 + 概念）
+  // 2) 板块清单（行业 + 概念）；剔除通道/宽基/风格/交易行为类伪概念，减半取数量并净化主线榜单
   const [industries, concepts] = await Promise.all([
     fetchBoards('industry').catch(() => [] as BoardMeta[]),
     fetchBoards('concept').catch(() => [] as BoardMeta[]),
   ]);
-  const boards = [...industries, ...concepts];
+  const rawBoards = [...industries, ...concepts];
+  const boards = rawBoards.filter((b) => !isJunkBoard(b.name));
+  if (rawBoards.length > 0) {
+    console.info(
+      `[breadth] 板块宇宙：原始 ${rawBoards.length} → 剔除伪概念 ${rawBoards.length - boards.length} → 取成分 ${boards.length}`,
+    );
+  }
   if (boards.length === 0) stale = true;
 
-  // 3) 逐板块取成分并与创新高集合求交集计数（并发受限，best-effort）
+  // 3) 逐板块取成分并与创新高集合求交集计数（并发受限 + 错峰抖动，best-effort）
   const counts: RawCount[] = newHighSet.size === 0 || boards.length === 0
     ? []
     : (
         await mapLimit(boards, FETCH_CONCURRENCY, async (meta): Promise<RawCount | null> => {
+          await jitterDelay(FETCH_JITTER_MS); // 错峰发包，降低对 push2 的瞬时 req/s
           const cons = await fetchBoardConstituents(meta.kind, meta.name).catch(() => [] as string[]);
           if (cons.length === 0) return null; // 成分取数失败/为空，不参与排名
           let newHighCount = 0;
@@ -191,49 +287,18 @@ export async function buildBreadthOverview(persist = true): Promise<BoardBreadth
   // 4) 横向排名：新高数降序，平手按占比降序
   counts.sort((a, b) => b.newHighCount - a.newHighCount || b.ratio - a.ratio);
 
-  // 5) 历史快照（近 LOOKBACK_DAYS 交易日）按 boardCode 分组，旧→新无所谓，取值即可
-  const history = listRecentSnapshots(tradeDate, LOOKBACK_DAYS);
-  const histByBoard = new Map<string, BoardBreadthSnapshotRow[]>();
-  for (const row of history) {
-    const arr = histByBoard.get(row.boardCode) ?? [];
-    arr.push(row);
-    histByBoard.set(row.boardCode, arr);
-  }
-  // 每个板块历史按交易日倒序（新→旧）
-  for (const arr of histByBoard.values()) arr.sort((a, b) => (a.tradeDate < b.tradeDate ? 1 : -1));
+  // 5) 历史快照（近 LOOKBACK_DAYS 交易日）按 boardCode 分组（新→旧）
+  const histByBoard = groupHistory(listRecentSnapshots(tradeDate, LOOKBACK_DAYS));
 
   // 6) 逐项算持续性 + 判定 + 映射 ETF
   const items: BoardBreadthItem[] = counts.map((c, i) => {
     const rank = i + 1;
-    const hist = histByBoard.get(c.meta.code) ?? [];
-    const prev = hist[0] ?? null;
-    const prevCount = prev ? prev.newHighCount : null;
-    const delta = prevCount != null ? c.newHighCount - prevCount : null;
-
-    // 连续达标天数：今日 + 历史（新→旧）中连续满足地板的天数
-    const flooredSeq = [
-      meetsFloor(c.newHighCount, c.ratio),
-      ...hist.map((h) => meetsFloor(h.newHighCount, h.ratio)),
-    ];
-    let streakDays = 0;
-    for (const ok of flooredSeq) {
-      if (!ok) break;
-      streakDays += 1;
-    }
-    // 近端居榜首天数：今日 + 历史中排名 ≤ TOP_RANK 的天数（限 LOOKBACK_DAYS+1 个窗口）
-    const topSeq = [rank, ...hist.map((h) => h.rank)].slice(0, LOOKBACK_DAYS + 1);
-    const topDays = topSeq.filter((rk) => rk <= TOP_RANK).length;
-    const wasMainline = hist.some((h) => h.rank <= TOP_RANK);
-
-    const verdict = judge({
-      count: c.newHighCount,
-      ratio: c.ratio,
+    const { streakDays, topDays, delta, verdict } = assessPersistence(
       rank,
-      prevCount,
-      streakDays,
-      topDays,
-      wasMainline,
-    });
+      c.newHighCount,
+      c.ratio,
+      histByBoard.get(c.meta.code) ?? [],
+    );
 
     const deltaText = delta == null ? '' : `·较昨${delta >= 0 ? '+' : ''}${delta}`;
     const note =
@@ -288,4 +353,143 @@ export async function buildBreadthOverview(persist = true): Promise<BoardBreadth
       (stale ? '⚠️ 创新高/板块成分取数降级，榜为不完整估计（请到数据源页检查 AKShare 配置）。' : ''),
     stale,
   };
+}
+
+/**
+ * 今日计划底稿：读「最新一份持久化板块新高快照」格式化为确定性文本块（不现场重跑，与情绪/复盘等源一致）。
+ * 计划 agent 据此把"哪个板块新高最多且持续"作为主线判断的确定性证据之一。无快照时显式说明，由上层据时效降权。
+ */
+export function formatBreadthForPlan(): string {
+  const date = getLatestSnapshotDate();
+  if (!date) {
+    return '【板块新高宽度·最新】无快照（板块新高模块未启用或未落库；到调度页启用「收盘快照」后次日起可用）。';
+  }
+  const rows = listSnapshotsByDate(date);
+  if (rows.length === 0) return '【板块新高宽度·最新】无快照数据。';
+
+  const histByBoard = groupHistory(listRecentSnapshots(date, LOOKBACK_DAYS));
+  const enriched = rows.map((r) => ({
+    ...r,
+    ...assessPersistence(r.rank, r.newHighCount, r.ratio, histByBoard.get(r.boardCode) ?? []),
+    etf: mapBoardEtf(r.boardName),
+  }));
+  const mains = enriched.filter((e) => e.verdict === 'confirmed');
+  const top = enriched.slice(0, 8);
+
+  const fresh = date === shanghaiToday() ? '' : `（${date}，非当日产出，注意时效）`;
+  const lines: string[] = [
+    `【板块新高宽度·最新】${fresh}（${WINDOW}口径，板块内创新高个股数横向排名；"最多且持续多日稳居榜首"判主线，确定性只读）`,
+  ];
+  if (mains.length > 0) {
+    lines.push(
+      '确认主线：' +
+        mains
+          .map(
+            (m) =>
+              `${m.boardName}(新高${m.newHighCount}/占比${r1(m.ratio)}%·居首${m.topDays}日${m.etf ? `→${m.etf.name}${m.etf.code}` : ''})`,
+          )
+          .join('；'),
+    );
+  } else {
+    lines.push('确认主线：暂无（无板块稳居榜首足够天数，或市场处于冰点/普跌）。');
+  }
+  lines.push(
+    '新高榜Top：' +
+      top
+        .map(
+          (t) =>
+            `${t.rank}.${t.boardName}(${t.newHighCount}/${r1(t.ratio)}%${t.delta != null ? `·较昨${t.delta >= 0 ? '+' : ''}${t.delta}` : ''})`,
+        )
+        .join('  '),
+  );
+  return lines.join('\n');
+}
+
+/** 中长期主线单板块聚合（窗口内统计，不复用当日 verdict 口径） */
+interface MidlineAgg {
+  boardCode: string;
+  boardName: string;
+  appearDays: number;
+  topDays: number;
+  confirmDays: number;
+  latestRank: number;
+  avgRank: number;
+  latestNewHigh: number;
+  earliestNewHigh: number;
+}
+
+/**
+ * ETF 多周期盯盘专属：把板块新高宽度的「中长期主线」格式化为确定性文本块。
+ * 不同于 formatBreadthForPlan 的当日/短期（5日）口径——这里跨 MID_WINDOW_DAYS（约30交易日）窗口聚合，
+ * 以「窗口内多数时间居前」判定中长期主线，契合 ETF 中线主升浪聚焦。仅读历史快照、不现场重跑、不落库。
+ */
+export function formatMidlineBreadthForEtf(windowDays = MID_WINDOW_DAYS): string {
+  const date = getLatestSnapshotDate();
+  if (!date) {
+    return '【中长期主线·板块新高宽度】无历史快照（板块新高模块未启用或未落库；启用「收盘快照」积累数日后可用）。';
+  }
+  // 窗口快照 = 最新一日 + 其之前的 windowDays-1 个交易日
+  const rows = [...listSnapshotsByDate(date), ...listRecentSnapshots(date, Math.max(0, windowDays - 1))];
+  if (rows.length === 0) return '【中长期主线·板块新高宽度】无历史快照数据。';
+
+  // 按 boardCode 聚合（区分新→旧用于趋势：rows 中 latest 在前，但混入 recent 未严格排序，按 tradeDate 求极值更稳）
+  const byBoard = new Map<string, BoardBreadthSnapshotRow[]>();
+  for (const r of rows) {
+    const arr = byBoard.get(r.boardCode) ?? [];
+    arr.push(r);
+    byBoard.set(r.boardCode, arr);
+  }
+
+  const aggs: MidlineAgg[] = [];
+  for (const [boardCode, arr] of byBoard) {
+    arr.sort((a, b) => (a.tradeDate < b.tradeDate ? 1 : -1)); // 新→旧
+    const appearDays = arr.length;
+    const topDays = arr.filter((r) => r.rank <= MID_TOP_RANK).length;
+    const confirmDays = arr.filter((r) => meetsConfirm(r.newHighCount, r.ratio)).length;
+    const avgRank = arr.reduce((s, r) => s + r.rank, 0) / appearDays;
+    aggs.push({
+      boardCode,
+      boardName: arr[0].boardName,
+      appearDays,
+      topDays,
+      confirmDays,
+      latestRank: arr[0].rank,
+      avgRank,
+      latestNewHigh: arr[0].newHighCount,
+      earliestNewHigh: arr[arr.length - 1].newHighCount,
+    });
+  }
+
+  // 中长期主线：窗口内居前天数达标，按居前天数降序、均名升序
+  const mains = aggs
+    .filter((a) => a.topDays >= MID_PERSIST_DAYS)
+    .sort((a, b) => b.topDays - a.topDays || a.avgRank - b.avgRank)
+    .slice(0, MID_MAX_MAINLINES);
+
+  const fresh = date === shanghaiToday() ? '' : `（最新快照 ${date}，注意时效）`;
+  const lines: string[] = [
+    `【中长期主线·板块新高宽度】${fresh}（${WINDOW}口径，回看约${windowDays}个交易日；"窗口内多数时间居前${MID_TOP_RANK}名"判定中长期主线，确定性只读，仅供参考）`,
+  ];
+  if (mains.length > 0) {
+    lines.push(
+      '中长期主线：' +
+        mains
+          .map((m) => {
+            const etf = mapBoardEtf(m.boardName);
+            const trend = m.latestNewHigh >= m.earliestNewHigh ? '走强' : '趋缓';
+            return `${m.boardName}(居前${m.topDays}/${m.appearDays}日·达标${m.confirmDays}日·最新第${m.latestRank}名·${trend}${etf ? `→${etf.name}${etf.code}` : ''})`;
+          })
+          .join('；'),
+    );
+  } else {
+    lines.push('中长期主线：暂无（窗口内无板块多数时间稳居前列，可能处于轮动散乱/普跌阶段，主线聚焦需谨慎）。');
+  }
+
+  // 近端最强对照：按最新排名取前 5，供 agent 区分「当日异动」与「中长期主线」
+  const recent = [...aggs].sort((a, b) => a.latestRank - b.latestRank).slice(0, 5);
+  lines.push(
+    '近端最强(对照·勿等同主线)：' +
+      recent.map((r) => `${r.latestRank}.${r.boardName}(新高${r.latestNewHigh})`).join('  '),
+  );
+  return lines.join('\n');
 }

@@ -1,16 +1,23 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
+import { useRouter } from 'vue-router';
 import dayjs from 'dayjs';
 import { ElMessage } from 'element-plus';
-import { Refresh, MagicStick } from '@element-plus/icons-vue';
+import { Refresh, MagicStick, QuestionFilled } from '@element-plus/icons-vue';
 import { api } from '@/api';
 import AiAnalysisDialog from '@/components/AiAnalysisDialog.vue';
 import StockLink from '@/components/StockLink.vue';
+import PortfolioKindBadge from '@/components/PortfolioKindBadge.vue';
 import type {
+  DecisionAction,
+  DecisionVerdictCache,
   DisciplineReport,
   DisciplineStatus,
   PositionAttributionReport,
+  PositionTrend,
   RealPortfolio,
+  TrendState,
+  VsSimReport,
 } from '@stock-agent/shared';
 
 // embedded：作为「持仓与自选」父页的 Tab 面板嵌入时隐藏自身 page-head。
@@ -41,6 +48,54 @@ const discTagType = (s: DisciplineStatus): 'success' | 'danger' | 'warning' | 'i
   return 'info';
 };
 
+// 决策辩论裁决回显：按持仓代码取最近一次结构化裁决，挂在持仓行上（只读，不下单）
+const verdictMap = ref<Record<string, DecisionVerdictCache>>({});
+const ACTION_LABEL: Record<DecisionAction, string> = {
+  buy: '买入',
+  add: '加仓',
+  hold: '持有',
+  reduce: '减仓',
+  sell: '卖出',
+};
+const actionTag = (a: DecisionAction): 'success' | 'danger' | 'warning' | 'info' => {
+  if (a === 'buy' || a === 'add') return 'success';
+  if (a === 'sell') return 'danger';
+  if (a === 'reduce') return 'warning';
+  return 'info';
+};
+const verdictOf = (code: string): DecisionVerdictCache | undefined => verdictMap.value[code];
+// 「深度辩论」全站统一入口：跳决策页预填代码，发起多 agent 流水线（与自选页同一对标签）
+const router = useRouter();
+function debateStock(code: string) {
+  router.push({ path: '/decision', query: { code, asset: 'stock' } });
+}
+const verdictTip = (v: DecisionVerdictCache): string => {
+  const parts = [
+    `${ACTION_LABEL[v.action]} · 置信度${v.confidence} · ${v.scenario}/${v.horizon}`,
+    v.fresh ? `基准 ${v.dataAsOf.slice(0, 16).replace('T', ' ')}` : '已过期，需重跑',
+  ];
+  if (v.invalidators.length) parts.push('失效条件：' + v.invalidators[0]);
+  return parts.join('\n');
+};
+async function loadVerdicts(codes: string[]) {
+  if (!codes.length) {
+    verdictMap.value = {};
+    return;
+  }
+  try {
+    const list = await api.decisionAgents.verdicts(codes);
+    const map: Record<string, DecisionVerdictCache> = {};
+    for (const v of list) {
+      const cur = map[v.code];
+      // 同一代码多场景/视角，保留 dataAsOf 最新的一条
+      if (!cur || v.dataAsOf > cur.dataAsOf) map[v.code] = v;
+    }
+    verdictMap.value = map;
+  } catch {
+    verdictMap.value = {};
+  }
+}
+
 async function loadDiscipline() {
   discLoading.value = true;
   try {
@@ -49,6 +104,49 @@ async function loadDiscipline() {
     ElMessage.error(e instanceof Error ? e.message : String(e));
   } finally {
     discLoading.value = false;
+  }
+}
+
+// 中线趋势体检（确定性只读）：对每只持仓算 MA60 趋势 + 跟随/减仓建议（复用中线雷达引擎）。
+// 较重（逐只取 60 日 K），按需点击触发，不在进页时自动拉。
+const trends = ref<PositionTrend[] | null>(null);
+const trendsLoading = ref(false);
+const TREND_LABEL: Record<TrendState, string> = {
+  multi_long: '多头排列',
+  up: '趋势向上',
+  range: '震荡',
+  down: '走弱',
+};
+const trendLabel = (t: TrendState) => TREND_LABEL[t];
+const trendTagType = (t: TrendState): 'success' | 'danger' | 'info' =>
+  t === 'multi_long' || t === 'up' ? 'success' : t === 'down' ? 'danger' : 'info';
+const fmtPct1 = (v: number | null) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`);
+
+async function loadTrends() {
+  trendsLoading.value = true;
+  try {
+    trends.value = await api.radar.positionTrends();
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : String(e));
+  } finally {
+    trendsLoading.value = false;
+  }
+}
+
+// 真实 vs 模拟纪律镜子（只读对照，不反哺调参）：把「我真实操作」与「系统模拟战法」放一起照镜子。
+// 上移自战法/量化页（原藏在用户最少去的页）；按需触发（真实账户取数较重）。Alpha 等术语已白话化。
+const vsSim = ref<VsSimReport | null>(null);
+const vsSimLoading = ref(false);
+const concPct = (v: number) => `${(v * 100).toFixed(1)}%`;
+const numPct = (v: number | null) => (v == null ? '—' : `${v >= 0 ? '+' : ''}${v.toFixed(2)}%`);
+async function loadVsSim() {
+  vsSimLoading.value = true;
+  try {
+    vsSim.value = await api.vsSim();
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : String(e));
+  } finally {
+    vsSimLoading.value = false;
   }
 }
 // 实时持仓 AI 分析弹窗（公共组件，流式轨迹 + 历史）
@@ -95,6 +193,8 @@ async function load() {
   } finally {
     loading.value = false;
   }
+  // 决策裁决为只读旁路，失败不影响持仓主视图
+  void loadVerdicts((pf.value?.positions ?? []).map((p) => p.code));
   // 归因为只读旁路，失败不影响持仓主视图
   try {
     attribution.value = await api.attribution();
@@ -119,9 +219,11 @@ onMounted(load);
 <template>
   <div :class="{ page: !embedded }">
     <div v-if="!embedded" class="page-head">
-      <div class="page-title">真实持仓</div>
+      <div class="page-title">真实持仓 <PortfolioKindBadge kind="real" /></div>
       <div class="head-actions">
         <el-button :loading="discLoading" @click="loadDiscipline">纪律体检</el-button>
+        <el-button :loading="trendsLoading" @click="loadTrends">中线趋势体检</el-button>
+        <el-button :loading="vsSimLoading" @click="loadVsSim">真实vs模拟</el-button>
         <el-button :icon="MagicStick" type="primary" @click="analysisOpen = true">
           实时持仓分析
         </el-button>
@@ -132,8 +234,11 @@ onMounted(load);
       来源：同花顺投资账本接口（股票实时报价 + 场外基金账本净值，红涨绿跌）
     </div>
     <div v-else class="embed-bar">
+      <PortfolioKindBadge kind="real" />
       <span class="embed-sub">来源：同花顺投资账本接口（股票实时报价 + 场外基金账本净值，红涨绿跌）</span>
       <el-button :loading="discLoading" @click="loadDiscipline">纪律体检</el-button>
+      <el-button :loading="trendsLoading" @click="loadTrends">中线趋势体检</el-button>
+      <el-button :loading="vsSimLoading" @click="loadVsSim">真实vs模拟</el-button>
       <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
     </div>
 
@@ -204,6 +309,95 @@ onMounted(load);
                 </el-tag>
                 <StockLink :code="it.code" :name="it.name" />
                 <span class="disc-advice">{{ it.advice }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="trends" class="trend-panel">
+            <div class="trend-head">
+              <span class="trend-title">中线趋势体检</span>
+              <span class="trend-sub">
+                确定性只读 · 对每只持仓按均线（MA20/60/250）排列判趋势 + 跟随建议（与中线雷达同口径）
+              </span>
+            </div>
+            <el-table v-if="trends.length" :data="trends" size="small" stripe style="width: 100%">
+              <el-table-column label="持仓" min-width="130">
+                <template #default="{ row }"><StockLink :code="row.code" :name="row.name" /></template>
+              </el-table-column>
+              <el-table-column label="趋势" width="100">
+                <template #default="{ row }">
+                  <el-tag size="small" :type="trendTagType(row.trend)" effect="plain">
+                    {{ trendLabel(row.trend) }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="强度" width="72" align="right">
+                <template #default="{ row }"><span class="num">{{ row.strengthScore }}</span></template>
+              </el-table-column>
+              <el-table-column label="距MA60" width="92" align="right">
+                <template #default="{ row }">
+                  <span class="num" :class="(row.toMa60Pct ?? 0) >= 0 ? 'up' : 'down'">
+                    {{ fmtPct1(row.toMa60Pct) }}
+                  </span>
+                </template>
+              </el-table-column>
+              <el-table-column label="跟随建议" min-width="200">
+                <template #default="{ row }">{{ row.advice }}</template>
+              </el-table-column>
+            </el-table>
+            <el-empty v-else :image-size="60" description="暂无持仓或趋势数据不可得" />
+          </div>
+
+          <div v-if="vsSim" class="vssim-panel" v-loading="vsSimLoading">
+            <div class="vssim-head">
+              <span class="vssim-title">真实 vs 模拟 · 纪律镜子</span>
+              <span class="vssim-sub">把「我真实操作」与「系统模拟战法」放一起照镜子 · 只读对照，不反哺调参</span>
+            </div>
+            <div class="vssim-grid">
+              <div class="vssim-card real">
+                <div class="vssim-card-head">真实账户</div>
+                <template v-if="vsSim.real">
+                  <div class="vssim-row">
+                    <span>当日盈亏</span>
+                    <b class="num" :class="dir(vsSim.real.todayProfit)">{{ pct(vsSim.real.todayRate) }}</b>
+                  </div>
+                  <div class="vssim-row">
+                    <span>累计持有盈亏</span>
+                    <b class="num" :class="dir(vsSim.real.totalHoldProfit)">{{ signed(vsSim.real.totalHoldProfit) }}</b>
+                  </div>
+                  <div class="vssim-row">
+                    <span>最大集中度</span><b class="num">{{ concPct(vsSim.real.topConcentration) }}</b>
+                  </div>
+                  <div class="vssim-row"><span>持仓数</span><b class="num">{{ vsSim.real.positionCount }}</b></div>
+                </template>
+                <div v-else class="vssim-empty">{{ vsSim.realError || '真实持仓数据不可用' }}</div>
+              </div>
+              <div class="vssim-card">
+                <div class="vssim-card-head">模拟战法（{{ vsSim.strategies.length }}）</div>
+                <el-table v-if="vsSim.strategies.length" :data="vsSim.strategies" size="small" style="width: 100%">
+                  <el-table-column prop="strategyName" label="战法" min-width="110" />
+                  <el-table-column label="区间收益" align="right" min-width="84">
+                    <template #default="{ row }"><span class="num" :class="dir(row.cumReturn ?? 0)">{{ numPct(row.cumReturn) }}</span></template>
+                  </el-table-column>
+                  <el-table-column align="right" min-width="92">
+                    <template #header>
+                      <el-tooltip content="相对沪深300的超额收益（专业称 Alpha）：正=跑赢大盘" placement="top">
+                        <span>超额收益<el-icon class="vssim-q"><QuestionFilled /></el-icon></span>
+                      </el-tooltip>
+                    </template>
+                    <template #default="{ row }"><span class="num" :class="dir(row.alpha ?? 0)">{{ numPct(row.alpha) }}</span></template>
+                  </el-table-column>
+                  <el-table-column label="最大回撤" align="right" min-width="80">
+                    <template #default="{ row }"><span class="num down">{{ numPct(row.maxDrawdown) }}</span></template>
+                  </el-table-column>
+                  <el-table-column label="胜率" align="right" min-width="68">
+                    <template #default="{ row }"><span class="num">{{ row.winRate != null ? `${row.winRate}%` : '—' }}</span></template>
+                  </el-table-column>
+                  <el-table-column label="选股口径" min-width="100">
+                    <template #default="{ row }"><span class="vssim-screen">{{ row.screenStrategyName || '—' }}</span></template>
+                  </el-table-column>
+                </el-table>
+                <div v-else class="vssim-empty">暂无本地战法</div>
               </div>
             </div>
           </div>
@@ -295,6 +489,30 @@ onMounted(load);
             </el-table-column>
             <el-table-column label="仓位" min-width="84" align="right">
               <template #default="{ row }"><span class="num">{{ (row.positionRate * 100).toFixed(1) }}%</span></template>
+            </el-table-column>
+            <el-table-column label="辩论结论" width="104" align="center">
+              <template #default="{ row }">
+                <el-tooltip
+                  v-if="verdictOf(row.code)"
+                  :content="`${verdictTip(verdictOf(row.code)!)} · 点击重跑深度辩论`"
+                  placement="top"
+                >
+                  <el-tag
+                    size="small"
+                    effect="plain"
+                    class="verdict-tag"
+                    :type="actionTag(verdictOf(row.code)!.action)"
+                    :class="{ stale: !verdictOf(row.code)!.fresh }"
+                    @click="debateStock(row.code)"
+                  >
+                    {{ ACTION_LABEL[verdictOf(row.code)!.action] }}
+                    <span class="num">{{ verdictOf(row.code)!.confidence }}</span>
+                  </el-tag>
+                </el-tooltip>
+                <el-button v-else link type="warning" size="small" @click="debateStock(row.code)">
+                  深度辩论
+                </el-button>
+              </template>
             </el-table-column>
           </el-table>
 
@@ -401,6 +619,16 @@ onMounted(load);
 .head-actions {
   display: flex;
   gap: 8px;
+}
+.muted {
+  color: var(--text-3, #aaa);
+}
+.verdict-tag {
+  cursor: pointer;
+}
+.el-tag.stale {
+  opacity: 0.55;
+  text-decoration: line-through;
 }
 .embed-bar {
   display: flex;
@@ -509,6 +737,96 @@ onMounted(load);
 .disc-advice {
   color: var(--text-2);
   font-size: 12.5px;
+}
+.trend-panel {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+.trend-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 8px;
+}
+.trend-title {
+  font-weight: 600;
+}
+.trend-sub {
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.vssim-panel {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+.vssim-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.vssim-title {
+  font-weight: 600;
+}
+.vssim-sub {
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.vssim-grid {
+  display: grid;
+  grid-template-columns: minmax(180px, 240px) 1fr;
+  gap: 14px;
+}
+@media (max-width: 720px) {
+  .vssim-grid {
+    grid-template-columns: 1fr;
+  }
+}
+.vssim-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.vssim-card.real {
+  background: var(--bg-3, rgba(255, 255, 255, 0.02));
+}
+.vssim-card-head {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 8px;
+}
+.vssim-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 13px;
+  padding: 3px 0;
+}
+.vssim-row span {
+  color: var(--text-2);
+}
+.vssim-empty {
+  font-size: 12.5px;
+  color: var(--text-2);
+  padding: 6px 0;
+}
+.vssim-screen {
+  font-size: 12px;
+  color: var(--text-2);
+}
+.vssim-q {
+  font-size: 12px;
+  vertical-align: -1px;
+  margin-left: 2px;
+  color: var(--text-2);
 }
 .attr-panel {
   background: var(--bg-2);

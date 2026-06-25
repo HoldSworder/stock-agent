@@ -33,11 +33,13 @@ import type {
   SentimentHistoryItem,
   BoardBreadthOverview,
   BoardBreadthHistoryItem,
+  MainlineConsensus,
   DragonOverview,
   StockCapitalDetail,
   StockIndicators,
   StockChipDistribution,
   RadarOverview,
+  PositionTrend,
   EtfStatus,
   HomeModule,
   IdingpanPushResult,
@@ -46,6 +48,8 @@ import type {
   BacktestRun,
   BacktestRunInput,
   BacktestRunListItem,
+  MacroOverview,
+  UsMappingOverview,
   MarketOverview,
   ModuleScheduleJob,
   ModuleScheduleUpdate,
@@ -110,6 +114,11 @@ import type {
   WatchStats,
   WatchStatus,
   WatchStrategyView,
+  EtfWatchAlert,
+  EtfWatchConfig,
+  EtfWatchLayerState,
+  EtfWatchProbe,
+  EtfWatchStatus,
   WatchlistBulkInput,
   WatchlistBulkResult,
   WatchlistEntry,
@@ -298,18 +307,16 @@ export const api = {
     ),
   pushIdingpan: () =>
     unwrap<IdingpanPushResult>(http.post('/watchlist/push-idingpan', {}, { timeout: 30000 })),
-  analyzeWatch: (code: string) =>
-    unwrap<{ runId: string; status: string; text: string }>(
-      http.post(`/watchlist/${code}/analyze`, {}, { timeout: 300000 }),
-    ),
-  analyzeWatchlist: () =>
-    unwrap<{ runId: string; status: string; text: string }>(
-      http.post('/watchlist/analyze', {}, { timeout: 300000 }),
-    ),
+  // 自选 AI 研判已迁为统一 analyze kind（watchlist-stock / watchlist-combo），
+  // 前端经 <AiAnalysisDialog> 走 /ws/analyze 流式 + /api/analyses 历史，原同步接口已下线。
 
   // 大盘看盘
   getMarketOverview: () =>
     unwrap<MarketOverview>(http.get('/market/overview', { timeout: 20000 })),
+  getMacroOverview: () =>
+    unwrap<MacroOverview>(http.get('/market/macro', { timeout: 20000 })),
+  getUsMapping: () =>
+    unwrap<UsMappingOverview>(http.get('/market/usmapping', { timeout: 20000 })),
   getMarketModules: () => unwrap<HomeModule[]>(http.get('/market/modules')),
   updateMarketModules: (patch: Record<string, boolean>) =>
     unwrap<HomeModule[]>(http.put('/market/modules', patch)),
@@ -390,6 +397,25 @@ export const api = {
   getWatchStats: () => unwrap<WatchStats>(http.get('/watch/stats')),
   getWatchStrategyViews: () =>
     unwrap<WatchStrategyView[]>(http.get('/watch/strategy-views')),
+
+  // ETF 多周期分层盯盘（独立于个股盯盘）
+  etfWatch: {
+    status: () => unwrap<EtfWatchStatus>(http.get('/etf-watch/status')),
+    config: () => unwrap<EtfWatchConfig>(http.get('/etf-watch/config')),
+    updateConfig: (patch: Partial<EtfWatchConfig>) =>
+      unwrap<EtfWatchConfig>(http.put('/etf-watch/config', patch)),
+    toggle: (enabled: boolean) =>
+      unwrap<EtfWatchConfig>(http.post('/etf-watch/toggle', { enabled })),
+    trigger: () => unwrap<EtfWatchStatus>(http.post('/etf-watch/trigger', {})),
+    alerts: (limit?: number, scope?: 'today' | 'all') =>
+      unwrap<EtfWatchAlert[]>(http.get('/etf-watch/alerts', { params: { limit, scope } })),
+    states: () => unwrap<EtfWatchLayerState[]>(http.get('/etf-watch/states')),
+    clearStates: () =>
+      unwrap<{ cleared: boolean }>(http.post('/etf-watch/states/clear', {})),
+    deleteState: (code: string) =>
+      unwrap<{ removed: string }>(http.delete(`/etf-watch/states/${code}`)),
+    analyze: (code: string) => unwrap<EtfWatchProbe>(http.post('/etf-watch/analyze', { code })),
+  },
 
   // 热点雷达（TrendRadar）
   trendradar: {
@@ -507,6 +533,9 @@ export const api = {
   // 中线雷达（行业强弱 + 持仓趋势 + 候选池，确定性只读）
   radar: {
     overview: () => unwrap<RadarOverview>(http.get('/radar/overview', { timeout: 60000 })),
+    // 持仓趋势跟随（对真实持仓算 MA60 趋势 + 跟随建议，确定性只读）
+    positionTrends: () =>
+      unwrap<PositionTrend[]>(http.get('/radar/position-trends', { timeout: 60000 })),
   },
 
   // M1 ETF 行业轮动（确定性轮动榜 + agent 过滤研判）
@@ -539,6 +568,9 @@ export const api = {
       unwrap<BoardBreadthHistoryItem[]>(
         http.get('/breadth/history', { params: { code, limit } }),
       ),
+    // 主线共识（决策层：breadth 锚 ⋈ themes ⋈ radar 三方对齐）
+    consensus: () =>
+      unwrap<MainlineConsensus>(http.get('/breadth/consensus', { timeout: 120000 })),
   },
 
   // S6 龙头/连板梯队（确定性连板梯队 + 龙头辨识分层）

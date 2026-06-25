@@ -2,6 +2,9 @@ import type {
   DailyPlan,
   DailyPlanDetail,
   DailyPlanItem,
+  EtfAction,
+  EtfSignal,
+  IntradayGuide,
   MarketStance,
   NotifyChannel,
   PlanAssetType,
@@ -15,6 +18,7 @@ import { isIndividualStock } from '../decision/sellcheck';
 import { mapDecisionToVerdict, runDecisionBatch } from '../decision/service';
 import { runTask, type RunTaskResult } from '../runner';
 import * as gateway from '../agent/gateway';
+import { getPrompt, PROMPT_KEYS, registerPromptDef } from '../agent/promptConfig';
 import { signals as etfSignals } from '../etf/service';
 import { fetchRealPositions } from '../realPositions';
 import { buildRotationOverview, formatForAgent } from '../rotation/service';
@@ -34,6 +38,7 @@ export const PLAN_GEN_PROMPT =
   '专业框架（务必体现，重心在 ETF）：先以大盘近期走势/资金面/情绪（含外盘）定「今日择时档位」作为前提闸门；在闸门约束下，【ETF 为本计划主线、是真实大仓位的主战场】，重中线（强势赛道右侧介入+消息催化），是优先研判、优先落实可执行触发价的对象；【个股为模拟参考层】，重短线（资金面+情绪+近期走势+消息催化），仅作辅助参考、不挤占 ETF 主仓。消息面贯穿两者，优先找「起爆前/消息催化」而非追高。本任务仅研判规划，不下单。\n\n' +
   '交易日校验（默认放行）：仅周一至周五触发，默认按交易日执行；接口异常一律按交易日继续，不据此判休市。\n\n' +
   '第1步 读基准（核心）：调用 get_plan_context 一次性取五源最新 AI 分析，注意各源在本框架中的职责——①情报研判（研报机会 + 全网热点 合并）＝消息催化来源：重点抽取「起爆前·尚未充分发酵」的催化板块/个股，区别于已发酵高位；②大盘与板块研判（大盘复盘 + 板块主线 + 期货外盘 合并）＝择时前提：取其大盘方向/情绪温度档位/资金持续性 + 确定性主线/中线行业 + 期货外盘对次日开盘的传导（商品产业链受益/承压、VIX 避险、中概金龙映射）；③一键复盘（综合方向/外围/主线/次日策略，含「明日重点关注」「强势板块/个股候选」「风险清单」）；④ETF 综合研判（操作信号 + 中线赛道轮动 合并）＝【本计划 ETF 主线的核心基准】：取「该进攻赛道（上升/加速+RS正+周线多头）/该等回踩/该回避」；⑤上一计划收盘复盘（含命中得失与「次日预案草稿」，作为延续与纠偏起点）。' +
+  '另：get_plan_context 末尾附【板块新高宽度·最新】确定性底稿（板块内创新高个股数横向排名 + 确认主线 + 居首天数，规则只读、非 AI 估算）＝主线的确定性硬证据：其「确认主线」(新高最多且持续多日稳居榜首) 优先作为 focusSectors 与 ETF 主线赛道的首选依据，权重高于纯主观研判。\n' +
   '严禁再现场重跑 trendradar_hotspots(summary) 或 research_reports(discover) 等重型分析；本计划以这五份已产出的分析为唯一基准。某源若标注缺失或非当日产出，照常使用但在 narrative 风险项注明时效。\n' +
   '第2步 定「今日择时档位」（前提闸门，半硬约束）：综合②大盘与板块研判（方向/情绪温度档位/资金持续性 + 期货外盘 VIX 避险/中概金龙映射/隔夜方向），先判定今日档位，并据档位约束后续所有 ETF/个股 的 direction 与仓位——\n' +
   '  · 防守（大盘偏空 / 缩量 / 赚钱效应差 / 外盘大跌避险）：ETF 仅保留右侧最强且已持有的，其余降为 watch；个股一律只给 watch/reduce/sell，禁新开多、禁追高；marketStance.positionPct ≤ 30。\n' +
@@ -41,8 +46,16 @@ export const PLAN_GEN_PROMPT =
   '  · 进攻（大盘偏多 / 放量 / 赚钱效应好 / 外盘配合）：ETF 与个股均可右侧进攻，可正常给 buy，positionPct 约 60-90。\n' +
   '  档位与理由要落到 marketStance.summary 与 narrative，且后续每个 buy/加仓决策都必须与档位一致。\n' +
   '第3步【主线】ETF 中线右侧计划（重中线：强势赛道右侧介入+消息催化，本计划最优先、最该给透可执行性的部分）：候选优先来自④ETF 综合研判的「该进攻赛道」（上升/加速 + RS 跑赢沪深300 + 周线多头＝右侧强势），而非简单取信号买入区；右侧纪律——回避「过热/破位/抄底左侧」，对「该等回踩」赛道列 watch 并给回踩确认触发价；与情报研判的催化赛道交叉印证（消息催化 + 右侧强势＝优先）。' +
-  'ETF 的 direction 由轮动状态决定（上升/加速→可 buy，回踩→watch，过热/破位→reduce 或不入计划）；再用 etf_signals(action=signals) 取这些右侧候选的结构化信号，etf_signals 只负责提供 buyTrigger/sellTrigger/stopLoss/takeProfit 触发价与折溢价风险，不用它的买卖建议覆盖轮动结论（折溢价缺失的用 mx_finance_data 补 IOPV 再定夺追高风险）；用 real_positions 识别已持有 ETF（结合成本/盈亏判断加减仓）；ETF 候选 source 填 sector。每只 ETF thesis 写清右侧/回踩状态 + RS/周线/资金 + 消息催化，并给 confidence。\n' +
-  '第4步【参考层】个股短线选股（模拟参考，重短线：资金面+情绪+近期走势+消息催化）：在第2步档位约束下选个股（限定主板/创业板：60/000/001/002/003/300/301 开头，排除 ST、科创板 688/689、北交所 8/4 开头）。个股为辅助参考层，不挤占 ETF 主仓，宁缺毋滥。\n' +
+  '主线优先级（强约束）：ETF 候选若与【板块新高宽度】确认主线（新高最多且持续多日稳居榜首）共振，则最优先入计划并给最高 confidence；当「板块新高宽度榜 / ETF 轮动 / 情报催化」三源背离时，以确定性宽度榜 + 轮动为准、情报催化为辅，不得仅凭单一主观催化拔高 ETF 主线。' +
+  'ETF 的 direction 由轮动状态决定（上升/加速→可 buy，回踩→watch，过热/破位→reduce 或不入计划）；再用 etf_signals(action=signals) 取这些右侧候选的结构化信号，etf_signals 只负责提供 buyTrigger/sellTrigger/stopLoss/takeProfit 触发价与折溢价风险，不用它的买卖建议覆盖轮动结论（折溢价缺失的用 mx_finance_data 补 IOPV 再定夺追高风险）；ETF 建仓候选 source 填 sector。每只 ETF thesis 写清右侧/回踩状态 + RS/周线/资金 + 消息催化，并给 confidence。\n' +
+  '【ETF 为本计划绝对主体（强约束）】：今日计划以 ETF 为主交付，务必把 ETF 部分给透、给全、给可执行：\n' +
+  '  · 建仓候选范围：可建仓的 ETF 一律从 etf_signals(action=signals) 返回的【跟踪池】里挑选，禁止凭空提出跟踪池以外的 ETF；每只建仓候选必给具体 buyTrigger 建仓点位 + stopLoss 止损 + positionHint 建议仓位。\n' +
+  '  · 看好 ETF 今日操作（强制）：对每只看好的 ETF（direction=buy/hold/add）必须给出今日可执行操作——建议持有/加仓（hold/add）positionHint 必填（给具体持仓比例，如「持有 20%」「可加至 30%」）并在 thesis 说明加/减/不动理由；建议建仓（buy）buyTrigger 必填（右侧突破价 type=breakout 或回踩低吸价 type=price/pullback），点位须经 etf_signals/mx_finance_data 校验真实可执行；缺对应字段一律降级为 watch 并在 thesis/confirmConditions 注明等待条件。\n' +
+  '【持仓 ETF 全覆盖（强制，本计划核心交付）】：用 real_positions 读真实持仓，对其中【每一只 ETF】都必须在 items 给出明确今日操作，严禁遗漏任何持仓 ETF——\n' +
+  '  · direction 取 hold 持有 / add 加仓 / reduce 减仓 / sell 清仓 之一（结合成本/盈亏 + 轮动状态 + etf_signals 信号判定）；source 填 position；\n' +
+  '  · positionHint 必填：写当前持仓比例与建议变动（如「当前 18%，破位减至 10%」「当前 12%，可加至 20%」）；\n' +
+  '  · stopLoss/takeProfit 必给具体价位（用 etf_signals/mx_finance_data 校验），thesis 一句话说清「为什么这么操作」。\n' +
+  '第4步【可选附属层·个股】个股短线选股（模拟参考，仅作附属，可少可无）：个股是 ETF 主体之外的可选附属层，不与 ETF 抢主体地位，务必宁缺毋滥——只在确有高置信度右侧确认机会时给 0-2 只，没有合适标的就完全不给个股、把版面留给 ETF。选股限定主板/创业板：60/000/001/002/003/300/301 开头，排除 ST、科创板 688/689、北交所 8/4 开头；并受第2步档位约束。\n' +
   '  · 起爆前催化候选：先调用 list_catalysts(unfermentedOnly=true) 读近期结构化催化主线，重点关注「反复出现(seenCount≥2)但仍未发酵」的潜伏题材——它们是起爆前埋伏的优先来源；把这些题材关键词纳入下面 screen_stocks 的 context。\n' +
   '  · 第一层候选池：用 screen_stocks 取活跃题材候选——起爆前埋伏优先用 strategyId=pre_breakout_catalyst（会对候选池逐只补「趋势：多头排列/临近20日新高/量能放大」与「资金流：主力净流入持续性」因子，最贴合本框架四要素中的走势+资金面），进攻追涨用 theme_momentum（题材动量），放量突破用 volume_breakout；context 传今日主线关键词（取自上面催化主线 + 大盘与板块研判确定性主线，如「机器人 算力 固态电池」）。注意：theme_momentum/volume_breakout 是【当日横截面】引擎，算不出资金面连续性/均线走势/消息催化；pre_breakout_catalyst 已补趋势与资金面但仍不含消息催化——消息催化必须对照 list_catalysts/情报研判逐只补齐，不要把候选池当成已完成的四要素选股。\n' +
   '  · 第二层四要素校验：对候选用 mx_assistant_ask/mx_finance_data 逐只核实——①资金面（主力净流入是否为正且连续、大单/北向）②情绪（是否涨停/连板梯队、题材热度、量比活跃）③近期走势（5/10/20 日均线是否多头、是否放量突破平台或创阶段新高、是否已连续大涨高位透支）④消息催化（对照情报研判，是否有「起爆前·未充分发酵」催化）。\n' +
@@ -56,6 +69,8 @@ export const PLAN_GEN_PROMPT =
   '  - marketStance：方向(bias)/择时档位(timingLevel：attack 进攻 / balanced 均衡 / defense 防守，须与第2步一致)/建议仓位(positionPct，须与档位上限一致)/关键支撑(support)/压力(resistance)/一句话定调(summary，含择时档位与理由)；其中 support/resistance 必须围绕 get_plan_context 返回的【实时大盘点位】（上证/深成指当前点位）上下合理推算（一般在当前点位 ±1~3% 的关键整数关口），严禁沿用记忆中的历史点位，落库前自检支撑<现价<压力且与实时点位同量级；\n' +
   '  - focusSectors：今日重点板块（名称+强度阶段+理由）；\n' +
   '  - externalContext：隔夜外围与政策要点；\n' +
+  '  - keyRisks：今日风险清单（string 数组，3-5 条，从下面 narrative「风险提示」抽成结构化短句，依次覆盖：大盘失守位/缩量风险、主线退潮或分歧信号、个股共性风险（高位透支/题材兑现）、隔夜外盘隐患；每条一句话、可盘中对照）；\n' +
+  '  - intradayGuide：盘中分时作战指引（对象，四个可选键各一句话：auction 集合竞价 9:15-9:25 看高开/低开与外盘映射如何应对、morning 早盘 9:30-11:30 看主线分歧与承接、midday 午盘 13:00-14:30 看持续性与量能、tail 尾盘 14:30-15:00 看资金回流/获利了结；结合今日档位给具体动作建议，无可说的段可省略）；\n' +
   '  - items：每只标的给 code/name/direction(buy/hold/reduce/sell/watch)/thesis(ETF 写右侧/回踩状态，个股写四要素打分，均注明来源)/source(research/hotspot/sector/screener/position/watchlist)/confidence(0-100 置信度，按上面阈值纪律)/positionHint，' +
   '并给 confirmConditions（右侧确认条件：ETF 回踩不破均线后再放量转强，个股放量突破某价/均线多头确认）与 invalidConditions（逻辑失效条件：大盘跌破支撑且缩量、板块跌出资金流入榜、个股跌破昨高或平台下沿等，满足则当天取消），' +
   '并尽量给结构化触发价 buyTrigger/sellTrigger/stopLoss/takeProfit（{type:"price|breakout|pullback", value:数字, note}），触发价务必用 mx_finance_data/etf_signals 校验过的真实价位；\n' +
@@ -89,12 +104,14 @@ export const PLAN_REVIEW_PROMPT =
   '对今日【作战计划】做收盘复盘闭环。本任务只复盘不下单。\n\n' +
   '交易日校验（默认放行）：仅周一至周五触发，默认按交易日执行；接口异常一律按交易日继续。\n\n' +
   '第1步 读计划：用 get_today_plan 读今日计划（含各标的方向/触发价/盘中已触发状态与备注）。若今日无计划，直接说明并结束。\n' +
-  '第2步 读实际：用 real_positions 读真实持仓，用 market_snapshot 看收盘盘面；对计划内标的用 mx_finance_data 核验当日表现；' +
+  '第2步 读实际：用 real_positions 读真实持仓，用 market_snapshot 看收盘盘面；对计划内标的用 mx_finance_data 核验当日表现（ETF 优先核验）；' +
   '并调用 get_attribution 一次，读当日【持仓归因】（账户当日盈亏/贡献、最大赢家/输家、逐票当日盈亏贡献=当日盈亏率×仓位权重），作为账户层得失的确定性事实基础。\n' +
-  '第3步 逐项评估：对每只计划标的判断「计划 vs 实际」——是否触发、是否兑现、结果对错；调用 update_plan_item(code, status, note) 回写：' +
+  '第3步 逐项评估（ETF 为主体）：对每只计划标的判断「计划 vs 实际」——是否触发、是否兑现、结果对错；其中【持仓/计划内的每一只 ETF 都必须逐只复盘，不得遗漏】；调用 update_plan_item(code, status, note) 回写：' +
   '已按计划完成/已了结=done，逻辑已破坏/全天未触发且失效=invalid，仍有效待续=保持 pending，note 写一句结果点评。\n' +
-  '第4步 收盘归档：调用 close_today_plan(reviewSummary) 回填复盘总结。reviewSummary 用 Markdown 覆盖：①大盘与情绪小结（结合持仓归因点出当日账户是谁在贡献/谁在拖累，给出最大赢家与最大输家及其贡献）②计划命中率与得失 ' +
-  '③逐只标的结果（持仓标的结合其当日盈亏贡献评价）④战法/打法改进建议 ⑤次日预案草稿（重点关注方向与应对）。\n' +
+  '第4步 收盘归档：调用 close_today_plan(reviewSummary) 回填复盘总结。reviewSummary 用 Markdown 覆盖，以 ETF 为绝对主体、个股弱化：' +
+  '①大盘与情绪小结（结合持仓归因点出当日账户是谁在贡献/谁在拖累，给出最大赢家与最大输家及其贡献）②计划命中率与得失 ' +
+  '③【逐只持仓 ETF 复盘（核心）】：每只 ETF 一段——今日表现（涨跌/相对主线强弱）+ 计划兑现对错（建仓/加减/止损止盈点位是否触发、执行是否到位）+ 明日操作（持有/加仓/减仓/清仓）+ 具体点位微调（建仓/加仓位、止损、止盈的更新值）；④个股结果（如有，简述即可，不与 ETF 抢篇幅）⑤打法改进建议 ' +
+  '⑥次日预案草稿（以 ETF 为主体：明日每只持仓 ETF 怎么操作 + 可建仓的跟踪池 ETF 与点位 + 大方向，作为次日计划生成的延续起点）。\n' +
   '推送禁止 Markdown 表格，用竖排清单。';
 
 export const PLAN_REEVAL_PROMPT =
@@ -109,6 +126,34 @@ export const PLAN_REEVAL_PROMPT =
   '  判定保守：证据不足时维持原状，宁可不动也不要误杀有效计划。\n' +
   '第4步 简报：用竖排清单输出本次重评估结论——当前大盘择时是否仍成立、被标 invalid 的标的及原因、被标 triggered 的标的及确认信号、仍有效待续的清单。不要新增标的、不要改触发价、不调用 save_today_plan。\n' +
   '⚠️ 仅供参考，不构成投资建议。';
+
+// 把今日计划三段运行时提示词收编进「中枢·提示词」统一管理：可视化 + 覆盖优先、回退此处代码默认。
+// prompt 正文仍以本模块上面的常量为单一来源（兼容 cronTasks 旧种子签名匹配）；运行时一律走下面的 getter。
+registerPromptDef({
+  key: PROMPT_KEYS.planGen,
+  label: '今日计划·盘前生成',
+  hint: '盘前 08:30 生成今日作战计划（以五源 AI 分析 + 板块新高宽度为基准，ETF 主线、个股参考层）。手动/定时/一键编排共用。',
+  base: PLAN_GEN_PROMPT,
+});
+registerPromptDef({
+  key: PROMPT_KEYS.planReview,
+  label: '今日计划·收盘复盘',
+  hint: '收盘 15:30 计划 vs 实际逐项复盘回填，以 ETF 为主体，产出次日预案草稿。',
+  base: PLAN_REVIEW_PROMPT,
+});
+registerPromptDef({
+  key: PROMPT_KEYS.planReeval,
+  label: '今日计划·盘中重评估',
+  hint: '盘中（10:30 / 14:00）据实时盘面把失效项标 invalid、确认项标 triggered，只纠偏不新增标的。',
+  base: PLAN_REEVAL_PROMPT,
+});
+
+/** 盘前生成 prompt 生效值（覆盖优先，回退代码默认） */
+export const getPlanGenPrompt = (): string => getPrompt(PROMPT_KEYS.planGen);
+/** 收盘复盘 prompt 生效值（覆盖优先，回退代码默认） */
+export const getPlanReviewPrompt = (): string => getPrompt(PROMPT_KEYS.planReview);
+/** 盘中重评估 prompt 生效值（覆盖优先，回退代码默认） */
+export const getPlanReevalPrompt = (): string => getPrompt(PROMPT_KEYS.planReeval);
 
 /** 当日（Asia/Shanghai）计划主记录，无则 null */
 export function getTodayPlan(): DailyPlan | null {
@@ -162,6 +207,8 @@ export interface SavePlanInput {
   focusSectors?: PlanFocusSector[];
   externalContext?: string;
   narrative?: string;
+  keyRisks?: string[];
+  intradayGuide?: IntradayGuide | null;
   items?: SavePlanItemInput[];
 }
 
@@ -255,6 +302,8 @@ export function savePlan(input: SavePlanInput, runId: string | null): DailyPlanD
     focusSectors: input.focusSectors ?? [],
     externalContext: input.externalContext ?? '',
     narrative: input.narrative ?? '',
+    keyRisks: input.keyRisks ?? [],
+    intradayGuide: input.intradayGuide ?? null,
     runId,
   });
   const gated = enforcePlanGate(level, input.items ?? []);
@@ -477,6 +526,87 @@ export async function enrichTodayPlanWithEtfReview(runId: string | null): Promis
   return lines.length;
 }
 
+/** ETF 操作建议方向：由量化信号 action 映射到计划 direction（持仓视角，缺信号默认持有） */
+function etfActionToDirection(action: EtfAction | undefined): DailyPlanItem['direction'] {
+  switch (action) {
+    case 'buy':
+    case 'add':
+      return 'buy';
+    case 'reduce':
+      return 'reduce';
+    case 'avoid':
+      return 'sell';
+    case 'hold':
+    default:
+      return 'hold';
+  }
+}
+
+/**
+ * 持仓 ETF 全覆盖（确定性兜底，不依赖模型自觉）：
+ * 读真实持仓里的每一只 ETF，凡未被计划纳入的，用 etf_signals 跟踪池信号补一条计划项
+ * （direction 由 action 映射、触发价直接取信号、positionHint=当前仓位、source=position），
+ * 经 repo.addItemsIfAbsent 追加（不覆盖 AI 已给标的）。在 ETF 研判增强之前调用，使注入项也能拿到研判。
+ * best-effort：失败不抛、不拖垮计划生成。返回注入的 code 列表。
+ */
+export async function ensureHeldEtfCoverage(runId: string | null): Promise<string[]> {
+  const plan = getTodayPlan();
+  if (!plan) return [];
+
+  const portfolio = await fetchRealPositions().catch((e) => {
+    console.warn('[plan] 持仓 ETF 兜底取持仓失败:', e instanceof Error ? e.message : e);
+    return null;
+  });
+  if (!portfolio) return [];
+
+  // 真实持仓里的 ETF（按代码前缀判定；场外基金 funds 不参与盘中操作，跳过）
+  const heldEtfs = portfolio.positions.filter((p) => repo.classifyAsset(p.code) === 'etf');
+  if (!heldEtfs.length) return [];
+
+  const existing = new Set(repo.listItems(plan.id).map((it) => it.code));
+  const missing = heldEtfs.filter((p) => !existing.has(p.code));
+  if (!missing.length) return [];
+
+  // 跟踪池信号（best-effort），用于补操作方向与触发价
+  const sigMap = new Map<string, EtfSignal>();
+  try {
+    const res = await etfSignals();
+    for (const s of res.signals) sigMap.set(s.code, s);
+  } catch (e) {
+    console.warn('[plan] 持仓 ETF 兜底取信号失败（降级为仅持有）:', e instanceof Error ? e.message : e);
+  }
+
+  const inputs: repo.ItemInput[] = missing.map((p) => {
+    const sig = sigMap.get(p.code);
+    const dir = etfActionToDirection(sig?.action);
+    const noteParts = sig?.notes?.length ? sig.notes.join('；') : '';
+    const thesis =
+      `持仓 ETF（系统补充：计划未覆盖该持仓，按量化信号给操作）。当前持仓 ${p.positionRate.toFixed(0)}%、浮盈 ${p.holdRate.toFixed(1)}%` +
+      (noteParts ? `。信号：${noteParts}` : '');
+    return {
+      code: p.code,
+      name: p.name,
+      assetType: 'etf',
+      direction: dir,
+      thesis,
+      buyTrigger: sig?.buyTrigger ?? null,
+      sellTrigger: sig?.sellTrigger ?? null,
+      stopLoss: sig?.stopLoss ?? null,
+      takeProfit: sig?.takeProfit ?? null,
+      positionHint: `当前 ${p.positionRate.toFixed(0)}%`,
+      source: 'position',
+      confidence: null,
+      priority: 1,
+    };
+  });
+
+  const added = repo.addItemsIfAbsent(plan.id, inputs);
+  if (added.length) {
+    repo.appendEvent({ planId: plan.id, kind: 'note', payload: { heldEtfInjected: added }, runId });
+  }
+  return added;
+}
+
 /** 落库后增强统一编排：先个股辩论、再 ETF 研判（串行，避免两者并发改写 narrative 互相覆盖）。 */
 async function enrichTodayPlan(runId: string | null): Promise<void> {
   await enrichTodayPlanWithDebate(runId).catch((e) =>
@@ -502,14 +632,19 @@ export async function runPlanGeneration(opts: {
     {
       id: null,
       name: PLAN_GEN_TASK_NAME,
-      prompt: PLAN_GEN_PROMPT,
-      modelConfig: { thinking: false, maxSteps: opts.maxSteps ?? 20 },
+      prompt: getPlanGenPrompt(),
+      // save_today_plan 一次性落库的结构化 JSON 较大，须给足输出 token 防止入参被长度截断
+      modelConfig: { thinking: false, maxSteps: opts.maxSteps ?? 20, maxTokens: 16000 },
       notifyChannels: opts.channels,
       timeoutSec: 900,
     },
     opts.trigger,
   );
   if (result.status === 'success') {
+    // 先做持仓 ETF 全覆盖兜底（确定性，快），使注入的持仓 ETF 也能进入后续 ETF 研判增强
+    await ensureHeldEtfCoverage(result.runId).catch((e) =>
+      console.warn('[plan] 持仓 ETF 全覆盖兜底失败:', e instanceof Error ? e.message : e),
+    );
     if (opts.awaitDebate) await enrichTodayPlan(result.runId);
     else void enrichTodayPlan(result.runId);
   }
@@ -648,6 +783,7 @@ export function formatPlanForAgent(detail: DailyPlanDetail): string {
     );
   }
   if (plan.externalContext) lines.push(`外围：${plan.externalContext}`);
+  if (plan.keyRisks.length) lines.push('今日风险：' + plan.keyRisks.join('；'));
   lines.push(`标的 ${items.length} 只：`);
   for (const it of items) {
     const trg =

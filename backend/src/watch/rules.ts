@@ -222,6 +222,19 @@ function evalPlanSignals(ctx: QuoteCtx): WatchSignal[] {
   }
 
   if (ctx.source === 'position') {
+    // 持仓加仓买点：计划给该持仓 ETF 的 buyTrigger（方向 buy=加仓）命中，提示按计划加仓
+    const bt = item.buyTrigger;
+    if (item.direction === 'buy' && bt && bt.value > 0 && cross(bt)) {
+      out.push(
+        mk(
+          ctx,
+          'plan_buy',
+          'high',
+          `命中今日计划持仓加仓买点（${bt.type === 'breakout' ? '突破' : '回落至'} ${bt.value}）现价 ${p.toFixed(2)}${item.thesis ? `｜${item.thesis}` : ''}`,
+          78,
+        ),
+      );
+    }
     const sl = item.stopLoss;
     const tp = item.takeProfit;
     const st = item.sellTrigger;

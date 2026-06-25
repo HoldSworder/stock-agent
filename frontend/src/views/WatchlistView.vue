@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
+import { useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
 import { Refresh, MagicStick, Search, Files, Sort, Upload, Plus } from '@element-plus/icons-vue';
 import { api } from '@/api';
-import MarkdownView from '@/components/MarkdownView.vue';
+import AiAnalysisDialog from '@/components/AiAnalysisDialog.vue';
 import StockLink from '@/components/StockLink.vue';
 import type { WatchlistEntry } from '@stock-agent/shared';
 
@@ -68,9 +69,8 @@ const bulkVisible = ref(false);
 const bulkForm = reactive({ codes: '', tags: '' });
 const bulkLoading = ref(false);
 
-// 整组分析
-const reviewing = ref(false);
-const review = ref('');
+// 整组分析（统一 analyze kind：watchlist-combo）
+const comboOpen = ref(false);
 
 // 同花顺同步
 const syncing = ref(false);
@@ -112,11 +112,10 @@ async function deleteGroup() {
 // 推送到爱盯盘（单向镜像）
 const pushing = ref(false);
 
-// 单只分析弹窗
-const dialogVisible = ref(false);
-const dialogTitle = ref('');
-const dialogLoading = ref(false);
-const dialogText = ref('');
+// 单只分析弹窗（统一 analyze kind：watchlist-stock，按 code 作用域读历史）
+const oneOpen = ref(false);
+const oneCode = ref('');
+const oneName = ref('');
 
 async function load(silent = false) {
   if (!silent) loading.value = true;
@@ -248,37 +247,24 @@ async function remove(row: WatchlistEntry) {
   }
 }
 
-async function analyzeOne(row: WatchlistEntry) {
-  dialogVisible.value = true;
-  dialogTitle.value = `${row.name}(${row.code}) AI 研判`;
-  dialogLoading.value = true;
-  dialogText.value = '';
-  try {
-    const r = await api.analyzeWatch(row.code);
-    dialogText.value = r.text || '（无输出）';
-  } catch (e) {
-    dialogText.value = '';
-    ElMessage.error(e instanceof Error ? e.message : String(e));
-  } finally {
-    dialogLoading.value = false;
-  }
+// 全站统一两标签：快速研判（单股单轮 LLM，本页弹窗流式）/ 深度辩论（跳决策页跑多 agent 流水线）
+function analyzeOne(row: WatchlistEntry) {
+  oneCode.value = row.code;
+  oneName.value = row.name;
+  oneOpen.value = true;
 }
 
-async function analyzeAll() {
+const router = useRouter();
+function debateOne(row: WatchlistEntry) {
+  router.push({ path: '/decision', query: { code: row.code, asset: 'stock' } });
+}
+
+function analyzeAll() {
   if (items.value.length === 0) {
     ElMessage.warning('关注列表为空');
     return;
   }
-  reviewing.value = true;
-  review.value = '';
-  try {
-    const r = await api.analyzeWatchlist();
-    review.value = r.text || '（无输出）';
-  } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : String(e));
-  } finally {
-    reviewing.value = false;
-  }
+  comboOpen.value = true;
 }
 
 // A股 红涨绿跌
@@ -305,13 +291,8 @@ onUnmounted(() => {
     <div v-if="!embedded" class="page-head">
       <div class="page-title">自选股</div>
       <div class="head-actions">
-        <el-button
-          :icon="MagicStick"
-          type="primary"
-          :loading="reviewing"
-          @click="analyzeAll"
-        >
-          一键 AI 分析
+        <el-button :icon="MagicStick" type="primary" @click="analyzeAll">
+          组合研判
         </el-button>
         <el-button :icon="Plus" @click="createGroup">新建分组</el-button>
         <el-button :icon="Files" @click="bulkVisible = true">批量添加</el-button>
@@ -323,8 +304,8 @@ onUnmounted(() => {
     <div v-if="!embedded" class="page-sub">添加 A 股主板 / 创业板标的跟踪（东方财富实时行情，红涨绿跌）</div>
     <div v-else class="embed-bar">
       <span class="embed-sub">添加 A 股主板 / 创业板标的跟踪（东方财富实时行情，红涨绿跌）</span>
-      <el-button :icon="MagicStick" type="primary" :loading="reviewing" @click="analyzeAll">
-        一键 AI 分析
+      <el-button :icon="MagicStick" type="primary" @click="analyzeAll">
+        组合研判
       </el-button>
       <el-button :icon="Plus" @click="createGroup">新建分组</el-button>
       <el-button :icon="Files" @click="bulkVisible = true">批量添加</el-button>
@@ -358,13 +339,6 @@ onUnmounted(() => {
       <span class="add-hint">
         将加入：<b>{{ activeGroup || SELF_TAG }}</b>
       </span>
-    </div>
-
-    <!-- 整组分析结果 -->
-    <div v-if="reviewing || review" class="review">
-      <div class="review-head"><el-icon><MagicStick /></el-icon> 组合研判</div>
-      <div v-if="reviewing" class="review-loading">正在结合关注标的盘面生成研判…</div>
-      <MarkdownView v-else :source="review" />
     </div>
 
     <!-- 分组切换（无「全部」tab；右键 tab 可删除分组） -->
@@ -424,10 +398,13 @@ onUnmounted(() => {
           <span v-else class="muted">—</span>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="150" align="right">
+      <el-table-column label="操作" width="220" align="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="analyzeOne(row)">
-            AI 分析
+            快速研判
+          </el-button>
+          <el-button link type="warning" size="small" @click="debateOne(row)">
+            深度辩论
           </el-button>
           <el-button link type="danger" size="small" @click="remove(row)">删除</el-button>
         </template>
@@ -471,11 +448,17 @@ onUnmounted(() => {
       </div>
     </teleport>
 
-    <!-- 单只研判弹窗 -->
-    <el-dialog v-model="dialogVisible" :title="dialogTitle" width="640px" top="8vh">
-      <div v-if="dialogLoading" class="review-loading">正在结合行情与消息面生成研判…</div>
-      <MarkdownView v-else :source="dialogText" />
-    </el-dialog>
+    <!-- 单只研判弹窗（统一 AI 分析：流式轨迹 + 按 code 作用域历史） -->
+    <AiAnalysisDialog
+      v-model="oneOpen"
+      kind="watchlist-stock"
+      :title="oneName ? `${oneName}(${oneCode}) AI 研判` : '自选个股研判'"
+      :params="{ code: oneCode }"
+      :ref-key="oneCode"
+    />
+
+    <!-- 组合研判弹窗（统一 AI 分析：全局历史） -->
+    <AiAnalysisDialog v-model="comboOpen" kind="watchlist-combo" title="自选组合研判" />
   </div>
 </template>
 
@@ -520,34 +503,6 @@ onUnmounted(() => {
 .sug-code {
   color: var(--text-2);
   font-size: 12px;
-}
-.review {
-  background: var(--bg-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 14px 16px;
-  margin-bottom: 18px;
-}
-.review-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-weight: 600;
-  color: var(--brand);
-  margin-bottom: 10px;
-}
-.review-loading {
-  color: var(--text-2);
-  font-size: 13px;
-}
-.review-body {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: inherit;
-  font-size: 13.5px;
-  line-height: 1.7;
-  color: var(--text-0);
 }
 .group-tabs {
   margin-bottom: 4px;

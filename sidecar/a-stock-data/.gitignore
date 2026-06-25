@@ -1,0 +1,7 @@
+# 构建期由 extract.py 从 vendor/SKILL.md 生成，不入库
+astock_functions.py
+__pycache__/
+*.pyc
+# 运行时持久卷（mootdx 配置 / 北向缓存）
+data/
+.venv-test/

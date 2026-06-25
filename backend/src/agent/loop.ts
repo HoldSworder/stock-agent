@@ -600,6 +600,8 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
     }
 
     let content = '';
+    // 本步结束原因（length=输出达上限被截断），用于对工具入参 JSON 截断给出可读提示
+    let finishReason: string | null = null;
     const toolCallAcc = new Map<
       number,
       { id: string; name: string; args: string }
@@ -614,6 +616,7 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
           stepCompletion = chunk.usage.completion_tokens ?? stepCompletion;
         }
         if (!choice) continue;
+        if (choice.finish_reason) finishReason = choice.finish_reason;
         const delta = choice.delta;
         // 推理型模型的原生思考增量（deepseek: reasoning_content；部分网关: reasoning）。
         // 仅透传给前端展示，不并入 content/messages，避免污染上下文与最终输出。
@@ -756,9 +759,17 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
       } catch (e) {
         if (isAbortError(e) || aborted()) throw e; // abort 上抛，由 gather 处统一收口 canceled
         ok = false;
-        result = isToolTimeout(e)
-          ? `工具执行超时（>${TOOL_TIMEOUT_MS / 1000}s），已跳过本次调用。请改用更聚焦的查询或更换条件。`
-          : `工具执行失败: ${e instanceof Error ? e.message : String(e)}`;
+        if (e instanceof SyntaxError) {
+          // 入参不是合法 JSON：多因输出被长度截断导致入参残缺，给出明确收敛引导而非裸解析报错
+          result =
+            finishReason === 'length'
+              ? `工具 ${call.name} 入参解析失败：输出被长度截断，入参 JSON 不完整。请精简各标的 thesis/confirmConditions/invalidConditions 等文字、分清主次，只调用一次 ${call.name} 落库。`
+              : `工具 ${call.name} 入参不是合法 JSON（${e.message}）。请重新生成完整、合法的入参后重试。`;
+        } else {
+          result = isToolTimeout(e)
+            ? `工具执行超时（>${TOOL_TIMEOUT_MS / 1000}s），已跳过本次调用。请改用更聚焦的查询或更换条件。`
+            : `工具执行失败: ${e instanceof Error ? e.message : String(e)}`;
+        }
       }
       emit({ type: 'tool_result', id: call.id, name: call.name, ok, preview: result.slice(0, 300) });
       return { call, result };

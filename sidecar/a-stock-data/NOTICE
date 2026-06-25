@@ -1,0 +1,10 @@
+This sidecar incorporates data-fetching code extracted from:
+
+  a-stock-data — https://github.com/simonlin1212/a-stock-data
+  Copyright (c) Simon 林
+  Licensed under the Apache License, Version 2.0 (see vendor/LICENSE)
+
+The Python functions in astock_functions.py are auto-extracted (build-time)
+from vendor/SKILL.md by extract.py. The pinned upstream commit is recorded in
+UPSTREAM.md. No substantive modification is made to the extracted function
+bodies; only example/usage lines are stripped during extraction.

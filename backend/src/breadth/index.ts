@@ -1,6 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { defineModuleSchedules } from '../scheduling/defineModuleSchedules';
 import { buildBreadthOverview } from './service';
+import { buildMainlineConsensus } from './consensus';
 import { listHistoryByBoard } from './repo';
 import { cached } from '../lib/ttlCache';
 
@@ -16,6 +17,15 @@ export function registerBreadthModule(app: FastifyInstance): void {
         ok: true,
         data: await cached('breadth:overview', 30 * 60_000, () => buildBreadthOverview()),
       };
+    } catch (e) {
+      return reply.code(502).send({ ok: false, error: e instanceof Error ? e.message : String(e) });
+    }
+  });
+
+  // 主线共识（决策层聚合：breadth 锚 ⋈ themes ⋈ radar）。复用各源缓存，响应级 120s 缓存。
+  app.get('/api/breadth/consensus', async (_req, reply) => {
+    try {
+      return { ok: true, data: await cached('breadth:consensus', 120_000, buildMainlineConsensus) };
     } catch (e) {
       return reply.code(502).send({ ok: false, error: e instanceof Error ? e.message : String(e) });
     }

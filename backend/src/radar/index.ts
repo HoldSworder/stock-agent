@@ -1,5 +1,5 @@
 import type { FastifyInstance, FastifyReply } from 'fastify';
-import { buildRadarOverview } from './service';
+import { buildRadarOverview, computePositionTrends } from './service';
 import { cached } from '../lib/ttlCache';
 
 // 中线雷达模块：注册 /api/radar/overview，作为大盘页「行业中线强弱」Tab 的确定性明细数据源。
@@ -16,6 +16,15 @@ export function registerRadarModule(app: FastifyInstance): void {
     try {
       // 响应级 120s 缓存：复用 ETF 指标层的行业强弱聚合较重，中线视图慢变
       return { ok: true, data: await cached('radar:overview', 120_000, buildRadarOverview) };
+    } catch (e) {
+      return fail(reply, e);
+    }
+  });
+
+  // 持仓趋势跟随（对真实持仓逐只算 MA60 趋势 + 跟随/减仓建议）。供「持仓与自选」页中线趋势体检消费。
+  app.get('/api/radar/position-trends', async (_req, reply) => {
+    try {
+      return { ok: true, data: await cached('radar:positionTrends', 120_000, computePositionTrends) };
     } catch (e) {
       return fail(reply, e);
     }

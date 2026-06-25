@@ -21,6 +21,10 @@ const DEFAULTS: Partial<Record<SettingKey, string>> = {
   neteaseEnabled: 'true',
   jisiluEnabled: 'true',
   akshareEnabled: 'true',
+  // 中金所股指期货持仓榜（直连 CFFEX CSV，无鉴权），默认开启
+  cffexEnabled: 'true',
+  // 美股映射（隔夜美股龙头/行业 → A股概念·ETF·个股，经东财 push2），默认开启
+  usMapEnabled: 'true',
   // 华泰证券 AI 网关（涨乐/妙想 edge gate），默认开启并指向官方生产网关
   htscBaseUrl: 'https://ai.zhangle.com',
   htscEnabled: 'true',
@@ -34,6 +38,8 @@ const DEFAULTS: Partial<Record<SettingKey, string>> = {
   // 财联社电报 / 雪球：经 AKShare(aktools) 透传，默认开启
   clsEnabled: 'true',
   xueqiuEnabled: 'true',
+  // a-stock-data sidecar（mootdx 不封IP 行情 + 同花顺一致预期 + 巨潮公告 + 龙虎榜/解禁/两融等 28 端点），默认开启
+  astockEnabled: 'true',
 };
 
 const KEYS = {
@@ -64,6 +70,8 @@ const KEYS = {
   jisiluCookie: 'jisilu_cookie',
   akshareBaseUrl: 'akshare_base_url',
   akshareEnabled: 'akshare_enabled',
+  cffexEnabled: 'cffex_enabled',
+  usMapEnabled: 'us_map_enabled',
   htApiKey: 'ht_apikey',
   htscBaseUrl: 'htsc_base_url',
   htscEnabled: 'htsc_enabled',
@@ -75,6 +83,8 @@ const KEYS = {
   iwencaiStockEnabled: 'iwencai_stock_enabled',
   clsEnabled: 'cls_enabled',
   xueqiuEnabled: 'xueqiu_enabled',
+  astockBaseUrl: 'astock_base_url',
+  astockEnabled: 'astock_enabled',
 } as const;
 
 type SettingKey = keyof typeof KEYS;
@@ -194,6 +204,8 @@ export function getPublicSettings(): AppSettings {
     jisiluCookie: getValue('jisiluCookie'),
     akshareBaseUrl: getValue('akshareBaseUrl'),
     akshareEnabled: getValue('akshareEnabled'),
+    cffexEnabled: getValue('cffexEnabled'),
+    usMapEnabled: getValue('usMapEnabled'),
     htApiKey: getValue('htApiKey'),
     htscBaseUrl: getValue('htscBaseUrl'),
     htscEnabled: getValue('htscEnabled'),
@@ -205,6 +217,8 @@ export function getPublicSettings(): AppSettings {
     iwencaiStockEnabled: getValue('iwencaiStockEnabled'),
     clsEnabled: getValue('clsEnabled'),
     xueqiuEnabled: getValue('xueqiuEnabled'),
+    astockBaseUrl: getValue('astockBaseUrl'),
+    astockEnabled: getValue('astockEnabled'),
   };
 }
 
@@ -236,6 +250,8 @@ export interface SettingsUpdate {
   jisiluCookie?: string;
   akshareBaseUrl?: string;
   akshareEnabled?: string;
+  cffexEnabled?: string;
+  usMapEnabled?: string;
   htApiKey?: string;
   htscBaseUrl?: string;
   htscEnabled?: string;
@@ -247,6 +263,8 @@ export interface SettingsUpdate {
   iwencaiStockEnabled?: string;
   clsEnabled?: string;
   xueqiuEnabled?: string;
+  astockBaseUrl?: string;
+  astockEnabled?: string;
 }
 
 export function updateSettings(patch: SettingsUpdate): void {

@@ -22,6 +22,9 @@ import { callTool } from '../trendradar/mcpClient';
 import { pingHtsc } from '../htsc/client';
 import { pingIwencai, pingIwencaiStock } from '../iwencai/client';
 import { callAkshare } from '../market/akshare';
+import { pingAstock } from '../astock/client';
+import { fetchCffexRank } from '../market/cffexRank';
+import { buildUsMapping } from '../market/usMapping';
 import { ping as pingCls } from '../cls/service';
 import { sqlite } from '../db/client';
 
@@ -131,6 +134,52 @@ const SOURCES: SourceDef[] = [
       { key: 'akshareBaseUrl', label: 'Base URL', secret: false, required: true, placeholder: 'https://<aktools 反代地址>' },
     ],
     healthCheck: () => pingAkshare(),
+  },
+  {
+    id: 'astockdata',
+    name: 'a-stock-data（mootdx sidecar）',
+    category: '行情',
+    protocol: 'http-rest',
+    baseUrl: 'a-stock-data sidecar → /api/call',
+    description:
+      'a-stock-data 全栈 28 端点专属 sidecar（独立容器部署，与 aktools 并行，稳定后可逐步替代）：mootdx 通达信 K线/五档/逐笔/财务（TCP 7709，不封 IP，K线调度首选源）、腾讯估值、百度K线MA、东财研报+行业研报、同花顺一致预期EPS、龙虎榜/全市场龙虎榜/解禁/板块归属/行业排名、两融/大宗/股东户数/分红/资金流、个股新闻/全球资讯、巨潮公告、新浪财报三表。Agent 经 astock_call 按端点名调用；东财端点内置 em_get 串行限流防封。Base URL 填 sidecar 暴露地址（NAS 独立容器为 http://<NAS局域网IP>:9119，如 http://192.168.31.144:9119）。mootdx 需国内 IP（部署在 NAS）。',
+    enabledKey: 'astockEnabled',
+    fields: [
+      { key: 'astockBaseUrl', label: 'Base URL', secret: false, required: true, placeholder: 'http://192.168.31.144:9119（NAS 暴露端口）' },
+    ],
+    healthCheck: () => pingAstock(),
+  },
+  {
+    id: 'cffex',
+    name: '中金所持仓榜',
+    category: '行情',
+    protocol: 'http-rest',
+    baseUrl: 'www.cffex.com.cn',
+    description:
+      '中金所股指期货（IF/IH/IC/IM）每日前20会员持仓排名原始 CSV（含中信期货）。政府公开源、无鉴权、GBK 编码，直连不走 aktools。用于宏观·资金面的「中信多空单」机构对冲背景。',
+    enabledKey: 'cffexEnabled',
+    fields: [],
+    healthCheck: async () => {
+      const r = await fetchCffexRank();
+      if (!r || !r.items.length) throw new Error('CFFEX 持仓榜取数为空（近 7 日无数据或解析失败）');
+    },
+  },
+  {
+    id: 'usmap',
+    name: '美股映射',
+    category: '行情',
+    protocol: 'http-rest',
+    baseUrl: 'push2.eastmoney.com',
+    description:
+      '隔夜美股龙头/行业 ETF（如 NVDA/SMH）→ A股概念·ETF·个股 的盘前情绪/叙事传导底稿。经东财 push2 抓美股 secid 隔夜涨跌（无鉴权、复用现有通道），叠加人工维护映射表。仅作盘前背景，非择时信号。',
+    enabledKey: 'usMapEnabled',
+    fields: [],
+    healthCheck: async () => {
+      const r = await buildUsMapping();
+      if (!r || !r.sectors.length) {
+        throw new Error('美股映射取数为空（push2 无返回或 secid 全部失效）');
+      }
+    },
   },
   {
     id: 'ths',

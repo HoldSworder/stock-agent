@@ -9,7 +9,7 @@ import ScoreBreakdownPopover from '@/components/ScoreBreakdownPopover.vue';
 import ScreenerProgress from '@/components/ScreenerProgress.vue';
 import StrengthMethodologyDrawer from '@/components/StrengthMethodologyDrawer.vue';
 import { useKlineStore } from '@/stores/kline';
-import { SCREEN_FACTOR_LABELS } from '@stock-agent/shared';
+import { SCREEN_FACTOR_LABELS, SCREEN_FACTOR_DESC } from '@stock-agent/shared';
 import type {
   ScreenEngineInfo,
   ScreenFactorKey,
@@ -350,11 +350,19 @@ onMounted(loadStatus);
             <span class="pg-note">按因子权重加权 · 决定排名</span>
           </div>
           <div class="weights">
-            <div v-for="p in weightParts" :key="p.key" class="weight" :title="`${p.label} 权重 ${p.pct}%`">
-              <span class="wk">{{ p.label }}</span>
-              <span class="wbar"><i :style="{ width: p.pct + '%' }" /></span>
-              <span class="wv">{{ p.pct }}%</span>
-            </div>
+            <el-tooltip v-for="p in weightParts" :key="p.key" placement="left" :width="240">
+              <template #content>
+                <div class="factor-tip">
+                  <b>{{ p.label }} · 权重 {{ p.pct }}%</b>
+                  <p>{{ SCREEN_FACTOR_DESC[p.key] }}</p>
+                </div>
+              </template>
+              <div class="weight">
+                <span class="wk">{{ p.label }}</span>
+                <span class="wbar"><i :style="{ width: p.pct + '%' }" /></span>
+                <span class="wv">{{ p.pct }}%</span>
+              </div>
+            </el-tooltip>
           </div>
           <div v-if="critL2a.length" class="pg-tags ideal">
             <el-tag v-for="c in critL2a" :key="c" size="small" effect="plain" type="info" class="crit-tag">
@@ -448,10 +456,23 @@ onMounted(loadStatus);
             <el-table-column label="因子" min-width="170">
               <template #default="{ row }">
                 <div class="factors">
-                  <div v-for="k in pickFactorKeys(row)" :key="k" class="factor" :title="`${SCREEN_FACTOR_LABELS[k]} ${factorBar(row, k)}`">
-                    <span class="fk">{{ SCREEN_FACTOR_LABELS[k] }}</span>
-                    <span class="fbar"><i :style="{ width: factorBar(row, k) + '%' }" /></span>
-                  </div>
+                  <el-tooltip
+                    v-for="k in pickFactorKeys(row)"
+                    :key="k"
+                    placement="left"
+                    :width="240"
+                  >
+                    <template #content>
+                      <div class="factor-tip">
+                        <b>{{ SCREEN_FACTOR_LABELS[k] }} · {{ factorBar(row, k) }} 分</b>
+                        <p>{{ SCREEN_FACTOR_DESC[k] }}</p>
+                      </div>
+                    </template>
+                    <div class="factor">
+                      <span class="fk">{{ SCREEN_FACTOR_LABELS[k] }}</span>
+                      <span class="fbar"><i :style="{ width: factorBar(row, k) + '%' }" /></span>
+                    </div>
+                  </el-tooltip>
                 </div>
               </template>
             </el-table-column>
@@ -807,6 +828,15 @@ onMounted(loadStatus);
   display: block;
   height: 100%;
   background: var(--el-color-primary);
+}
+.factor-tip b {
+  display: block;
+  margin-bottom: 4px;
+}
+.factor-tip p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
 }
 .thesis {
   font-size: 12px;

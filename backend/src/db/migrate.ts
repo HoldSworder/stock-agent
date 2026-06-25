@@ -212,6 +212,54 @@ CREATE TABLE IF NOT EXISTS watch_alerts (
 CREATE INDEX IF NOT EXISTS idx_watch_alerts_created ON watch_alerts(created_at);
 CREATE INDEX IF NOT EXISTS idx_watch_alerts_code ON watch_alerts(code);
 
+CREATE TABLE IF NOT EXISTS etf_watch_signals (
+  id TEXT PRIMARY KEY,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  signal_type TEXT NOT NULL,
+  layer INTEGER NOT NULL DEFAULT 1,
+  timeframe TEXT NOT NULL,
+  position_pct REAL NOT NULL DEFAULT 0,
+  detail TEXT NOT NULL,
+  trigger_price REAL NOT NULL DEFAULT 0,
+  dif REAL NOT NULL DEFAULT 0,
+  dea REAL NOT NULL DEFAULT 0,
+  confidence REAL,
+  verdict TEXT,
+  advice TEXT,
+  bar_time TEXT,
+  run_id TEXT,
+  delivered INTEGER NOT NULL DEFAULT 0,
+  confirm_json TEXT,
+  instruction_json TEXT,
+  trend_stage TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_etf_watch_signals_created ON etf_watch_signals(created_at);
+CREATE INDEX IF NOT EXISTS idx_etf_watch_signals_code ON etf_watch_signals(code);
+
+CREATE TABLE IF NOT EXISTS etf_watch_state (
+  code TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  held_layers TEXT NOT NULL DEFAULT '[]',
+  layer_entry_price TEXT NOT NULL DEFAULT '{}',
+  layer_entry_at TEXT NOT NULL DEFAULT '{}',
+  peak_price REAL NOT NULL DEFAULT 0,
+  trend_stage TEXT,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS etf_share_daily (
+  code TEXT NOT NULL,
+  date TEXT NOT NULL,
+  shares REAL NOT NULL DEFAULT 0,
+  close REAL NOT NULL DEFAULT 0,
+  volume REAL NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (code, date)
+);
+CREATE INDEX IF NOT EXISTS idx_etf_share_daily_code ON etf_share_daily(code);
+
 CREATE TABLE IF NOT EXISTS llm_calls (
   id TEXT PRIMARY KEY,
   purpose TEXT NOT NULL,
@@ -592,6 +640,15 @@ export function ensureSchema(): void {
     "ALTER TABLE screen_runs ADD COLUMN universe_note TEXT",
     "ALTER TABLE market_themes ADD COLUMN phase TEXT NOT NULL DEFAULT '未知'",
     "ALTER TABLE market_themes ADD COLUMN strength_history TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE daily_plans ADD COLUMN key_risks TEXT NOT NULL DEFAULT '[]'",
+    'ALTER TABLE daily_plans ADD COLUMN intraday_guide TEXT',
+    'ALTER TABLE etf_watch_signals ADD COLUMN verdict TEXT',
+    'ALTER TABLE etf_watch_signals ADD COLUMN bar_time TEXT',
+    'ALTER TABLE etf_watch_signals ADD COLUMN confirm_json TEXT',
+    'ALTER TABLE etf_watch_signals ADD COLUMN instruction_json TEXT',
+    'ALTER TABLE etf_watch_signals ADD COLUMN trend_stage TEXT',
+    "ALTER TABLE etf_watch_state ADD COLUMN layer_entry_at TEXT NOT NULL DEFAULT '{}'",
+    'ALTER TABLE etf_watch_state ADD COLUMN trend_stage TEXT',
   ];
   for (const sql of addColumns) {
     try {
@@ -613,6 +670,7 @@ function warnOnSchemaDrift(): void {
   const required: Record<string, string[]> = {
     scheduled_tasks: ['strategy_id'],
     strategies: ['kind', 'screen_engine', 'screen_strategy_id', 'horizon', 'rebalance_cron'],
+    daily_plans: ['key_risks', 'intraday_guide'],
     daily_plan_items: ['asset_type', 'confirm_conditions', 'invalid_conditions', 'confidence'],
     watch_alerts: ['strategy_id', 'exec_status'],
     screen_runs: ['engine', 'horizon'],

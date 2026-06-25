@@ -1,0 +1,20 @@
+# a-stock-data sidecar —— 独立基础设施容器（不属于 stock-agent 主 compose）。
+# 群晖部署：把本目录整体拷到 NAS（如 /volume1/docker/a-stock-data），在该目录执行：
+#   docker compose up -d --build
+# 后端在「数据源」页填 Base URL = http://<NAS局域网IP>:9119（如 http://192.168.31.144:9119）。
+# mootdx 走通达信 TCP 7709，需国内 IP —— NAS 国内出口即可，勿在海外/隧道环境跑。
+services:
+  a-stock-data:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: a-stock-data:local
+    container_name: a-stock-data
+    restart: unless-stopped
+    ports:
+      - "9119:9119"
+    environment:
+      EM_MIN_INTERVAL: "1.0"
+    volumes:
+      # 持久化 mootdx 配置(~/.mootdx) 与北向资金自缓存(~/.tradingagents)，容器内 HOME=/data
+      - ./data:/data

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, onUnmounted, ref, watch } from 'vue';
+import { useRoute } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { ArrowRight, CircleClose, Clock, MagicStick } from '@element-plus/icons-vue';
 import { api, openWs } from '@/api';
@@ -14,8 +15,8 @@ const PHASES = ['分析师研判', '多空辩论', '风控博弈', '组合裁决
 // 多智能体辩论决策页：输入代码（个股）或选择股指 → 流式跑「分析师→多空辩论→风控→决策」流水线，
 // 复用公共 ai_analyses 历史（kind=decision，refKey=代码/指数key）。WS 路径 /ws/decision。
 
-// 资产类型：个股（6 位代码）/ 股指（白名单 secid 取数）
-const assetType = ref<'stock' | 'index'>('stock');
+// 资产类型：个股（6 位代码）/ 股指（白名单 secid 取数）/ ETF（6 位代码，方向研判）
+const assetType = ref<'stock' | 'index' | 'etf'>('stock');
 const code = ref('');
 const indices = ref<DecisionIndexInfo[]>([]);
 const indexKey = ref('');
@@ -76,7 +77,7 @@ function start() {
       return;
     }
   } else if (!/^\d{6}$/.test(c)) {
-    ElMessage.warning('请输入合法的 6 位股票代码');
+    ElMessage.warning(assetType.value === 'etf' ? '请输入合法的 6 位 ETF 代码' : '请输入合法的 6 位股票代码');
     return;
   }
   if (busy.value) return;
@@ -117,7 +118,9 @@ function start() {
   const payload =
     assetType.value === 'index'
       ? JSON.stringify({ action: 'generate', assetType: 'index', code: indexKey.value })
-      : JSON.stringify({ action: 'generate', code: c });
+      : assetType.value === 'etf'
+        ? JSON.stringify({ action: 'generate', assetType: 'etf', code: c })
+        : JSON.stringify({ action: 'generate', code: c });
   if (ws.readyState === WebSocket.OPEN) ws.send(payload);
   else ws.addEventListener('open', () => ws?.send(payload), { once: true });
 }
@@ -142,7 +145,15 @@ async function loadIndices() {
   }
 }
 
+const route = useRoute();
 onMounted(() => {
+  // 「深度辩论」跨链预填：?code=6位&asset=stock|etf（只预填代码与资产类型，不自动发起，避免意外 LLM 消耗）
+  const qCode = String(route.query.code ?? '').trim();
+  const qAsset = String(route.query.asset ?? '').trim();
+  if (/^\d{6}$/.test(qCode)) {
+    code.value = qCode;
+    assetType.value = qAsset === 'etf' ? 'etf' : 'stock';
+  }
   loadHistory();
   loadIndices();
 });
@@ -160,12 +171,13 @@ onUnmounted(() => {
         <el-radio-group v-model="assetType" :disabled="busy" size="default">
           <el-radio-button value="stock">个股</el-radio-button>
           <el-radio-button value="index">股指</el-radio-button>
+          <el-radio-button value="etf">ETF</el-radio-button>
         </el-radio-group>
         <el-input
-          v-if="assetType === 'stock'"
+          v-if="assetType !== 'index'"
           v-model="code"
           class="code-input"
-          placeholder="6 位股票代码"
+          :placeholder="assetType === 'etf' ? '6 位 ETF 代码' : '6 位股票代码'"
           maxlength="6"
           clearable
           @keyup.enter="start"
@@ -227,7 +239,7 @@ onUnmounted(() => {
           v-else
           class="main-empty"
           :image-size="92"
-          description="输入个股代码或选择股指点击「发起决策」，或从左侧选择历史记录"
+          description="输入个股/ETF 代码或选择股指点击「发起决策」，或从左侧选择历史记录"
         />
       </main>
     </div>

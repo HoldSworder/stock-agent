@@ -14,6 +14,11 @@ export const PROMPT_KEYS = {
   systemBase: 'system_base',
   thinkingDirective: 'thinking_directive',
   compactSystem: 'compact_system',
+  // 今日计划三段运行时提示词（由 plan/service 在模块加载时 registerPromptDef 注入，
+  // 此处仅声明 key 常量供运行时 getPrompt 引用，prompt 正文仍是 plan 模块的单一来源）
+  planGen: 'plan_generate',
+  planReview: 'plan_review',
+  planReeval: 'plan_reevaluate',
 } as const;
 
 const BASE_SYSTEM_PROMPT = `你是一个 A 股投研与交易助手，运行在用户自建的选股平台中。
@@ -83,7 +88,18 @@ const DEFS: PromptDef[] = [
   },
 ];
 
-const DEF_MAP = new Map(DEFS.map((d) => [d.key, d]));
+// 提示词定义注册表：内置三段全局提示词 + 各业务模块在加载时通过 registerPromptDef 注入（如今日计划三段）。
+// 用 Map 保插入顺序，listPromptInfo 据此渲染中枢·提示词页。
+const DEF_MAP = new Map<string, PromptDef>(DEFS.map((d) => [d.key, d]));
+
+/**
+ * 注册一段可覆盖提示词（业务模块在加载时调用，把自己的运行时 prompt 收编进统一提示词管理）。
+ * 把 prompt 正文留在原业务模块（单一来源 + 兼容旧种子签名匹配），此处仅登记其默认值供可视化 + 覆盖。
+ * 重复 key 以最后一次为准（幂等，热重载安全）。
+ */
+export function registerPromptDef(def: PromptDef): void {
+  DEF_MAP.set(def.key, def);
+}
 
 /** 读取全部提示词覆盖配置（key -> content）；解析失败按空配置处理 */
 export function getOverrides(): Record<string, string> {
@@ -111,7 +127,7 @@ export function getPrompt(key: string): string {
 /** 列出全部提示词的展示信息（默认值 / 当前覆盖 / 是否覆盖） */
 export function listPromptInfo(): PromptInfo[] {
   const overrides = getOverrides();
-  return DEFS.map((d) => {
+  return [...DEF_MAP.values()].map((d) => {
     const ov = overrides[d.key];
     const overridden = typeof ov === 'string' && ov.trim().length > 0;
     return {

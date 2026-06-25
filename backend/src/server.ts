@@ -63,6 +63,8 @@ import {
   buildMarketBoardPrompt,
   MARKET_BOARD_TASK_NAME,
 } from './market/overview';
+import { buildMacroOverview } from './market/macro';
+import { buildUsMapping } from './market/usMapping';
 import { getModules, setModules } from './market/modules';
 import { registerMarketSchedule } from './market/schedule';
 import { cached } from './lib/ttlCache';
@@ -123,6 +125,7 @@ import {
 } from './chat';
 import { subscribe } from './ws';
 import { registerWatchModule, startWatchEngine } from './watch';
+import { registerEtfWatchModule, startEtfWatchEngine } from './etfwatch';
 import { registerTrendRadarModule } from './trendradar';
 import { registerResearchModule } from './research';
 import { registerClsModule } from './cls';
@@ -334,6 +337,18 @@ async function main() {
   app.get('/api/market/overview', async () => ({
     ok: true,
     data: await cached('market:overview', 60_000, buildOverview),
+  }));
+
+  // 宏观·资金面底稿（日频/EOD 低频指标）：与实时盘面分离，10 分钟 TTL 足够
+  app.get('/api/market/macro', async () => ({
+    ok: true,
+    data: await cached('market:macro', 600_000, buildMacroOverview),
+  }));
+
+  // 美股映射底稿（隔夜美股龙头/行业 → A股概念·ETF·个股）：盘前情绪背景，10 分钟 TTL
+  app.get('/api/market/usmapping', async () => ({
+    ok: true,
+    data: await cached('market:usmapping', 600_000, buildUsMapping),
   }));
 
   // 复盘历史（成功的「一键复盘」运行）
@@ -883,83 +898,8 @@ async function main() {
     }
   });
 
-  // 单只标的 AI 研判
-  app.post<{ Params: { code: string } }>(
-    '/api/watchlist/:code/analyze',
-    async (req, reply) => {
-      const item = listWatch().find((i) => i.code === req.params.code);
-      if (!item) return reply.code(404).send({ ok: false, error: '标的不在关注列表' });
-      try {
-        const prompt =
-          `请对关注标的 ${item.name}(${item.code}) 做个股研判：` +
-          '用 mx_finance_data 查实时量价/资金流/估值与涨跌停价，用 mx_search 查最新消息面与公告，' +
-          (item.tags ? `结合标签【${item.tags}】所属主线，` : '') +
-          (item.note ? `参考我的备注【${item.note}】，` : '') +
-          '给出：当前所处位置与趋势、关键支撑/压力位、买卖点建议、主要风险提示。' +
-          '结论精炼、分点、给依据，禁止 Markdown 表格。';
-        const result = await runTask(
-          {
-            id: null,
-            name: `个股研判·${item.name}`,
-            prompt,
-            modelConfig: { thinking: false, maxSteps: 10 },
-            notifyChannels: ['webui'],
-            timeoutSec: 300,
-            purpose: 'analyze',
-          },
-          'manual',
-        );
-        return {
-          ok: result.status === 'success',
-          data: { runId: result.runId, status: result.status, text: result.outputText },
-          error: result.status === 'success' ? undefined : `研判未成功（${result.status}）`,
-        };
-      } catch (e) {
-        return reply
-          .code(502)
-          .send({ ok: false, error: e instanceof Error ? e.message : String(e) });
-      }
-    },
-  );
-
-  // 整组关注标的一键 AI 分析
-  app.post('/api/watchlist/analyze', async (_req, reply) => {
-    const items = listWatch();
-    if (items.length === 0) {
-      return reply.code(400).send({ ok: false, error: '关注列表为空' });
-    }
-    try {
-      const list = items
-        .map((i) => `${i.name}(${i.code})${i.tags ? ` [${i.tags}]` : ''}`)
-        .join('、');
-      const prompt =
-        `以下是我的关注标的清单：${list}。` +
-        '请逐只用 mx_finance_data 查实时量价/资金/估值，必要时用 mx_search 补充消息面，' +
-        '做一次组合层面的轮动研判：逐只给当前位置与买卖点倾向，再综合排序当前最值得关注/最该回避的标的及理由，并给风险提示。' +
-        '结论精炼、分点、给依据，禁止 Markdown 表格。';
-      const result = await runTask(
-        {
-          id: null,
-          name: '关注标的组合研判',
-          prompt,
-          modelConfig: { thinking: false, maxSteps: 12 },
-          notifyChannels: ['webui'],
-          timeoutSec: 300,
-          purpose: 'analyze',
-        },
-        'manual',
-      );
-      return {
-        ok: result.status === 'success',
-        data: { runId: result.runId, status: result.status, text: result.outputText },
-        error: result.status === 'success' ? undefined : `分析未成功（${result.status}）`,
-      };
-    } catch (e) {
-      return reply
-        .code(502)
-        .send({ ok: false, error: e instanceof Error ? e.message : String(e) });
-    }
-  });
+  // 自选单只 / 组合 AI 研判已收编为统一 analyze kind（watchlist-stock / watchlist-combo），
+  // 发起走 /ws/analyze 流式 + /api/analyses 历史；原内联同步路由已下线。
 
   // ===== 聊天 =====
   app.get('/api/chat/sessions', () => {
@@ -1102,6 +1042,10 @@ async function main() {
   // 实时盯盘模块（独立，可删除以下两行整模块下线）
   registerWatchModule(app);
   startWatchEngine();
+
+  // ETF 多周期分层盯盘模块（独立，可删除以下两行整模块下线）
+  registerEtfWatchModule(app);
+  startEtfWatchEngine();
 
   // 热点雷达模块（独立，删除此行整模块下线）
   registerTrendRadarModule(app);

@@ -4,6 +4,7 @@ import type {
   DailyPlanEvent,
   DailyPlanItem,
   DailyPlanSummary,
+  IntradayGuide,
   MarketStance,
   PlanAssetType,
   PlanEventKind,
@@ -61,6 +62,8 @@ function rowToPlan(row: PlanRow): DailyPlan {
     focusSectors: parse<PlanFocusSector[]>(row.focusSectors, []),
     externalContext: row.externalContext ?? '',
     narrative: row.narrative ?? '',
+    keyRisks: parseStrArray(row.keyRisks),
+    intradayGuide: parse<IntradayGuide | null>(row.intradayGuide, null),
     runId: row.runId ?? null,
     reviewSummary: row.reviewSummary ?? null,
     createdAt: row.createdAt,
@@ -180,6 +183,8 @@ export interface UpsertPlanInput {
   focusSectors?: PlanFocusSector[];
   externalContext?: string;
   narrative?: string;
+  keyRisks?: string[];
+  intradayGuide?: IntradayGuide | null;
   runId?: string | null;
 }
 
@@ -206,6 +211,12 @@ export function upsertPlan(input: UpsertPlanInput): string {
         externalContext:
           input.externalContext !== undefined ? input.externalContext : existing.externalContext,
         narrative: input.narrative !== undefined ? input.narrative : existing.narrative,
+        keyRisks:
+          input.keyRisks !== undefined ? JSON.stringify(input.keyRisks) : existing.keyRisks,
+        intradayGuide:
+          input.intradayGuide !== undefined
+            ? JSON.stringify(input.intradayGuide)
+            : existing.intradayGuide,
         runId: input.runId !== undefined ? input.runId : existing.runId,
         updatedAt: now,
       })
@@ -223,6 +234,8 @@ export function upsertPlan(input: UpsertPlanInput): string {
       focusSectors: JSON.stringify(input.focusSectors ?? []),
       externalContext: input.externalContext ?? null,
       narrative: input.narrative ?? null,
+      keyRisks: JSON.stringify(input.keyRisks ?? []),
+      intradayGuide: input.intradayGuide != null ? JSON.stringify(input.intradayGuide) : null,
       runId: input.runId ?? null,
       reviewSummary: null,
       createdAt: now,
@@ -300,6 +313,56 @@ export function replaceItems(planId: string, items: ItemInput[]): void {
         .run();
     }
   });
+}
+
+/**
+ * 仅追加计划中尚不存在的标的项（按 code 去重，不动已有项）。
+ * 供「持仓 ETF 全覆盖」确定性兜底：AI 漏写的持仓 ETF 由代码补齐，不覆盖 AI 已给的标的。
+ * 返回实际新增的 code 列表。
+ */
+export function addItemsIfAbsent(planId: string, items: ItemInput[]): string[] {
+  const existing = new Set(
+    db
+      .select({ code: schema.dailyPlanItems.code })
+      .from(schema.dailyPlanItems)
+      .where(eq(schema.dailyPlanItems.planId, planId))
+      .all()
+      .map((r) => r.code),
+  );
+  const toAdd = items.filter((it) => it.code && !existing.has(it.code));
+  if (!toAdd.length) return [];
+  const now = nowIso();
+  db.transaction((tx) => {
+    for (const it of toAdd) {
+      existing.add(it.code);
+      tx.insert(schema.dailyPlanItems)
+        .values({
+          id: newId(),
+          planId,
+          code: it.code,
+          name: it.name,
+          assetType: it.assetType ?? classifyAsset(it.code),
+          direction: it.direction ?? 'watch',
+          thesis: it.thesis ?? null,
+          buyTrigger: trig(it.buyTrigger),
+          sellTrigger: trig(it.sellTrigger),
+          stopLoss: trig(it.stopLoss),
+          takeProfit: trig(it.takeProfit),
+          positionHint: it.positionHint ?? null,
+          confirmConditions: condList(it.confirmConditions),
+          invalidConditions: condList(it.invalidConditions),
+          source: it.source ?? 'other',
+          confidence: typeof it.confidence === 'number' ? it.confidence : null,
+          priority: it.priority ?? 0,
+          status: 'pending',
+          lastNote: null,
+          createdAt: now,
+          updatedAt: now,
+        })
+        .run();
+    }
+  });
+  return toAdd.map((it) => it.code);
 }
 
 export function listItems(planId: string): DailyPlanItem[] {

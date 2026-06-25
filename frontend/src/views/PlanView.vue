@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { useRouter } from 'vue-router';
 import dayjs from 'dayjs';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Refresh, MagicStick, Clock, Back, Compass, Promotion } from '@element-plus/icons-vue';
+import { Refresh, MagicStick, Clock, Back, Compass, Promotion, Aim } from '@element-plus/icons-vue';
 import { api } from '@/api';
 import StockLink from '@/components/StockLink.vue';
 import ModuleScheduleDialog from '@/components/ModuleScheduleDialog.vue';
 import RunResultDrawer from '@/components/RunResultDrawer.vue';
+import MarkdownView from '@/components/MarkdownView.vue';
 import type {
   DailyPlanDetail,
   DailyPlanEvent,
@@ -21,11 +23,22 @@ import type {
   PlanTrigger,
   OneClickRunState,
   OneClickStepStatus,
+  RealPortfolio,
   ScreenPick,
   ScreenRunDetail,
   StockQuote,
   TaskRun,
 } from '@stock-agent/shared';
+
+const router = useRouter();
+// 核心打法快捷入口：直达 ETF 轮动榜并一键跑「强赛道→成分股→中线龙头」下钻（复用 ETF 页下钻渲染）
+function goDrilldown() {
+  void router.push({ path: '/etf', query: { tab: 'rotation', drill: '1' } });
+}
+// 计划项「深度辩论」全站统一入口：跳决策页预填代码（与持仓卡/自选页同一对标签）
+function debateItem(code: string, asset: 'stock' | 'etf') {
+  void router.push({ path: '/decision', query: { code, asset } });
+}
 
 const detail = ref<DailyPlanDetail | null>(null);
 const loading = ref(false);
@@ -43,10 +56,25 @@ const historyLoading = ref(false);
 const quoteMap = ref<Map<string, StockQuote>>(new Map());
 const etfSignalMap = ref<Map<string, EtfSignal>>(new Map());
 
+// 真实持仓（仅当日拉取，供「建议仓位 vs 真实持仓」对照；失败静默降级）
+const realPortfolio = ref<RealPortfolio | null>(null);
+
+// 分时作战当前时段高亮：每 30s 刷新本地时间
+const nowTs = ref(Date.now());
+let clockTimer: ReturnType<typeof setInterval> | null = null;
+
 /** 拉取实时行情（个股 quotes + ETF 信号），失败静默降级为只读落库字段 */
 async function loadLive() {
   quoteMap.value = new Map();
   etfSignalMap.value = new Map();
+  realPortfolio.value = null;
+  // 真实持仓独立拉取（供仓位对照），失败静默
+  void api
+    .getRealPositions()
+    .then((rp) => {
+      realPortfolio.value = rp;
+    })
+    .catch(() => {});
   const list = detail.value?.items ?? [];
   const stockCodes = list.filter((i) => i.assetType !== 'etf').map((i) => i.code);
   const hasEtf = list.some((i) => i.assetType === 'etf');
@@ -141,9 +169,10 @@ async function viewHistory(date: string) {
     detail.value = d;
     viewingDate.value = date;
     historyDrawer.value = false;
-    // 历史回看不拉实时数据，清空合并 Map
-    quoteMap.value = new Map();
-    etfSignalMap.value = new Map();
+      // 历史回看不拉实时数据，清空合并 Map 与真实持仓
+      quoteMap.value = new Map();
+      etfSignalMap.value = new Map();
+      realPortfolio.value = null;
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : String(e));
   } finally {
@@ -431,6 +460,121 @@ function distToTrigger(code: string, t: PlanTrigger | null): string {
   return `${d > 0 ? '+' : ''}${d.toFixed(2)}%`;
 }
 
+/** 某标的现价（个股取 quote、ETF 取 signal），无则 null */
+function itemPrice(item: DailyPlanItem): number | null {
+  if (item.assetType === 'etf') return etfSig(item.code)?.price ?? null;
+  return liveQuote(item.code)?.price ?? null;
+}
+
+type TriggerState = { label: string; cls: string };
+
+/**
+ * 盘中实时触发状态（B）：用现价对照该标的触发价分级，给「现在该不该动手」的醒目提示。
+ * 仅当日(isLive)且有实时价时有效；历史回看或缺价返回 null。
+ */
+function triggerState(item: DailyPlanItem): TriggerState | null {
+  if (!isLive.value) return null;
+  const price = itemPrice(item);
+  if (price == null) return null;
+  if (item.stopLoss?.value && price <= item.stopLoss.value)
+    return { label: '已破止损', cls: 'ts-stop' };
+  if (item.takeProfit?.value && price >= item.takeProfit.value)
+    return { label: '已达止盈', cls: 'ts-profit' };
+  const bt = item.buyTrigger;
+  if (bt?.value) {
+    if (bt.type === 'breakout') {
+      if (price >= bt.value) return { label: '已触发买点', cls: 'ts-active' };
+      if ((bt.value - price) / bt.value <= 0.01) return { label: '接近买点', cls: 'ts-near' };
+    } else {
+      // price/pullback：回落至触发价及以下视为触发
+      if (price <= bt.value) return { label: '已触发买点', cls: 'ts-active' };
+      if ((price - bt.value) / bt.value <= 0.01) return { label: '接近买点', cls: 'ts-near' };
+    }
+    return { label: '待触发', cls: 'ts-wait' };
+  }
+  return null;
+}
+
+// 真实持仓中的 ETF 代码集合（用于「持仓」标记，仅当日有持仓数据时非空）
+const heldEtfCodes = computed(
+  () =>
+    new Set(
+      (realPortfolio.value?.positions ?? [])
+        .filter((p) => /^[15]/.test(p.code))
+        .map((p) => p.code),
+    ),
+);
+const isHeld = (code: string): boolean => heldEtfCodes.value.has(code);
+
+// ETF 优先、再按 priority×confidence 排序（今日计划以 ETF 为主体）
+function etfFirst(a: DailyPlanItem, b: DailyPlanItem) {
+  const ae = a.assetType === 'etf' ? 0 : 1;
+  const be = b.assetType === 'etf' ? 0 : 1;
+  if (ae !== be) return ae - be;
+  return itemPriority(a, b);
+}
+
+// ===== A 今日操作清单 / 观察池（ETF 优先，再按 priority×confidence）=====
+const actionItems = computed(() =>
+  items.value.filter((i) => i.direction !== 'watch').sort(etfFirst),
+);
+const watchItems = computed(() =>
+  items.value.filter((i) => i.direction === 'watch').sort(etfFirst),
+);
+
+/** 操作清单单行触发价摘要：买/止损/止盈各取一，紧凑展示 */
+function actionTriggers(item: DailyPlanItem): { label: string; value: string; cls: string }[] {
+  const out: { label: string; value: string; cls: string }[] = [];
+  if (item.buyTrigger) out.push({ label: '买', value: trg(item.buyTrigger), cls: 'up' });
+  if (item.stopLoss) out.push({ label: '损', value: trg(item.stopLoss), cls: 'down' });
+  if (item.takeProfit) out.push({ label: '盈', value: trg(item.takeProfit), cls: '' });
+  return out;
+}
+
+// ===== C 建议仓位 vs 真实持仓对照 =====
+const positionCompare = computed(() => {
+  if (!isLive.value) return null;
+  const rp = realPortfolio.value;
+  if (!rp) return null;
+  const target = plan.value?.marketStance?.positionPct ?? null;
+  const actual = Math.round(rp.positions.reduce((a, p) => a + (p.positionRate || 0), 0));
+  const diff = target != null ? target - actual : null;
+  const heldCodes = new Set(rp.positions.map((p) => p.code));
+  const toBuild = items.value.filter((i) => i.direction === 'buy' && !heldCodes.has(i.code));
+  const toReduce = items.value.filter(
+    (i) => (i.direction === 'reduce' || i.direction === 'sell') && heldCodes.has(i.code),
+  );
+  return { target, actual, diff, toBuild, toReduce };
+});
+
+// ===== D 盘中失效预警：pending 标的的失效条件提前置顶 =====
+const invalidWatch = computed(() =>
+  items.value.filter((i) => i.status === 'pending' && i.invalidConditions.length),
+);
+
+// ===== E 分时作战：当前时段高亮 =====
+const PHASES = [
+  { key: 'auction', label: '集合竞价', range: '9:15-9:25', start: 9 * 60 + 15, end: 9 * 60 + 25 },
+  { key: 'morning', label: '早盘', range: '9:30-11:30', start: 9 * 60 + 30, end: 11 * 60 + 30 },
+  { key: 'midday', label: '午盘', range: '13:00-14:30', start: 13 * 60, end: 14 * 60 + 30 },
+  { key: 'tail', label: '尾盘', range: '14:30-15:00', start: 14 * 60 + 30, end: 15 * 60 },
+] as const;
+
+const currentPhaseKey = computed<string | null>(() => {
+  const d = new Date(nowTs.value);
+  const m = d.getHours() * 60 + d.getMinutes();
+  return PHASES.find((p) => m >= p.start && m < p.end)?.key ?? null;
+});
+
+/** 分时指引可展示的段（仅渲染 AI 给出内容的段），历史回看也保留落库内容 */
+const intradayPhases = computed(() => {
+  const g = plan.value?.intradayGuide;
+  if (!g) return [];
+  return PHASES.map((p) => ({ ...p, text: (g as Record<string, string | undefined>)[p.key] })).filter(
+    (p) => !!p.text,
+  );
+});
+
 /** 解析事件 payload（note/trigger 文本） */
 function eventText(ev: DailyPlanEvent): string {
   if (!ev.payload) return '';
@@ -448,6 +592,9 @@ function eventText(ev: DailyPlanEvent): string {
 }
 
 onMounted(async () => {
+  clockTimer = setInterval(() => {
+    nowTs.value = Date.now();
+  }, 30000);
   await load();
   // 进入页面时若编排仍在运行（如刷新页面），续接轮询展示进度
   try {
@@ -461,7 +608,10 @@ onMounted(async () => {
   }
 });
 
-onUnmounted(stopOneclickPoll);
+onUnmounted(() => {
+  stopOneclickPoll();
+  if (clockTimer) clearInterval(clockTimer);
+});
 </script>
 
 <template>
@@ -479,6 +629,7 @@ onUnmounted(stopOneclickPoll);
         <template v-else>
           <ModuleScheduleDialog module="plan" />
           <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
+          <el-button :icon="Aim" @click="goDrilldown">下钻强赛道龙头</el-button>
           <el-button
             v-if="plan && !viewingDate"
             :icon="Compass"
@@ -591,6 +742,73 @@ onUnmounted(stopOneclickPoll);
         <div v-else class="muted">未提供大盘研判</div>
       </div>
 
+      <!-- A 今日操作清单（按 优先级×置信度，开盘即照做） -->
+      <div v-if="actionItems.length || watchItems.length" class="section">
+        <div class="section-title">
+          今日操作清单
+          <span class="tag-hist">按 优先级×置信度 排序{{ isLive ? '·含盘中触发状态' : '·历史回看' }}</span>
+        </div>
+        <div v-if="actionItems.length" class="action-list">
+          <div v-for="it in actionItems" :key="it.id" class="action-row">
+            <el-tag size="small" :type="DIR_META[it.direction].type as any" effect="dark" class="ac-dir">
+              {{ DIR_META[it.direction].label }}
+            </el-tag>
+            <span class="ac-name">
+              <StockLink :code="it.code" :name="it.name" />
+              <el-tag size="small" effect="plain" class="ac-type">{{ it.assetType === 'etf' ? 'ETF' : '个股' }}</el-tag>
+              <el-tag v-if="isLive && isHeld(it.code)" size="small" type="warning" effect="plain" class="ac-type">持仓</el-tag>
+            </span>
+            <span class="ac-trgs">
+              <span v-for="t in actionTriggers(it)" :key="t.label" class="ac-trg">
+                {{ t.label }}<b class="num" :class="t.cls">{{ t.value }}</b>
+              </span>
+              <span v-if="it.positionHint" class="ac-trg">仓位<b class="num">{{ it.positionHint }}</b></span>
+            </span>
+            <el-tag
+              v-if="triggerState(it)"
+              size="small"
+              effect="dark"
+              class="ac-state"
+              :class="triggerState(it)!.cls"
+            >
+              {{ triggerState(it)!.label }}
+            </el-tag>
+            <span v-if="it.confidence != null" class="ac-conf conf-num" :class="confidenceCls(it.confidence)">
+              {{ it.confidence }}
+            </span>
+            <span class="ac-note">{{ it.confirmConditions?.[0] || it.thesis || '—' }}</span>
+          </div>
+        </div>
+        <div v-else class="muted">今日无可执行标的（均为观察）</div>
+        <div v-if="watchItems.length" class="watch-pool">
+          <span class="watch-cap">观察池</span>
+          <span v-for="it in watchItems" :key="it.id" class="watch-chip">
+            <StockLink :code="it.code" :name="it.name" />
+            <span v-if="it.confidence != null" class="conf-num sub" :class="confidenceCls(it.confidence)">{{ it.confidence }}</span>
+          </span>
+        </div>
+      </div>
+
+      <!-- E 分时作战（当前时段高亮） -->
+      <div v-if="intradayPhases.length" class="section">
+        <div class="section-title">分时作战</div>
+        <div class="intraday">
+          <div
+            v-for="p in intradayPhases"
+            :key="p.key"
+            class="intraday-phase"
+            :class="{ active: isLive && currentPhaseKey === p.key }"
+          >
+            <div class="ip-head">
+              <span class="ip-label">{{ p.label }}</span>
+              <span class="ip-range num">{{ p.range }}</span>
+              <el-tag v-if="isLive && currentPhaseKey === p.key" size="small" type="warning" effect="dark">当前</el-tag>
+            </div>
+            <div class="ip-text">{{ p.text }}</div>
+          </div>
+        </div>
+      </div>
+
       <!-- 计划兑现度（纯统计） -->
       <div v-if="fulfillment" class="section">
         <div class="section-title">
@@ -609,6 +827,61 @@ onUnmounted(stopOneclickPoll);
             <span class="warn">已失效 {{ fulfillment.invalid }}</span>
             <span class="muted">待触发 {{ fulfillment.pending }}</span>
             <span class="muted">标的 {{ fulfillment.total }}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- C 建议仓位 vs 真实持仓对照 -->
+      <div v-if="positionCompare" class="section">
+        <div class="section-title">
+          仓位对照
+          <span class="tag-hist">计划建议 vs 真实持仓·实时</span>
+        </div>
+        <div class="poscmp">
+          <div class="poscmp-cards">
+            <div class="card">
+              <div class="card-label">建议总仓位</div>
+              <div class="card-value num">{{ positionCompare.target != null ? positionCompare.target + '%' : '—' }}</div>
+            </div>
+            <div class="card">
+              <div class="card-label">真实总仓位</div>
+              <div class="card-value num">{{ positionCompare.actual }}%</div>
+            </div>
+            <div v-if="positionCompare.diff != null" class="card">
+              <div class="card-label">{{ positionCompare.diff > 0 ? '可加仓' : positionCompare.diff < 0 ? '宜减仓' : '已匹配' }}</div>
+              <div class="card-value num" :class="positionCompare.diff > 0 ? 'up' : positionCompare.diff < 0 ? 'down' : ''">
+                {{ positionCompare.diff > 0 ? '+' : '' }}{{ positionCompare.diff }}%
+              </div>
+            </div>
+          </div>
+          <div v-if="positionCompare.toBuild.length" class="poscmp-line">
+            <span class="poscmp-cap up">待建仓</span>
+            <span v-for="it in positionCompare.toBuild" :key="it.id" class="poscmp-chip">
+              <StockLink :code="it.code" :name="it.name" />
+              <span v-if="it.positionHint" class="sub num">{{ it.positionHint }}</span>
+            </span>
+          </div>
+          <div v-if="positionCompare.toReduce.length" class="poscmp-line">
+            <span class="poscmp-cap down">待减仓</span>
+            <span v-for="it in positionCompare.toReduce" :key="it.id" class="poscmp-chip">
+              <StockLink :code="it.code" :name="it.name" />
+              <el-tag size="small" :type="DIR_META[it.direction].type as any" effect="plain">{{ DIR_META[it.direction].label }}</el-tag>
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <!-- D 今日风险 / 盘中失效预警 -->
+      <div v-if="plan.keyRisks.length || invalidWatch.length" class="section risk-section">
+        <div class="section-title">今日风险</div>
+        <ul v-if="plan.keyRisks.length" class="risk-list">
+          <li v-for="(r, i) in plan.keyRisks" :key="i">{{ r }}</li>
+        </ul>
+        <div v-if="invalidWatch.length" class="risk-invalid">
+          <div class="risk-invalid-cap">盘中失效预警（待触发标的的失效条件，破则当天取消）</div>
+          <div v-for="it in invalidWatch" :key="it.id" class="risk-invalid-row">
+            <span class="riv-name">{{ it.name }}</span>
+            <span class="riv-cond">{{ it.invalidConditions.join('；') }}</span>
           </div>
         </div>
       </div>
@@ -642,6 +915,7 @@ onUnmounted(stopOneclickPoll);
           <el-table-column label="名称" min-width="120">
             <template #default="{ row }">
               <StockLink :code="row.code" :name="row.name" />
+              <el-tag v-if="isLive && isHeld(row.code)" size="small" type="warning" effect="plain" class="held-tag">持仓</el-tag>
               <span class="code-sub num">{{ row.code }}</span>
             </template>
           </el-table-column>
@@ -701,6 +975,14 @@ onUnmounted(stopOneclickPoll);
               <span v-else class="muted">—</span>
             </template>
           </el-table-column>
+          <el-table-column v-if="isLive" label="触发状态" width="92" align="center">
+            <template #default="{ row }">
+              <el-tag v-if="triggerState(row)" size="small" effect="dark" class="ac-state" :class="triggerState(row)!.cls">
+                {{ triggerState(row)!.label }}
+              </el-tag>
+              <span v-else class="muted">—</span>
+            </template>
+          </el-table-column>
           <el-table-column label="买入触发" min-width="112" align="right">
             <template #default="{ row }"><span class="num up">{{ trg(row.buyTrigger) }}</span></template>
           </el-table-column>
@@ -729,14 +1011,22 @@ onUnmounted(stopOneclickPoll);
             <template #default="{ row }">
               <el-tooltip
                 v-if="row.debateVerdict"
-                :content="row.debateNote || 'ETF agent 研判结论'"
+                :content="`${row.debateNote || 'ETF agent 研判结论'} · 点击重跑深度辩论`"
                 placement="top"
               >
-                <el-tag size="small" :type="debateTagType(row.debateVerdict) as any" effect="dark">
+                <el-tag
+                  size="small"
+                  class="debate-tag"
+                  :type="debateTagType(row.debateVerdict) as any"
+                  effect="dark"
+                  @click="debateItem(row.code, 'etf')"
+                >
                   {{ row.debateVerdict }}<span v-if="row.debateConfidence != null"> {{ row.debateConfidence }}</span>
                 </el-tag>
               </el-tooltip>
-              <span v-else class="muted">—</span>
+              <el-button v-else link type="warning" size="small" @click="debateItem(row.code, 'etf')">
+                深度辩论
+              </el-button>
             </template>
           </el-table-column>
           <el-table-column label="逻辑 / 条件" min-width="200">
@@ -767,13 +1057,14 @@ onUnmounted(stopOneclickPoll);
         </el-table>
       </div>
 
-      <!-- 个股计划（参考层，置于 ETF 之后） -->
-      <div v-if="stockItems.length" class="section">
-        <div class="section-title">
-          个股计划（参考·{{ stockItems.length }}）
-          <span v-if="!isLive" class="tag-hist">历史回看·不含实时行情</span>
-        </div>
-        <el-table :data="stockItems" stripe style="width: 100%">
+      <!-- 个股计划（可选附属层，默认折叠，不与 ETF 主体抢版面） -->
+      <el-collapse v-if="stockItems.length" class="stock-collapse section">
+        <el-collapse-item name="stock">
+          <template #title>
+            <span class="stock-collapse-title">个股参考（折叠·{{ stockItems.length }}）</span>
+            <span v-if="!isLive" class="tag-hist">历史回看·不含实时行情</span>
+          </template>
+          <el-table :data="stockItems" stripe style="width: 100%">
           <el-table-column label="名称" min-width="120">
             <template #default="{ row }">
               <StockLink :code="row.code" :name="row.name" />
@@ -816,6 +1107,14 @@ onUnmounted(stopOneclickPoll);
               <span class="num sub">{{ distToTrigger(row.code, row.buyTrigger) }}</span>
             </template>
           </el-table-column>
+          <el-table-column v-if="isLive" label="触发状态" width="92" align="center">
+            <template #default="{ row }">
+              <el-tag v-if="triggerState(row)" size="small" effect="dark" class="ac-state" :class="triggerState(row)!.cls">
+                {{ triggerState(row)!.label }}
+              </el-tag>
+              <span v-else class="muted">—</span>
+            </template>
+          </el-table-column>
           <el-table-column label="止损" min-width="104" align="right">
             <template #default="{ row }"><span class="num down">{{ trg(row.stopLoss) }}</span></template>
           </el-table-column>
@@ -846,14 +1145,22 @@ onUnmounted(stopOneclickPoll);
             <template #default="{ row }">
               <el-tooltip
                 v-if="row.debateVerdict"
-                :content="row.debateNote || '多 agent 辩论结论'"
+                :content="`${row.debateNote || '多 agent 辩论结论'} · 点击重跑深度辩论`"
                 placement="top"
               >
-                <el-tag size="small" :type="debateTagType(row.debateVerdict) as any" effect="dark">
+                <el-tag
+                  size="small"
+                  class="debate-tag"
+                  :type="debateTagType(row.debateVerdict) as any"
+                  effect="dark"
+                  @click="debateItem(row.code, 'stock')"
+                >
                   {{ row.debateVerdict }}<span v-if="row.debateConfidence != null"> {{ row.debateConfidence }}</span>
                 </el-tag>
               </el-tooltip>
-              <span v-else class="muted">—</span>
+              <el-button v-else link type="warning" size="small" @click="debateItem(row.code, 'stock')">
+                深度辩论
+              </el-button>
             </template>
           </el-table-column>
           <el-table-column label="状态" width="80" align="center">
@@ -866,8 +1173,9 @@ onUnmounted(stopOneclickPoll);
           <el-table-column label="盘中备注" min-width="150">
             <template #default="{ row }"><span class="muted">{{ row.lastNote || '—' }}</span></template>
           </el-table-column>
-        </el-table>
-      </div>
+          </el-table>
+        </el-collapse-item>
+      </el-collapse>
 
       <el-empty v-if="!stockItems.length && !etfItems.length" :image-size="60" description="本计划暂无标的" />
 
@@ -915,7 +1223,7 @@ onUnmounted(stopOneclickPoll);
       <!-- 完整作战图（默认展开） -->
       <el-collapse v-if="plan.narrative" class="narr" :model-value="['narr']">
         <el-collapse-item name="narr" title="完整作战图（narrative）">
-          <pre class="narrative">{{ plan.narrative }}</pre>
+          <MarkdownView :source="plan.narrative" />
         </el-collapse-item>
       </el-collapse>
 
@@ -1018,6 +1326,9 @@ onUnmounted(stopOneclickPoll);
 </template>
 
 <style scoped>
+.debate-tag {
+  cursor: pointer;
+}
 .head-actions {
   display: flex;
   align-items: center;
@@ -1273,6 +1584,14 @@ onUnmounted(stopOneclickPoll);
   font-size: 12px;
   color: var(--el-text-color-secondary);
 }
+.held-tag {
+  margin-left: 6px;
+  transform: scale(0.88);
+}
+.stock-collapse-title {
+  font-weight: 600;
+  font-size: 15px;
+}
 .tag-hist {
   margin-left: 8px;
   font-size: 12px;
@@ -1327,13 +1646,6 @@ onUnmounted(stopOneclickPoll);
 .narr {
   margin-top: 18px;
 }
-.narrative {
-  white-space: pre-wrap;
-  word-break: break-word;
-  font-family: inherit;
-  line-height: 1.7;
-  margin: 0;
-}
 .review {
   background: var(--el-fill-color-lighter);
   border-radius: 8px;
@@ -1386,5 +1698,199 @@ onUnmounted(stopOneclickPoll);
   .two-col {
     grid-template-columns: 1fr;
   }
+}
+
+/* A 今日操作清单 */
+.action-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.action-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  background: var(--el-fill-color-light);
+  font-size: 13px;
+}
+.ac-dir {
+  flex-shrink: 0;
+}
+.ac-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 150px;
+  font-weight: 600;
+}
+.ac-type {
+  transform: scale(0.85);
+}
+.ac-trgs {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.ac-trg {
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+}
+.ac-trg b {
+  margin-left: 2px;
+  font-weight: 600;
+}
+.ac-conf {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.ac-note {
+  flex-basis: 100%;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+/* 触发状态彩色标签（A 清单 + 两表共用） */
+.ac-state {
+  flex-shrink: 0;
+  border: none;
+}
+.ac-state.ts-stop {
+  background: var(--el-color-danger);
+  color: #fff;
+}
+.ac-state.ts-active {
+  background: var(--el-color-danger);
+  color: #fff;
+}
+.ac-state.ts-near {
+  background: var(--el-color-warning);
+  color: #fff;
+}
+.ac-state.ts-profit {
+  background: var(--el-color-success);
+  color: #fff;
+}
+.ac-state.ts-wait {
+  background: var(--el-fill-color);
+  color: var(--el-text-color-secondary);
+}
+.watch-pool {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px dashed var(--el-border-color-lighter);
+}
+.watch-cap {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  font-weight: 600;
+}
+.watch-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+}
+
+/* E 分时作战 */
+.intraday {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px;
+}
+.intraday-phase {
+  padding: 10px 12px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 8px;
+  background: var(--el-fill-color-lighter);
+}
+.intraday-phase.active {
+  border-color: var(--el-color-warning);
+  background: var(--el-color-warning-light-9);
+}
+.ip-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.ip-label {
+  font-weight: 600;
+}
+.ip-range {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+.ip-text {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* C 仓位对照 */
+.poscmp-cards {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.poscmp-cards .card {
+  min-width: 120px;
+}
+.poscmp-line {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 10px;
+}
+.poscmp-cap {
+  font-size: 12px;
+  font-weight: 600;
+}
+.poscmp-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+}
+
+/* D 今日风险 */
+.risk-section {
+  border-left: 3px solid var(--el-color-danger);
+  padding-left: 12px;
+}
+.risk-list {
+  margin: 0;
+  padding-left: 20px;
+  line-height: 1.7;
+  font-size: 13px;
+  color: var(--el-color-danger);
+}
+.risk-invalid {
+  margin-top: 12px;
+}
+.risk-invalid-cap {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  margin-bottom: 6px;
+}
+.risk-invalid-row {
+  display: flex;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 3px 0;
+}
+.riv-name {
+  font-weight: 600;
+  flex-shrink: 0;
+}
+.riv-cond {
+  color: var(--el-color-warning);
 }
 </style>

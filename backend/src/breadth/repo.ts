@@ -90,6 +90,37 @@ export function listRecentSnapshots(beforeDate: string, dateLimit = 6): BoardBre
     }));
 }
 
+/** 最近一个有快照的交易日（无则 null），供今日计划读取最新一份持久化宽度榜 */
+export function getLatestSnapshotDate(): string | null {
+  const row = db
+    .select({ d: schema.boardNewHighSnapshots.tradeDate })
+    .from(schema.boardNewHighSnapshots)
+    .orderBy(desc(schema.boardNewHighSnapshots.tradeDate))
+    .limit(1)
+    .get();
+  return row?.d ?? null;
+}
+
+/** 某交易日的全部板块快照（按排名升序，1=新高数最多） */
+export function listSnapshotsByDate(date: string): BoardBreadthSnapshotRow[] {
+  return db
+    .select()
+    .from(schema.boardNewHighSnapshots)
+    .where(eq(schema.boardNewHighSnapshots.tradeDate, date))
+    .all()
+    .map((row) => ({
+      tradeDate: row.tradeDate,
+      boardCode: row.boardCode,
+      boardName: row.boardName,
+      kind: row.kind as BoardKind,
+      newHighCount: row.newHighCount,
+      consTotal: row.consTotal,
+      ratio: row.ratio,
+      rank: row.rank,
+    }))
+    .sort((a, b) => a.rank - b.rank);
+}
+
 /** 某板块的历史趋势（倒序最近 N 条），供前端持续性展示 */
 export function listHistoryByBoard(boardCode: string, limit = 30): BoardBreadthHistoryItem[] {
   return db

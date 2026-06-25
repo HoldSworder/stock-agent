@@ -1,6 +1,6 @@
 import { getValue } from '../settings';
 import { requestJson } from '../datasource/httpClient';
-import { checkBusinessStatus, formatSearchData } from './searchData';
+import { checkBusinessStatus, formatSearchData, isQuotaExhaustedMessage } from './searchData';
 
 // 妙想（东方财富）官方接口薄封装。
 // 老门户（mkapi2.dfcfs.com，apikey/mkt_ 前缀）：选股/资讯/自选股/模拟盘仍在用。
@@ -30,6 +30,47 @@ const ENDPOINTS = {
 } as const;
 
 export class MiaoxiangError extends Error {}
+
+/**
+ * 妙想新门户日配额耗尽（searchData / assistant 返回 code=403「使用次数已达上限」）。
+ * 工具层据此优雅降级（引导改用免费源），不再以「工具执行失败」硬报错冒泡。
+ */
+export class MiaoxiangQuotaError extends MiaoxiangError {}
+
+// ===== 新门户日配额「当日熔断」=====
+// 妙想 searchData / assistant 走 EM_API_KEY，有日配额。一旦当天命中 code=403 使用次数已达上限，
+// 当天后续所有调用直接短路抛 MiaoxiangQuotaError、不再发请求，避免十几个定时任务反复撞墙刷错误。
+// 内存级状态（进程重启即清空），按上海时区日期跨天自动失效。
+
+/** 上海时区当天日期（YYYY-MM-DD），用于配额熔断按天重置 */
+function shanghaiToday(): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+}
+
+let quotaExhaustedDate: string | null = null;
+
+/** 当日配额是否已熔断 */
+function isQuotaTripped(): boolean {
+  return quotaExhaustedDate === shanghaiToday();
+}
+
+/** 置位当日配额熔断 */
+function tripQuota(): void {
+  quotaExhaustedDate = shanghaiToday();
+}
+
+/** 配额耗尽统一错误（含「改用免费源」引导，供工具层直接降级展示） */
+function quotaError(): MiaoxiangQuotaError {
+  return new MiaoxiangQuotaError(
+    '妙想今日配额已用尽（使用次数已达上限）。量价/涨跌停/换手/量比/主力净流入请改用 stock_quotes（免费），' +
+      'DDX/DDY 用 stock_l2_indicators（问财），估值历史分位/北向/财务等深度指标今日不可用。',
+  );
+}
 
 /** 装配请求头（apikey 鉴权）；未配置直接抛错 */
 function mxHeaders(): Record<string, string> {
@@ -189,26 +230,36 @@ export const miaoxiang = {
     question: string,
     opts?: { deepThink?: boolean; signal?: AbortSignal },
   ): Promise<string> {
+    if (isQuotaTripped()) throw quotaError(); // 当日已熔断：直接短路，不发请求
     const body: Record<string, unknown> = { question };
     if (opts?.deepThink) body.deepThink = true;
-    const json = await requestJson({
-      sourceId: 'miaoxiang',
-      url: ASSISTANT_URL,
-      method: 'POST',
-      headers: emHeaders(),
-      body: JSON.stringify(body),
-      signal: opts?.signal,
-      timeoutMs: 28000,
-      maxAttempts: 2,
-      retryBaseMs: 800,
-      errorLabel: '妙想金融问答',
-      makeError: (msg) => new MiaoxiangError(msg),
-      // 该门户严格用 code==200 表成功（与老门户 code 约定不同）
-      validate: (j) =>
-        isSuccessCode(j.code)
-          ? null
-          : `妙想金融问答返回非成功 code=${String(j.code)} message=${String(j.message ?? '')}`,
-    });
+    let json: Record<string, unknown>;
+    try {
+      json = await requestJson({
+        sourceId: 'miaoxiang',
+        url: ASSISTANT_URL,
+        method: 'POST',
+        headers: emHeaders(),
+        body: JSON.stringify(body),
+        signal: opts?.signal,
+        timeoutMs: 28000,
+        maxAttempts: 2,
+        retryBaseMs: 800,
+        errorLabel: '妙想金融问答',
+        makeError: (msg) => new MiaoxiangError(msg),
+        // 该门户严格用 code==200 表成功（与老门户 code 约定不同）
+        validate: (j) =>
+          isSuccessCode(j.code)
+            ? null
+            : `妙想金融问答返回非成功 code=${String(j.code)} message=${String(j.message ?? '')}`,
+      });
+    } catch (e) {
+      if (e instanceof Error && isQuotaExhaustedMessage(e.message)) {
+        tripQuota();
+        throw quotaError();
+      }
+      throw e;
+    }
     const data = (json.data ?? {}) as Record<string, unknown>;
     const answer = typeof data.displayData === 'string' ? data.displayData.trim() : '';
     if (!answer) throw new MiaoxiangError('妙想金融问答返回空答案');
@@ -220,25 +271,35 @@ export const miaoxiang = {
    * 返回拍平后的精简文本表。独立门户，不入 mxSchedule 串行队列（与老 claw 限流无关）。
    */
   async financeData(toolQuery: string, signal?: AbortSignal): Promise<string> {
+    if (isQuotaTripped()) throw quotaError(); // 当日已熔断：直接短路，不发请求
     const rand = (): string => Math.random().toString(16).slice(2, 10);
-    const json = await requestJson({
-      sourceId: 'miaoxiang',
-      url: SEARCH_DATA_URL,
-      method: 'POST',
-      headers: emHeaders(),
-      body: JSON.stringify({
-        query: toolQuery,
-        toolContext: { callId: `call_${rand()}`, userInfo: { userId: `user_${rand()}` } },
-      }),
-      signal,
-      timeoutMs: 28000,
-      maxAttempts: 2,
-      retryBaseMs: 800,
-      errorLabel: '妙想金融数据',
-      makeError: (msg) => new MiaoxiangError(msg),
-      // 新门户成功语义：code/status ∈ {null,0,200}；业务错误抛出由调用方降级处理
-      validate: (j) => checkBusinessStatus(j),
-    });
+    let json: Record<string, unknown>;
+    try {
+      json = await requestJson({
+        sourceId: 'miaoxiang',
+        url: SEARCH_DATA_URL,
+        method: 'POST',
+        headers: emHeaders(),
+        body: JSON.stringify({
+          query: toolQuery,
+          toolContext: { callId: `call_${rand()}`, userInfo: { userId: `user_${rand()}` } },
+        }),
+        signal,
+        timeoutMs: 28000,
+        maxAttempts: 2,
+        retryBaseMs: 800,
+        errorLabel: '妙想金融数据',
+        makeError: (msg) => new MiaoxiangError(msg),
+        // 新门户成功语义：code/status ∈ {null,0,200}；业务错误抛出由调用方降级处理
+        validate: (j) => checkBusinessStatus(j),
+      });
+    } catch (e) {
+      if (e instanceof Error && isQuotaExhaustedMessage(e.message)) {
+        tripQuota();
+        throw quotaError();
+      }
+      throw e;
+    }
     return formatSearchData(json);
   },
 

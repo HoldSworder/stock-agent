@@ -17,6 +17,11 @@ export const router = createRouter({
     { path: '/screener', name: 'screener', component: () => import('./views/ScreenerView.vue') },
     { path: '/plan', name: 'plan', component: () => import('./views/PlanView.vue') },
     { path: '/watch', name: 'watch', component: () => import('./views/WatchView.vue') },
+    {
+      path: '/etf-watch',
+      name: 'etf-watch',
+      component: () => import('./views/EtfWatchView.vue'),
+    },
     // 情报二合一：热点 + 研报合并为「情报」页
     { path: '/intel', name: 'intel', component: () => import('./views/IntelHubView.vue') },
     // 中线雷达 / 市场主线已折叠进大盘多 Tab，旧链接兜底跳转

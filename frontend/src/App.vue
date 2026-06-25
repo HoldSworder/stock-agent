@@ -14,13 +14,17 @@ import {
   Cpu,
   Compass,
   Odometer,
-  Stopwatch,
+  // Stopwatch,  // 回测下沉后暂未使用，恢复回测导航时一并取消注释
+  Bell,
+  DataLine,
 } from '@element-plus/icons-vue';
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
 import KlineDialog from '@/components/KlineDialog.vue';
 import AgentsPanel from '@/components/AgentsPanel.vue';
+import NotificationCenter from '@/components/NotificationCenter.vue';
 import { useAgentsStore } from '@/stores/agents';
+import { useNotificationsStore } from '@/stores/notifications';
 
 const route = useRoute();
 const blank = computed(() => route.meta.blank === true);
@@ -28,8 +32,19 @@ const blank = computed(() => route.meta.blank === true);
 // 全局 Agent 运行入口
 const agents = useAgentsStore();
 const panelVisible = ref(false);
-onMounted(() => agents.connect());
-onUnmounted(() => agents.disconnect());
+
+// 全局消息中心
+const notifications = useNotificationsStore();
+const notifyVisible = ref(false);
+
+onMounted(() => {
+  agents.connect();
+  notifications.init(agents);
+});
+onUnmounted(() => {
+  agents.disconnect();
+  notifications.dispose();
+});
 
 // 侧边栏按「投资工作流生命周期」分组：行情(输入) → 研判(发现+决策) → 交易(计划+执行) → 复盘(复盘+验证) → 系统(基础设施)
 const groups = [
@@ -62,6 +77,7 @@ const groups = [
     items: [
       { to: '/plan', title: '今日计划', desc: 'War Room', icon: Files },
       { to: '/watch', title: '实时盯盘', desc: 'Watch', icon: Aim },
+      { to: '/etf-watch', title: 'ETF多周期盯盘', desc: 'ETF Watch', icon: DataLine },
       { to: '/positions', title: '持仓与自选', desc: 'Account', icon: Wallet },
     ],
   },
@@ -71,7 +87,8 @@ const groups = [
     items: [
       { to: '/review', title: '复盘', desc: 'Review', icon: Memo },
       { to: '/strategy', title: '战法模拟', desc: 'Strategy', icon: DataAnalysis },
-      { to: '/backtest', title: '回测', desc: 'Backtest', icon: Stopwatch },
+      // 回测下沉：14 天 0 调用且需量化知识维护，移出主导航（路由 /backtest 仍可直达，恢复=取消下行注释）
+      // { to: '/backtest', title: '回测', desc: 'Backtest', icon: Stopwatch },
     ],
   },
   {
@@ -99,6 +116,16 @@ const groups = [
           <div class="brand-name">选股 Agent</div>
           <div class="brand-tag">QUANT TERMINAL</div>
         </div>
+        <el-badge
+          :value="notifications.unreadCount"
+          :hidden="notifications.unreadCount === 0"
+          :max="99"
+          class="bell-badge"
+        >
+          <button class="bell-btn" title="消息中心" @click="notifyVisible = true">
+            <el-icon><Bell /></el-icon>
+          </button>
+        </el-badge>
       </div>
 
       <nav class="nav">
@@ -155,6 +182,9 @@ const groups = [
 
     <!-- 全局 Agent 运行列表抽屉 -->
     <AgentsPanel v-model="panelVisible" />
+
+    <!-- 全局消息中心抽屉 -->
+    <NotificationCenter v-model="notifyVisible" @open-agents="panelVisible = true" />
   </div>
 </template>
 
@@ -178,6 +208,31 @@ const groups = [
   align-items: center;
   gap: 12px;
   padding: 6px 8px 18px;
+}
+.brand-text {
+  flex: 1;
+  min-width: 0;
+}
+.bell-badge {
+  flex-shrink: 0;
+}
+.bell-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-2);
+  color: var(--text-1);
+  font-size: 16px;
+  cursor: pointer;
+  transition: all 0.16s ease;
+}
+.bell-btn:hover {
+  background: var(--bg-hover);
+  color: var(--brand);
 }
 .brand-mark {
   display: flex;

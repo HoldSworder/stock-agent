@@ -10,8 +10,8 @@ import OpsView from './OpsView.vue';
 const router = useRouter();
 const route = useRoute();
 
-// 系统设置三合一：数据源 / 模型与推送&密码 / 运维。三者后端接口各自独立不变。
-const VALID_TABS = ['datasource', 'general', 'ops'] as const;
+// 系统设置：数据源 / 模型与推送&密码 / 运维 / 高级·实验。各后端接口独立不变。
+const VALID_TABS = ['datasource', 'general', 'ops', 'advanced'] as const;
 type SettingsTab = (typeof VALID_TABS)[number];
 function normalizeTab(v: unknown): SettingsTab {
   return VALID_TABS.includes(v as SettingsTab) ? (v as SettingsTab) : 'datasource';
@@ -222,6 +222,22 @@ onMounted(load);
       <el-tab-pane label="运维" name="ops" lazy>
         <OpsView embedded />
       </el-tab-pane>
+
+      <!-- 高级 / 实验：把「需量化知识维护、低频」的能力从主导航下沉到此处折叠入口（保留可达，不硬删） -->
+      <el-tab-pane label="高级 · 实验" name="advanced" lazy>
+        <div class="advanced-note">
+          以下为面向有量化基础用户的高级 / 实验能力，已从主导航移出以保持日常动线聚焦；功能与历史数据完整保留，可随时从这里进入。
+        </div>
+        <div class="adv-card">
+          <div class="adv-main">
+            <div class="adv-title">历史回测（Backtest）</div>
+            <div class="adv-desc">
+              对战法在历史区间做参数回测，产出 Sharpe / 最大回撤 / 盈亏比等量化指标。需量化知识理解与维护，已下沉为高级实验入口；中线 ETF 主线打法无需依赖此处。
+            </div>
+          </div>
+          <el-button type="primary" plain @click="router.push('/backtest')">进入回测</el-button>
+        </div>
+      </el-tab-pane>
     </el-tabs>
   </div>
 </template>
@@ -232,6 +248,38 @@ onMounted(load);
 }
 .s-form {
   max-width: 880px;
+}
+.advanced-note {
+  max-width: 880px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  line-height: 1.6;
+  margin-bottom: 14px;
+}
+.adv-card {
+  max-width: 880px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+}
+.adv-main {
+  flex: 1;
+  min-width: 0;
+}
+.adv-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text-0);
+  margin-bottom: 6px;
+}
+.adv-desc {
+  font-size: 12.5px;
+  color: var(--text-2);
+  line-height: 1.6;
 }
 
 .s-card {

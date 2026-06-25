@@ -14,7 +14,10 @@ import BoardReviewConclusion from '@/components/BoardReviewConclusion.vue';
 import BoardStrengthPanel from '@/components/BoardStrengthPanel.vue';
 import BoardBreadthPanel from '@/components/BoardBreadthPanel.vue';
 import MarketThemesPanel from '@/components/MarketThemesPanel.vue';
+import MainlineConsensusPanel from '@/components/MainlineConsensusPanel.vue';
 import SentimentPanel from '@/components/SentimentPanel.vue';
+import MacroPanel from '@/components/MacroPanel.vue';
+import UsMappingPanel from '@/components/UsMappingPanel.vue';
 import LadderPanel from '@/components/LadderPanel.vue';
 import { useKlineStore } from '@/stores/kline';
 import type {
@@ -42,7 +45,9 @@ const {
 const sectorTab = ref<'industry' | 'concept'>('industry');
 // 顶层分块 Tab：A股大盘 / 行业中线·市场主线 / 期货价格 / 外盘
 // （中线雷达、市场主线已合并为单一 Tab：共用「板块主线研判」agent 结论 + 主线卡片 + 中线强弱表双明细下钻）
-const tab = ref<'astock' | 'sentiment' | 'board' | 'futures' | 'overseas'>('astock');
+const tab = ref<'astock' | 'macro' | 'usmap' | 'sentiment' | 'board' | 'futures' | 'overseas'>('astock');
+// 「行业中线 / 市场主线」明细折叠状态：默认全收起（仅顶部主线共识决策区常驻），按需下钻
+const boardDetail = ref<string[]>([]);
 
 // 大盘与板块研判（合并大盘复盘 + 板块主线）发起统一走 AiAnalysisDialog（kind=market-board），内嵌展示最新一条
 const reviewOpen = ref(false);
@@ -415,6 +420,11 @@ onUnmounted(() => {
       </div>
       </el-tab-pane>
 
+      <!-- ===== 宏观·资金面（低频/EOD 全局指标：基差/SHIBOR/降准/两融/南向/估值分位）===== -->
+      <el-tab-pane v-if="enabled('macro')" label="宏观·资金面" name="macro" lazy>
+        <MacroPanel />
+      </el-tab-pane>
+
       <!-- ===== 情绪周期（S1 短线择时总开关）===== -->
       <el-tab-pane label="情绪周期" name="sentiment" lazy>
         <SentimentPanel />
@@ -426,11 +436,23 @@ onUnmounted(() => {
       </el-tab-pane>
 
       <!-- ===== 行业中线 / 市场主线（合并：中线雷达 + 市场主线）===== -->
+      <!-- 聚焦改造：顶部「主线共识」决策区先给结论，三块明细默认折叠，需要时下钻（按需挂载，省请求） -->
       <el-tab-pane label="行业中线 / 市场主线" name="board" lazy>
-        <BoardReviewConclusion />
-        <BoardBreadthPanel />
-        <MarketThemesPanel />
-        <BoardStrengthPanel />
+        <MainlineConsensusPanel />
+        <el-collapse v-model="boardDetail" class="board-detail">
+          <el-collapse-item name="ai" title="AI 大盘与板块研判结论">
+            <BoardReviewConclusion v-if="boardDetail.includes('ai')" />
+          </el-collapse-item>
+          <el-collapse-item name="breadth" title="板块新高宽度（确定性主线锚 · 明细）">
+            <BoardBreadthPanel v-if="boardDetail.includes('breadth')" />
+          </el-collapse-item>
+          <el-collapse-item name="themes" title="主线题材（多源协同度 · 明细）">
+            <MarketThemesPanel v-if="boardDetail.includes('themes')" />
+          </el-collapse-item>
+          <el-collapse-item name="strength" title="行业 / 概念中线强弱（趋势 · 明细）">
+            <BoardStrengthPanel v-if="boardDetail.includes('strength')" />
+          </el-collapse-item>
+        </el-collapse>
       </el-tab-pane>
 
       <!-- ===== 期货价格 ===== -->
@@ -505,6 +527,11 @@ onUnmounted(() => {
         </template>
         <el-empty v-else :image-size="60" description="外围关键指数模块已在模块管理中关闭" />
       </el-tab-pane>
+
+      <!-- ===== 美股映射（隔夜美股龙头/行业 → A股概念·ETF·个股）===== -->
+      <el-tab-pane v-if="enabled('usmap')" label="美股映射" name="usmap" lazy>
+        <UsMappingPanel />
+      </el-tab-pane>
     </el-tabs>
 
     <el-empty v-else-if="!loading" description="暂无盘面数据" />
@@ -532,6 +559,14 @@ onUnmounted(() => {
 }
 .market-tabs {
   margin-top: 4px;
+}
+.board-detail {
+  margin-top: 4px;
+  border-top: none;
+}
+.board-detail :deep(.el-collapse-item__header) {
+  font-size: 14px;
+  font-weight: 600;
 }
 .stale-hint {
   color: var(--warning, #e6a23c);

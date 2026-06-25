@@ -20,7 +20,7 @@ const traceLoading = ref(false);
 const traceCollapse = ref<string[]>([]);
 
 // 实时流式状态
-type LiveTraceItem = { role: MessageRole | 'tool'; toolName?: string; content: string };
+type LiveTraceItem = { role: MessageRole | 'tool'; toolName?: string; content: string; time: string };
 const liveText = ref('');
 const liveTrace = ref<LiveTraceItem[]>([]);
 const streaming = ref(false);
@@ -48,18 +48,19 @@ function startLiveWs() {
   liveWs = openWs('/ws/runs');
   liveWs.onmessage = async (ev) => {
     const e: StreamEvent = JSON.parse(ev.data);
+    const now = new Date().toISOString();
     switch (e.type) {
       case 'token':
         liveText.value += e.text;
         break;
       case 'tool_call':
-        liveTrace.value.push({ role: 'assistant', toolName: e.name, content: e.args });
+        liveTrace.value.push({ role: 'assistant', toolName: e.name, content: e.args, time: now });
         break;
       case 'tool_result':
-        liveTrace.value.push({ role: 'tool', toolName: e.name, content: e.preview });
+        liveTrace.value.push({ role: 'tool', toolName: e.name, content: e.preview, time: now });
         break;
       case 'message':
-        liveTrace.value.push({ role: e.role, content: e.content });
+        liveTrace.value.push({ role: e.role, content: e.content, time: now });
         break;
       case 'run_finished':
         if (props.run && e.runId === props.run.id) {
@@ -80,6 +81,51 @@ function startLiveWs() {
   };
 }
 
+/**
+ * 回填运行中已落库的轨迹：/ws/runs 无回放，进入运行时已发生的事件全靠此补齐。
+ * 把持久化的 messages 转为 LiveTraceItem 前插到 liveTrace，并用 assistant 文本拼出 liveText 初值。
+ * 前插确保快照排在订阅期间已到达的实时事件之前；token 属未落库的在途步骤，不会与回填重复。
+ */
+async function backfillRunning(runId: string) {
+  let messages: RunMessage[];
+  try {
+    const d = await api.getRun(runId);
+    messages = d.messages;
+  } catch {
+    return; // 回填失败不影响后续实时流
+  }
+  // run/id 在 await 期间可能已切换，丢弃过期结果
+  if (props.run?.id !== runId) return;
+
+  const seeded: LiveTraceItem[] = [];
+  let seededText = '';
+  for (const m of messages) {
+    const time = m.createdAt;
+    if (m.role === 'user') continue;
+    if (m.role === 'tool') {
+      seeded.push({ role: 'tool', toolName: m.toolName ?? undefined, content: m.content ?? '', time });
+      continue;
+    }
+    // assistant
+    if (m.content) {
+      seeded.push({ role: 'assistant', content: m.content, time });
+      seededText += m.content;
+    }
+    if (m.toolCalls) {
+      try {
+        const calls = JSON.parse(m.toolCalls) as { name: string; args: string }[];
+        for (const c of calls) {
+          seeded.push({ role: 'assistant', toolName: c.name, content: c.args ?? '', time });
+        }
+      } catch {
+        // toolCalls 解析失败则跳过该节点
+      }
+    }
+  }
+  liveTrace.value = [...seeded, ...liveTrace.value];
+  liveText.value = seededText + liveText.value;
+}
+
 // 打开/切换 run 时初始化；运行中订阅实时流
 watch(
   () => [props.modelValue, props.run?.id],
@@ -94,6 +140,7 @@ watch(
       streaming.value = true;
       traceCollapse.value = ['trace'];
       startLiveWs();
+      void backfillRunning(props.run.id);
     } else {
       streaming.value = false;
     }
@@ -106,6 +153,8 @@ onUnmounted(stopLiveWs);
 const statusType = (s: string) =>
   s === 'success' ? 'success' : s === 'running' ? 'warning' : 'danger';
 const fmtSec = (s?: string | null) => (s ? dayjs(s).format('MM-DD HH:mm:ss') : '-');
+// 时间线节点时间：仅到秒，节点已分行展示无需日期
+const fmtNodeTime = (s?: string | null) => (s ? dayjs(s).format('HH:mm:ss') : '');
 function duration(r: TaskRun): string {
   if (!r.finishedAt) return '-';
   const sec = dayjs(r.finishedAt).diff(dayjs(r.startedAt), 'second');
@@ -190,7 +239,7 @@ async function copyResult() {
             <el-timeline-item
               v-for="(m, i) in liveTrace"
               :key="i"
-              :timestamp="m.role + (m.toolName ? ` · ${m.toolName}` : '')"
+              :timestamp="fmtNodeTime(m.time) + ' · ' + m.role + (m.toolName ? ` · ${m.toolName}` : '')"
             >
               <div class="mono trace-content">{{ m.content }}</div>
             </el-timeline-item>
@@ -202,7 +251,7 @@ async function copyResult() {
               <el-timeline-item
                 v-for="m in traceMessages"
                 :key="m.id"
-                :timestamp="m.role + (m.toolName ? ` · ${m.toolName}` : '')"
+                :timestamp="fmtNodeTime(m.createdAt) + ' · ' + m.role + (m.toolName ? ` · ${m.toolName}` : '')"
               >
                 <div class="mono trace-content">{{ m.content || m.toolCalls || '' }}</div>
               </el-timeline-item>

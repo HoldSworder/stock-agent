@@ -7,6 +7,7 @@ import {
   listReviews,
 } from '../repo';
 import { shanghaiToday } from '../util';
+import { formatBreadthForPlan } from '../breadth/service';
 import { getPreviousReviewedPlan } from './repo';
 
 // 今日计划上下文聚合：严格读取情报研判/大盘与板块研判/一键复盘/ETF综合研判/上一计划复盘五个源
@@ -139,8 +140,9 @@ function buildPrevPlanReviewBlock(): string {
 }
 
 /**
- * 聚合五源最新 AI 分析为单段文本，供今日计划 agent 一次性读取作为生成基准。
- * 顺序：情报研判（研报+热点）→ 大盘与板块研判（大盘复盘+板块主线+期货外盘）→ 一键复盘综合方向
+ * 聚合多源最新分析为单段文本，供今日计划 agent 一次性读取作为生成基准。
+ * 顺序：情报研判（研报+热点）→ 大盘与板块研判（大盘复盘+板块主线+期货外盘）
+ * → 板块新高宽度（确定性只读主线证据：哪个板块新高最多且持续）→ 一键复盘综合方向
  * → ETF综合研判（操作信号+中线轮动）→ 上一计划收盘复盘/次日预案（闭环反哺）。
  */
 export async function buildPlanContext(): Promise<string> {
@@ -150,6 +152,7 @@ export async function buildPlanContext(): Promise<string> {
     liveIndex,
     buildIntelBlock(),
     buildMarketBoardBlock(),
+    formatBreadthForPlan(),
     buildReviewBlock(),
     buildEtfBlock(),
     buildPrevPlanReviewBlock(),

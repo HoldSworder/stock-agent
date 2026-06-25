@@ -25,10 +25,10 @@ shared/    前后端共享类型
 nvm use                # 切到 .nvmrc 指定的 Node 22
 pnpm install
 cp .env.example .env   # 填入 DeepSeek / 妙想 / Telegram 配置（也可启动后在设置页填）
-pnpm dev               # 同时起后端(8787) 与前端(5173)
+pnpm dev               # 同时起后端(8787) 与前端(5373)
 ```
 
-前端开发地址 http://localhost:5173 ，已配置 `/api`、`/ws` 代理到后端。
+前端开发地址 http://localhost:5373 ，已配置 `/api`、`/ws` 代理到后端。
 
 > 若切换过 Node 版本（如 nvm 在 v22/v24 间切换）后后端报 `NODE_MODULE_VERSION` 不匹配，在 Node 22 下执行 `pnpm fix:native` 重建原生模块即可。
 

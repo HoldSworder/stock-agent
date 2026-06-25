@@ -179,6 +179,27 @@ export async function getIndices(): Promise<MarketIndex[]> {
 }
 
 /**
+ * 批量取指数最新点位（map: secid → 点位），供基差等需现货指数的场景。
+ * 单个失败置 0（调用方据此跳过），不抛错。
+ */
+export async function getIndexPointMap(secids: string[]): Promise<Record<string, number>> {
+  const map: Record<string, number> = {};
+  await Promise.all(
+    secids.map(async (secid) => {
+      try {
+        const url = `${PUSH2}/stock/get?fltt=2&fields=f43,f58&secid=${secid}`;
+        const json = await getJson(url);
+        const d = (json.data ?? {}) as Record<string, unknown>;
+        map[secid] = num(d.f43);
+      } catch {
+        map[secid] = 0;
+      }
+    }),
+  );
+  return map;
+}
+
+/**
  * 单指数实时快照文本（push2 stock/get，显式 secid）：现价/涨跌幅/涨跌额/今开/最高/最低/昨收/振幅。
  * 供指数辩论决策注入，支持 A 股/港股/外围指数（不走 6 位码，规避撞码）。
  */

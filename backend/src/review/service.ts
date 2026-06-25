@@ -180,16 +180,23 @@ export async function buildDeepReviewPrompt(): Promise<string> {
   // 妙想确定性取数（全部 best-effort 降级，并行预取，不占 agent step）：
   // 把强势板块/个股、龙虎榜资金、情绪量化、消息面与妙想综合研判一次性注入 prompt，
   // 让本地 agent 优先基于这些权威数据归纳，减少臆测、也不依赖 agent 主动调用工具。
-  const [mxSectorNote, mxStockNote, mxDragonNote, mxSentimentNote, mxNewsNote, mxJudgeNote] =
+  // 强势板块：本地免费源组装（东财板块涨幅榜，含领涨个股），免妙想额度——与 snapshot.hotIndustries 同源
+  const localSectorNote = ((): string => {
+    const fmt = (arr: Array<{ name: string; pct: number; leadStock?: string }>): string =>
+      arr
+        .slice(0, 5)
+        .map((s) => `${s.name} ${s.pct >= 0 ? '+' : ''}${s.pct}%${s.leadStock ? ` 领涨${s.leadStock}` : ''}`)
+        .join('；');
+    const ind = Array.isArray(ov.hotIndustries) ? ov.hotIndustries : [];
+    const con = Array.isArray(ov.hotConcepts) ? ov.hotConcepts : [];
+    const parts: string[] = [];
+    if (ind.length) parts.push(`行业板块前5：${fmt(ind)}`);
+    if (con.length) parts.push(`概念板块前5：${fmt(con)}`);
+    return parts.join('\n') || '强势板块数据不可用（本地源请求失败）。';
+  })();
+
+  const [mxStockNote, mxDragonNote, mxSentimentNote, mxNewsNote, mxJudgeNote] =
     await Promise.all([
-      mxSafe(
-        () =>
-          miaoxiang.financeData(
-            '今日涨幅居前的行业板块与概念板块各前5名，给出板块名、涨幅、领涨个股',
-          ),
-        '妙想强势板块数据不可用（未配置 MX_APIKEY 或请求失败）。',
-        2500,
-      ),
       mxSafe(
         () =>
           miaoxiang.screener(
@@ -305,9 +312,9 @@ export async function buildDeepReviewPrompt(): Promise<string> {
     fulfillmentNote +
     '\n\n=== 妙想综合研判（权威源，情绪周期/资金风格/主线/明日方向优先采信）===\n' +
     mxJudgeNote +
-    '\n\n=== 妙想强势板块/个股（原始数据，用于 strongSectors/strongStocks 归纳）===\n' +
+    '\n\n=== 强势板块/个股（原始数据，用于 strongSectors/strongStocks 归纳）===\n' +
     '[强势板块]\n' +
-    mxSectorNote +
+    localSectorNote +
     '\n[强势个股]\n' +
     mxStockNote +
     '\n\n=== 妙想龙虎榜（原始数据，用于 dragonTiger 归纳）===\n' +

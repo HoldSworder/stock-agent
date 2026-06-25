@@ -8,6 +8,7 @@ import { useCachedResource } from '@/composables/useCachedResource';
 import StockLink from '@/components/StockLink.vue';
 import ScoreBreakdownPopover from '@/components/ScoreBreakdownPopover.vue';
 import StrengthMethodologyDrawer from '@/components/StrengthMethodologyDrawer.vue';
+import MetricScaleHint from '@/components/MetricScaleHint.vue';
 import type { RadarOverview, TrendMetrics, TrendState } from '@stock-agent/shared';
 
 // 行业中线强弱明细（确定性下钻）：取数面为东财行业 + 概念涨幅榜（N≈40），
@@ -56,6 +57,7 @@ onMounted(() => void load().catch((e) => ElMessage.error(e instanceof Error ? e.
     <div class="block-head">
       <div class="block-title">
         行业 / 概念中线强弱
+        <MetricScaleHint name="中线趋势强度" note="均线排列(20/60/250)+动量口径，与当日涨幅无关。" />
         <span v-if="data" class="as-of">扫描于 {{ dayjs(data.asOf).format('MM-DD HH:mm') }}</span>
       </div>
       <div class="block-actions">
@@ -115,25 +117,24 @@ onMounted(() => void load().catch((e) => ElMessage.error(e instanceof Error ? e.
               </div>
               <span class="num">{{ row.strengthScore }}</span>
             </div>
-            <template #extra>趋势分级依据：{{ trendRule(row.metrics) }}</template>
+            <template #extra>
+              趋势分级依据：{{ trendRule(row.metrics) }}（年线偏离 {{ fmtPct(row.metrics.maDeviation) }}）
+            </template>
           </ScoreBreakdownPopover>
         </template>
       </el-table-column>
-      <el-table-column label="动量排名" width="90" align="center">
+      <el-table-column label="动量排名" width="84" align="center">
         <template #default="{ row }">{{ row.momentumRank ?? '—' }}</template>
       </el-table-column>
-      <el-table-column label="今日" width="90" align="right">
+      <el-table-column label="今日" width="84" align="right">
         <template #default="{ row }">
           <span :class="(row.pct ?? 0) >= 0 ? 'up' : 'down'">{{ fmtPct(row.pct) }}</span>
         </template>
       </el-table-column>
-      <el-table-column label="60日" width="90" align="right">
+      <el-table-column label="60日" width="84" align="right">
         <template #default="{ row }">
           <span :class="(row.ret60 ?? 0) >= 0 ? 'up' : 'down'">{{ fmtPct(row.ret60) }}</span>
         </template>
-      </el-table-column>
-      <el-table-column label="年线偏离" width="100" align="right">
-        <template #default="{ row }">{{ fmtPct(row.metrics.maDeviation) }}</template>
       </el-table-column>
       <el-table-column label="龙头" min-width="120">
         <template #default="{ row }">
