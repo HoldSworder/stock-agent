@@ -148,6 +148,7 @@ import { registerRadarModule } from './radar';
 import { registerRotationModule } from './rotation';
 import { registerSentimentModule } from './sentiment';
 import { registerBreadthModule } from './breadth';
+import { registerConceptsModule } from './concepts';
 import { registerDragonModule } from './dragon';
 import { registerCapitalModule } from './capital';
 import { registerCockpitModule } from './cockpit';
@@ -1028,6 +1029,9 @@ async function main() {
 
   // 板块新高宽度主线识别（确定性：各板块创新高个股数横向排名 + 持续性判主线 + 收盘快照，删除此行整模块下线）
   registerBreadthModule(app);
+
+  // 热门细分概念主线归纳（确定性：概念涨幅 + 主力净流入 + 新高宽度 合成热度分 + 主题归纳，纯只读，删除此行整模块下线）
+  registerConceptsModule(app);
 
   // S6 龙头/连板梯队模块（确定性连板梯队 + 龙头辨识分层，纯只读，删除此行整模块下线）
   registerDragonModule(app);

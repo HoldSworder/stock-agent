@@ -33,6 +33,9 @@ import type {
   SentimentHistoryItem,
   BoardBreadthOverview,
   BoardBreadthHistoryItem,
+  HotConceptOverview,
+  ConceptStocksResult,
+  ConceptWindow,
   MainlineConsensus,
   DragonOverview,
   StockCapitalDetail,
@@ -571,6 +574,16 @@ export const api = {
     // 主线共识（决策层：breadth 锚 ⋈ themes ⋈ radar 三方对齐）
     consensus: () =>
       unwrap<MainlineConsensus>(http.get('/breadth/consensus', { timeout: 120000 })),
+  },
+
+  // 热门细分概念（同花顺概念资金流近N日：涨幅 + 资金净额 合成热度分 + 主线主题归纳；点击概念经问财展开成分股）
+  concepts: {
+    hot: (window?: ConceptWindow) =>
+      unwrap<HotConceptOverview>(http.get('/concepts/hot', { params: { window }, timeout: 60000 })),
+    stocks: (name: string) =>
+      unwrap<ConceptStocksResult>(
+        http.get('/concepts/stocks', { params: { name }, timeout: 60000 }),
+      ),
   },
 
   // S6 龙头/连板梯队（确定性连板梯队 + 龙头辨识分层）

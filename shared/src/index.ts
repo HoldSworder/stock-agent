@@ -2282,6 +2282,93 @@ export interface BoardBreadthHistoryItem {
   rank: number;
 }
 
+// ===== 热门细分概念（同花顺概念资金流热度榜 + 主线主题归纳，确定性只读，不下单/不调 LLM）=====
+// 数据源：同花顺「概念资金流·近N日排行」(akshare stock_fund_flow_concept)，默认近 5 日。
+// 热度 = 近 N 日涨幅 + 资金净额 两维归一加权（同花顺无成分接口，不含新高宽度维）。
+
+/** 热门概念时间窗口（近几日口径，映射同花顺概念资金流 N日排行） */
+export type ConceptWindow = '3日' | '5日' | '10日' | '20日';
+
+/** 单个细分概念的热度评估项 */
+export interface HotConceptItem {
+  /** 概念名（如 玻璃基板/六氟化钨；作为唯一键，同花顺资金流不返回板块代码） */
+  boardName: string;
+  /** 当日涨跌幅 % */
+  pct: number;
+  /** 资金净额（亿元，主力净流入口径；取不到为 null） */
+  netInflow: number | null;
+  /** 公司家数（成分股数量；取不到为 null） */
+  companies: number | null;
+  /** 综合热度分 0-100（当日涨幅 + 资金净额 组内归一加权） */
+  heatScore: number;
+  /** 归纳到的父级主线主题（如 半导体/AI算力/通信；未命中为「其他」） */
+  theme: string;
+  /** 今日领涨股名（同花顺口径，今日涨幅最高成分股；无代码故不可点击） */
+  leadStock: string;
+  /** 今日领涨股涨跌幅 %（取不到为 null） */
+  leadStockPct: number | null;
+  /** 一句话说明 */
+  note: string;
+}
+
+/** 按主线主题归纳的细分概念分组（组内按热度降序） */
+export interface HotConceptGroup {
+  /** 父级主线主题 */
+  theme: string;
+  /** 组内细分概念（按热度分降序） */
+  items: HotConceptItem[];
+  /** 组内最高热度分（用于主题间排序） */
+  topHeat: number;
+}
+
+/** 热门细分概念总览（确定性热度 + 主题归纳） */
+export interface HotConceptOverview {
+  /** 数据时刻 ISO */
+  asOf: string;
+  /** 交易日 YYYY-MM-DD（Asia/Shanghai） */
+  tradeDate: string;
+  /** 当前时间窗口（近几日口径，默认 5日） */
+  window: ConceptWindow;
+  /** 按主题归纳的分组（按组内最高热度降序） */
+  groups: HotConceptGroup[];
+  /** 按热度分降序的扁平榜（top-N） */
+  flat: HotConceptItem[];
+  /** 备注 */
+  note: string;
+  /** 数据源降级（涨幅/资金取数失败时为 true，榜为不完整估计） */
+  stale: boolean;
+}
+
+/** 概念成分股（点击概念展开，经问财取板块内全部标的，标注龙头/今日领涨） */
+export interface ConceptStockItem {
+  /** 6 位代码 */
+  code: string;
+  /** 名称 */
+  name: string;
+  /** 最新价（取不到为 null） */
+  price: number | null;
+  /** 当日涨跌幅 %（取不到为 null） */
+  pct: number | null;
+  /** 总市值（亿元，取不到为 null；用于判龙头） */
+  marketCap: number | null;
+  /** 是否板块龙头（总市值最大） */
+  isLeader: boolean;
+  /** 是否今日领涨（当日涨幅最高） */
+  isTopGainer: boolean;
+}
+
+/** 概念成分股展开结果（点击概念后按需加载） */
+export interface ConceptStocksResult {
+  /** 概念名 */
+  concept: string;
+  /** 成分股（默认按总市值降序，龙头在前） */
+  stocks: ConceptStockItem[];
+  /** 数据时刻 ISO */
+  asOf: string;
+  /** 备注（含取数源/降级说明） */
+  note: string;
+}
+
 // ===== 主线共识（跨源对齐：breadth 确定性判定 ⋈ themes 多源协同 ⋈ radar 中线趋势）=====
 
 /** 三方共识档：resonance 共振（同向）/ diverge 分歧（背离）/ watch 观察（仅锚成立） */

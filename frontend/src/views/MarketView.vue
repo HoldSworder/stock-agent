@@ -15,6 +15,7 @@ import BoardStrengthPanel from '@/components/BoardStrengthPanel.vue';
 import BoardBreadthPanel from '@/components/BoardBreadthPanel.vue';
 import MarketThemesPanel from '@/components/MarketThemesPanel.vue';
 import MainlineConsensusPanel from '@/components/MainlineConsensusPanel.vue';
+import HotConceptsPanel from '@/components/HotConceptsPanel.vue';
 import SentimentPanel from '@/components/SentimentPanel.vue';
 import MacroPanel from '@/components/MacroPanel.vue';
 import UsMappingPanel from '@/components/UsMappingPanel.vue';
@@ -435,10 +436,14 @@ onUnmounted(() => {
         <LadderPanel />
       </el-tab-pane>
 
-      <!-- ===== 行业中线 / 市场主线（合并：中线雷达 + 市场主线）===== -->
-      <!-- 聚焦改造：顶部「主线共识」决策区先给结论，三块明细默认折叠，需要时下钻（按需挂载，省请求） -->
-      <el-tab-pane label="行业中线 / 市场主线" name="board" lazy>
+      <!-- ===== 板块（主线共识 + 热门细分概念 + 中线/主线明细下钻）===== -->
+      <!-- 信息架构：顶部「主线共识」决策区先给结论，再「热门细分概念」常驻供赛道内下钻，其余明细按需折叠下钻（省请求） -->
+      <el-tab-pane label="板块" name="board" lazy>
+        <!-- 1) 主线共识决策区（常驻，三源对齐先给结论） -->
         <MainlineConsensusPanel />
+        <!-- 2) 热门细分概念（常驻，锁强赛道 → 赛道内下钻龙头） -->
+        <HotConceptsPanel />
+        <!-- 3) 明细下钻（按需挂载，省请求） -->
         <el-collapse v-model="boardDetail" class="board-detail">
           <el-collapse-item name="ai" title="AI 大盘与板块研判结论">
             <BoardReviewConclusion v-if="boardDetail.includes('ai')" />
