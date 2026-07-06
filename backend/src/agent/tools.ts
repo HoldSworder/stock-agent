@@ -1891,6 +1891,63 @@ export const simTools: ToolDef[] = [
       }
     },
   },
+  {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'save_picks',
+        description:
+          '把【最终选出的标的】记录到「选股历史」（可在选股模块查看，支持 T+N 收益回看），不触发任何买卖。' +
+          '用于尾盘动能套利等「只记录不交易」的选股任务：传入最终标的清单（每只含代码/名称/现价），按顺序作为排名落库。' +
+          'mainline 可填今日主线关键词便于复盘。',
+        parameters: {
+          type: 'object',
+          properties: {
+            picks: {
+              type: 'array',
+              description: '最终选出的标的列表（按强弱顺序，即记录排名）',
+              items: {
+                type: 'object',
+                properties: {
+                  code: { type: 'string', description: 'A 股 6 位代码' },
+                  name: { type: 'string', description: '股票名称' },
+                  price: { type: 'number', description: '当前现价（T+N 复盘基准，必填且 >0）' },
+                  pct: { type: 'number', description: '当日涨跌幅 %（可选）' },
+                  industry: { type: 'string', description: '所属行业/概念（可选）' },
+                  thesis: { type: 'string', description: '选取理由一句话（主线/动能/量价，可选）' },
+                },
+                required: ['code', 'name', 'price'],
+              },
+            },
+            mainline: { type: 'string', description: '今日主线关键词（可选，落库为 context）' },
+          },
+          required: ['picks'],
+        },
+      },
+    },
+    run: async (args, ctx) => {
+      const raw = Array.isArray(args.picks) ? (args.picks as Record<string, unknown>[]) : [];
+      const picks = raw
+        .map((p) => ({
+          code: asString(p.code).trim(),
+          name: asString(p.name).trim(),
+          price: Number(p.price) || 0,
+          pct: p.pct != null ? Number(p.pct) || 0 : 0,
+          industry: p.industry ? asString(p.industry) : '',
+          thesis: p.thesis ? asString(p.thesis) : undefined,
+        }))
+        .filter((p) => /^\d{6}$/.test(p.code) && p.price > 0);
+      if (picks.length === 0) return '未提供合法标的（每只需含 6 位代码与正现价），未记录';
+      const detail = screener.saveAgentPicks({
+        picks,
+        context: args.mainline ? asString(args.mainline) : null,
+        runId: ctx.runId,
+        trigger: 'cron',
+      });
+      const lines = detail.picks.map((p) => `${p.rank}. ${p.name}(${p.code}) ${p.price}`);
+      return preview(`已记录 ${detail.picks.length} 只到选股历史（${detail.strategyName}）：\n${lines.join('\n')}`);
+    },
+  },
 ];
 
 /**
@@ -2025,6 +2082,7 @@ const TOOL_GROUP: Record<string, string> = {
   etf_rotation_strength: 'ETF',
   sim_positions: '战法',
   sim_trade: '战法',
+  save_picks: '选股',
   propose_skill_update: '战法',
   notify_telegram: '通知',
   think: '推理',

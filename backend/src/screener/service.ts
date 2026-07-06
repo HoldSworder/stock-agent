@@ -1,6 +1,7 @@
 import type {
   ScreenEngineInfo,
   ScreenNlStrategy,
+  ScreenPick,
   ScreenRunDetail,
   ScreenStrategy,
   RunTrigger,
@@ -144,6 +145,77 @@ export async function runScreen(opts: RunScreenOptions): Promise<ScreenRunDetail
 
   const detail = getRunDetail(id);
   if (!detail) throw new Error('选股落库后读取失败');
+  return detail;
+}
+
+/** agent 手选/记录用：单条标的入参（只需基本字段，其余落库时补默认） */
+export interface AgentPickInput {
+  code: string;
+  name: string;
+  /** 记录时现价（T+N 复盘基准；非正则该条跳过） */
+  price: number;
+  /** 记录时涨跌幅 %（缺省 0） */
+  pct?: number;
+  industry?: string;
+  /** 选取理由（一句话） */
+  thesis?: string;
+  riskTags?: string[];
+}
+
+/**
+ * 把 agent 最终选出的标的列表落到「选股历史」（screen_runs/screen_picks），不做任何交易。
+ * 复用 saveRun 与 T+N 复盘基建：非量化字段（factors/screenScore 等）补默认。
+ * 默认按 nl·weipan_momentum 预设记账，使其在选股页与尾盘动能套利口径归并展示。
+ */
+export function saveAgentPicks(opts: {
+  picks: AgentPickInput[];
+  context?: string | null;
+  strategyId?: string;
+  strategyName?: string;
+  runId?: string | null;
+  trigger: RunTrigger;
+}): ScreenRunDetail {
+  const valid = opts.picks.filter((p) => p && p.code && Number(p.price) > 0);
+  if (valid.length === 0) throw new Error('无有效标的可记录（需含 code 与正现价）');
+  const picks: ScreenPick[] = valid.map((p, i) => ({
+    rank: i + 1,
+    code: p.code,
+    name: p.name ?? p.code,
+    price: Number(p.price),
+    pct: Number(p.pct) || 0,
+    industry: p.industry ?? '',
+    screenScore: 0,
+    factors: [],
+    thesis: p.thesis ?? null,
+    riskTags: Array.isArray(p.riskTags) ? p.riskTags : [],
+    confidence: null,
+    watchItems: [],
+    invalidators: [],
+    evalPrice: null,
+    evalAt: null,
+    evalReturn: null,
+  }));
+  const id = saveRun(
+    {
+      engine: 'nl',
+      strategyId: opts.strategyId ?? 'weipan_momentum',
+      strategyName: opts.strategyName ?? '尾盘动能套利',
+      trigger: opts.trigger,
+      marketCount: 0,
+      filteredCount: picks.length,
+      topN: picks.length,
+      context: (opts.context ?? '').trim() || null,
+      marketView: null,
+      selectionLogic: null,
+      portfolioRisk: null,
+      runId: opts.runId ?? null,
+      horizon: 'short',
+      universeNote: null,
+    },
+    picks,
+  );
+  const detail = getRunDetail(id);
+  if (!detail) throw new Error('选股历史落库后读取失败');
   return detail;
 }
 

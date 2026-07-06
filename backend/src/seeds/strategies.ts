@@ -7,7 +7,7 @@ import { setInitialSkills } from '../strategy/skill';
 import { listTasks, updateTask } from '../tasks';
 import { getValue, setValue } from '../settings';
 import { nowIso } from '../util';
-import { MIAOXIANG_TASK_NAMES, WEIPAN_TASK_NAME } from './cronTasks';
+import { MIAOXIANG_SHADOW_TASK_NAMES, MIAOXIANG_TASK_NAMES, WEIPAN_TASK_NAME } from './cronTasks';
 
 // 一次性幂等种子：创建两个战法并按任务名绑定。
 // 用 settings 标志 strategies_seeded 保证只跑一次。
@@ -172,6 +172,21 @@ function dedupeSeedStrategies(): void {
   }
 }
 
+/**
+ * 自愈：把妙想「对照影子」任务绑定到妙想镜像战法（仅用于 StrategyView 每日产出分组）。
+ * 无视种子标志、幂等；影子任务由 cronTasks.syncCronTasksFromOpenClaw 每次启动补建后在此回填绑定。
+ */
+function backfillShadowTaskBinding(): void {
+  const mx = listStrategies(true).find((s) => s.name === MIAOXIANG_NAME);
+  if (!mx) return;
+  for (const t of listTasks()) {
+    if (MIAOXIANG_SHADOW_TASK_NAMES.includes(t.name) && t.strategyId !== mx.id) {
+      updateTask(t.id, { strategyId: mx.id });
+      console.log(`[seed] 已将对照影子任务「${t.name}」绑定到妙想镜像战法`);
+    }
+  }
+}
+
 export async function seedStrategiesAndBind(): Promise<void> {
   // 0. 自愈去重：先合并历史并发启动产生的重复战法（无论标志是否已 done）
   dedupeSeedStrategies();
@@ -181,6 +196,9 @@ export async function seedStrategiesAndBind(): Promise<void> {
 
   // 0.2 自愈回填：给已 seeded 但未关联选股的种子战法补上 nl 预设关联（无视 flag、幂等）
   backfillSeedScreenLinks();
+
+  // 0.3 自愈回填：把妙想对照影子任务绑定到妙想镜像战法（无视 flag、幂等）
+  backfillShadowTaskBinding();
 
   // 原子声明种子标志：INSERT ... ON CONFLICT DO NOTHING 跨进程原子，
   // 并发启动只有成功插入（changes===1）的赢家继续创建，其余直接返回，杜绝重复。

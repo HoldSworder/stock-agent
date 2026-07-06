@@ -1,6 +1,11 @@
 import { getValue } from '../settings';
 import { requestJson } from '../datasource/httpClient';
-import { checkBusinessStatus, formatSearchData, isQuotaExhaustedMessage } from './searchData';
+import {
+  checkBusinessStatus,
+  formatSearchData,
+  formatSelectSecurity,
+  isQuotaExhaustedMessage,
+} from './searchData';
 
 // 妙想（东方财富）官方接口薄封装。
 // 老门户（mkapi2.dfcfs.com，apikey/mkt_ 前缀）：选股/资讯/自选股/模拟盘仍在用。
@@ -16,8 +21,11 @@ const ASSISTANT_URL =
 // 新门户：金融结构化数据查询（mcp searchData）。老 claw /query 已失效，统一切到此处。
 const SEARCH_DATA_URL = 'https://ai-saas.eastmoney.com/proxy/b/mcp/tool/searchData';
 
+// 新门户：股票基金筛选（mcp selectSecurity）。与 openclaw mx-stocks-screener 完全对齐，
+// 取代老门户 claw/stock-screen（两者选股引擎/股票域不同，会选出不同候选池）。
+const SELECT_SECURITY_URL = 'https://ai-saas.eastmoney.com/proxy/b/mcp/tool/selectSecurity';
+
 const ENDPOINTS = {
-  screen: `${BASE}/stock-screen`, // 选股
   news: `${BASE}/news-search`, // 资讯
   selfSelectGet: `${BASE}/self-select/get`,
   selfSelectManage: `${BASE}/self-select/manage`,
@@ -135,7 +143,7 @@ function mxSchedule<T>(fn: () => Promise<T>): Promise<T> {
 function post(url: string, body: unknown, signal?: AbortSignal): Promise<unknown> {
   return mxSchedule(() =>
     requestJson({
-      sourceId: 'miaoxiang',
+      sourceId: 'miaoxiang-claw',
       url,
       method: 'POST',
       headers: mxHeaders(),
@@ -155,7 +163,7 @@ function post(url: string, body: unknown, signal?: AbortSignal): Promise<unknown
 function postData(url: string, body: unknown, signal?: AbortSignal): Promise<unknown> {
   return mxSchedule(() =>
     requestJson({
-      sourceId: 'miaoxiang',
+      sourceId: 'miaoxiang-claw',
       url,
       method: 'POST',
       headers: mxHeaders(),
@@ -187,7 +195,7 @@ function postJson(
 ): Promise<Record<string, unknown>> {
   return mxSchedule(() =>
     requestJson({
-      sourceId: 'miaoxiang',
+      sourceId: 'miaoxiang-claw',
       url,
       method: 'POST',
       headers: mxHeaders(),
@@ -236,7 +244,7 @@ export const miaoxiang = {
     let json: Record<string, unknown>;
     try {
       json = await requestJson({
-        sourceId: 'miaoxiang',
+        sourceId: 'miaoxiang-em',
         url: ASSISTANT_URL,
         method: 'POST',
         headers: emHeaders(),
@@ -276,7 +284,7 @@ export const miaoxiang = {
     let json: Record<string, unknown>;
     try {
       json = await requestJson({
-        sourceId: 'miaoxiang',
+        sourceId: 'miaoxiang-em',
         url: SEARCH_DATA_URL,
         method: 'POST',
         headers: emHeaders(),
@@ -303,9 +311,46 @@ export const miaoxiang = {
     return formatSearchData(json);
   },
 
-  /** 选股（自然语言条件） */
-  screener(keyword: string, signal?: AbortSignal) {
-    return postData(ENDPOINTS.screen, { keyword }, signal);
+  /**
+   * 选股原始响应（新门户 selectSecurity，em_api_key 鉴权）。结构化消费用（nl 选股引擎解析 dataList）。
+   * 与 openclaw mx-stocks-screener 完全对齐：同 URL、同 selectType=A股、同 toolContext 结构、同新门户额度。
+   * 走独立门户，不入 mxSchedule 串行队列（与老 claw 限流无关）；命中日配额抛 MiaoxiangQuotaError。
+   */
+  async screenerRaw(keyword: string, signal?: AbortSignal): Promise<Record<string, unknown>> {
+    if (isQuotaTripped()) throw quotaError(); // 当日已熔断：直接短路，不发请求
+    const rand = (): string => Math.random().toString(16).slice(2, 10);
+    try {
+      return await requestJson({
+        sourceId: 'miaoxiang-em',
+        url: SELECT_SECURITY_URL,
+        method: 'POST',
+        headers: emHeaders(),
+        body: JSON.stringify({
+          query: keyword,
+          selectType: 'A股',
+          toolContext: { callId: `call_${rand()}`, userInfo: { userId: `user_${rand()}` } },
+        }),
+        signal,
+        timeoutMs: 30000,
+        maxAttempts: 3,
+        retryBaseMs: 1000,
+        errorLabel: '妙想选股',
+        makeError: (msg) => new MiaoxiangError(msg),
+        // 新门户成功语义：code/status ∈ {null,0,200}；业务错误（含 403 配额）由下方 catch 归一
+        validate: (j) => checkBusinessStatus(j),
+      });
+    } catch (e) {
+      if (e instanceof Error && isQuotaExhaustedMessage(e.message)) {
+        tripQuota();
+        throw quotaError();
+      }
+      throw e;
+    }
+  },
+
+  /** 选股（自然语言条件）：返回拍平后的中文列名文本表，供 Agent / 复盘直接阅读 */
+  async screener(keyword: string, signal?: AbortSignal): Promise<string> {
+    return formatSelectSecurity(await this.screenerRaw(keyword, signal));
   },
 
   /** 金融资讯搜索 */

@@ -208,19 +208,33 @@ const SOURCES: SourceDef[] = [
     healthCheck: () => pingIdingpan(),
   },
   {
-    id: 'miaoxiang',
-    name: '妙想（东方财富）',
+    id: 'miaoxiang-claw',
+    name: '妙想·老门户 (claw)',
     category: '资讯',
     protocol: 'http-rest',
-    baseUrl: 'mkapi2.dfcfs.com',
+    baseUrl: 'mkapi2.dfcfs.com/finskillshub/api/claw',
     description:
-      '金融数据 / 选股 / 资讯 / 自选 / 模拟盘交易（claw 门户，mkt_ apikey）+ AI 金融问答助手（robo-advisor 门户，em_ apikey）。',
+      '东方财富妙想「技能市场」渠道（官方入口 marketing.dfcfs.com/views/finskillshub/index，限时免费领 key；App 内渠道分发的技能包也用此 key）。鉴权：header apikey、key 前缀 mkt_；按 apikey 全局频控（超频 code=112）。能力：金融资讯搜索、自选股读取/管理、模拟盘交易（持仓/余额/委托/买卖/撤单）。注：「老门户」为本系统内部命名，非东财官方说法；与下方「新门户」是两条并行的官方接入渠道，非同一接口的新旧版。',
     fields: [
-      { key: 'mxApiKey', label: 'API Key (claw)', secret: true, required: true, placeholder: 'mkt_ 前缀 apikey' },
-      { key: 'emApiKey', label: 'API Key (问答助手)', secret: true, required: false, placeholder: 'em_ 前缀 apikey' },
+      { key: 'mxApiKey', label: 'API Key (claw / mkt_)', secret: true, required: true, placeholder: 'mkt_ 前缀 apikey' },
     ],
     healthCheck: async () => {
       await miaoxiang.balance();
+    },
+  },
+  {
+    id: 'miaoxiang-em',
+    name: '妙想·新门户 (robo)',
+    category: '资讯',
+    protocol: 'http-rest',
+    baseUrl: 'ai-saas.eastmoney.com',
+    description:
+      '东方财富妙想「妙想Claw / mx-claw」渠道（官方入口 ai.eastmoney.com/chat，openclaw 一键脚本 ai-oss.eastmoney.com/mx-claw/install.sh 用此 key）。域名 ai-saas.eastmoney.com（robo-advisor / mcp）；鉴权：header em_api_key、key 前缀 em_；有日配额（超额 code=403，本系统当日熔断）。能力：AI 金融问答助手(assistant/ask)、金融结构化数据(searchData)、条件选股(selectSecurity，与 openclaw mx-stocks-screener 对齐；已取代老门户 stock-screen / claw query)。注：「新门户」为本系统内部命名，非东财官方说法。',
+    fields: [
+      { key: 'emApiKey', label: 'API Key (robo / em_)', secret: true, required: true, placeholder: 'em_ 前缀 em_api_key' },
+    ],
+    healthCheck: async () => {
+      await miaoxiang.financeData('上证指数最新点位');
     },
   },
   {

@@ -31,7 +31,7 @@ function normCode(raw: unknown): string {
   return m ? m[0] : '';
 }
 
-// 妙想 stock-screen 响应嵌套较深，标的全量行在 allResults.result.dataList，
+// 妙想 selectSecurity 响应嵌套较深，标的全量行在 data.allResults.result.dataList，
 // 每行用稳定字段名携带数据：SECURITY_CODE / SECURITY_SHORT_NAME / NEWEST_PRICE / CHG。
 // 这里递归定位「元素含 SECURITY_CODE 的数组」，避免硬编码 envelope 层级（兼容微调）。
 function findDataList(node: unknown): Record<string, unknown>[] | null {
@@ -141,7 +141,7 @@ export const nlEngine: ScreenEngine = {
     const emit = input.onProgress ?? (() => {});
     const nl = getNlStrategy(input.strategyId);
     emit({ stage: 'snapshot', label: '妙想自然语言筛选', status: 'running' });
-    const resp = await miaoxiang.screener(nl.keyword);
+    const resp = await miaoxiang.screenerRaw(nl.keyword);
     const rows = parseScreenerRows(resp);
     if (rows.length === 0) {
       throw new Error('妙想自然语言选股未返回可解析标的，请稍后重试或检查 MX_APIKEY');

@@ -72,6 +72,51 @@ export function extractPreferredMessage(json: unknown): string | null {
   return message;
 }
 
+/**
+ * 把新门户 selectSecurity（选股）响应拍平为中文列名文本表，与 openclaw mx-stocks-screener 完全对齐：
+ * 取 data.allResults.result.{columns,dataList}，按 columns 的 key→title(含 dateMsg) 映射输出；
+ * 无 dataList 时回退 data.partialResults（Markdown 表）。调用前应先 checkBusinessStatus 校验成功。
+ */
+export function formatSelectSecurity(json: unknown): string {
+  if (!isObject(json)) return '妙想选股未返回有效数据';
+  // 兼容传入完整 envelope 或直接传 data 节点
+  const data = isObject(json.data) ? json.data : json;
+  const all = isObject(data.allResults) ? data.allResults : {};
+  const result = isObject(all.result) ? all.result : {};
+  const columns = Array.isArray(result.columns) ? result.columns : [];
+  const dataList = Array.isArray(result.dataList) ? result.dataList : [];
+
+  // 按 columns 顺序建「英文 key → 中文标题（含 dateMsg 后缀）」映射
+  const order: string[] = [];
+  const titleOf = new Map<string, string>();
+  for (const col of columns) {
+    if (!isObject(col)) continue;
+    const key = flatten(col.key ?? col.field ?? col.name);
+    if (!key) continue;
+    let title = flatten(col.title ?? col.displayName ?? col.label) || key;
+    if (col.dateMsg != null && col.dateMsg !== '') title = `${title} ${flatten(col.dateMsg)}`;
+    order.push(key);
+    titleOf.set(key, title);
+  }
+
+  if (dataList.length > 0 && order.length > 0) {
+    const lines = [order.map((k) => titleOf.get(k) ?? k).join(' | ')];
+    for (const row of dataList) {
+      if (!isObject(row)) continue;
+      lines.push(order.map((k) => flatten(row[k])).join(' | '));
+    }
+    const message = extractPreferredMessage(json);
+    const table = lines.join('\n');
+    return message ? `${table}\n\n提示：${message}` : table;
+  }
+
+  // 回退：partialResults 为前若干行 Markdown 表
+  const partial = data.partialResults;
+  if (typeof partial === 'string' && partial.trim()) return partial.trim();
+  if (data.securityCount === 0) return '无符合条件的标的（selectSecurity securityCount=0）';
+  return '妙想选股未解析到有效数据';
+}
+
 /** 提取指标代码映射表（兼容 returnCodeMap/returnCodeNameMap/codeMap） */
 function returnCodeMap(block: Json): Record<string, string> {
   for (const key of ['returnCodeMap', 'returnCodeNameMap', 'codeMap']) {
