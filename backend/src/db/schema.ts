@@ -116,6 +116,109 @@ export const etfPool = sqliteTable('etf_pool', {
   addedAt: text('added_at').notNull(),
 });
 
+// ===== 量化研究模式库（codex/cursor 经写 API 登记，WebUI 只读展示 + 关注跟踪）=====
+
+/** 研究标的库（独立于 ETF 关注列表，供量化研究与站内跟踪引擎取用） */
+export const researchUniverse = sqliteTable('research_universe', {
+  code: text('code').primaryKey(),
+  name: text('name').notNull(),
+  tags: text('tags'),
+  note: text('note'),
+  addedAt: text('added_at').notNull(),
+});
+
+/** 策略模式主表：买卖逻辑 / 推荐配置 / 分析 / 关注 / 跟踪方式（system 声明式自跟踪 / external 外部推送） */
+export const researchModes = sqliteTable('research_modes', {
+  /** slug，如 etf-mainline-profit-runner */
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  category: text('category'),
+  tags: text('tags'),
+  /** experiment / recommended / baseline / retired */
+  status: text('status').notNull().default('experiment'),
+  summary: text('summary'),
+  /** 买卖逻辑（markdown） */
+  buySellMd: text('buy_sell_md'),
+  /** 推荐配置串，如 wrot-keep|rs90|noabs|70%/30%|ma60trail12 */
+  recommendedConfig: text('recommended_config'),
+  /** 相关分析（markdown） */
+  analysisMd: text('analysis_md'),
+  universeNote: text('universe_note'),
+  risksMd: text('risks_md'),
+  /** 手动关注（关注后纳入每日跟踪） */
+  followed: integer('followed', { mode: 'boolean' }).notNull().default(false),
+  /** system：站内声明式自跟踪；external：外部 cron 推送 */
+  trackingMode: text('tracking_mode').notNull().default('external'),
+  /** 声明式策略规格 JSON（system 模式必填；external 可空） */
+  spec: text('spec'),
+  /** 来源标记，如 codex / cursor */
+  source: text('source'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+/** 一个模式的多版本回测结果（推荐版 / 基准版 / 最高收益版等） */
+export const researchModeBacktests = sqliteTable(
+  'research_mode_backtests',
+  {
+    id: text('id').primaryKey(),
+    modeId: text('mode_id').notNull(),
+    /** 配置串 / 版本标签 */
+    label: text('label').notNull(),
+    /** 区间描述，如 2025-01-02 ~ 2026-06-26 */
+    range: text('range'),
+    poolSize: integer('pool_size'),
+    /** 核心指标 JSON：return/annualized/maxDrawdown/trades/avgPos/maxPos/winRate */
+    metrics: text('metrics').notNull().default('{}'),
+    /** 成本敏感性 JSON 数组 */
+    costSensitivity: text('cost_sensitivity').notNull().default('[]'),
+    /** 分段复核 JSON 数组 */
+    segments: text('segments').notNull().default('[]'),
+    concentrationMd: text('concentration_md'),
+    /** 交易记录 markdown（惰性返回，列表不带） */
+    tradesMd: text('trades_md'),
+    isRecommended: integer('is_recommended', { mode: 'boolean' }).notNull().default(false),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({ byMode: index('idx_mode_bt_mode').on(t.modeId) }),
+);
+
+/** 关注模式的每日跟踪快照（system 引擎产出或 external 推送），按 (modeId,date) 幂等 */
+export const researchModeDaily = sqliteTable(
+  'research_mode_daily',
+  {
+    id: text('id').primaryKey(),
+    modeId: text('mode_id').notNull(),
+    date: text('date').notNull(),
+    /** 当日应持仓 JSON：[{code,name,weight}] */
+    holdings: text('holdings').notNull().default('[]'),
+    /** 当日买卖信号 JSON */
+    signal: text('signal'),
+    dayReturn: real('day_return'),
+    cumReturn: real('cum_return'),
+    drawdown: real('drawdown'),
+    /** system / external */
+    source: text('source').notNull().default('system'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({ byKey: uniqueIndex('idx_mode_daily_key').on(t.modeId, t.date) }),
+);
+
+/** 关注模式的信号/持仓变化事件（enter/exit/switch），供时间线与消息提醒 */
+export const researchModeEvents = sqliteTable(
+  'research_mode_events',
+  {
+    id: text('id').primaryKey(),
+    modeId: text('mode_id').notNull(),
+    date: text('date').notNull(),
+    /** enter / exit / switch */
+    kind: text('kind').notNull(),
+    detail: text('detail'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({ byMode: index('idx_mode_evt_mode').on(t.modeId) }),
+);
+
 /** 持仓快照（真实 + 模拟） */
 export const positions = sqliteTable(
   'positions',

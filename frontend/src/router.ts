@@ -51,6 +51,16 @@ export const router = createRouter({
       name: 'backtest',
       component: () => import('./views/BacktestView.vue'),
     },
+    {
+      path: '/factors',
+      name: 'factors',
+      component: () => import('./views/FactorView.vue'),
+    },
+    {
+      path: '/modes',
+      name: 'modes',
+      component: () => import('./views/ModeLibraryView.vue'),
+    },
     // 调用记录已并入智能体中枢（调用记录 Tab）
     { path: '/usage', redirect: { path: '/core', query: { tab: 'usage' } } },
     // 数据源已并入系统设置（数据源 Tab）

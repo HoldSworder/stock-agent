@@ -4567,3 +4567,293 @@ export interface BacktestRunListItem {
   metrics: BacktestMetricsLite;
   createdAt: string;
 }
+
+// ---- 因子探索（离线预计算的因子目录 + IC + 当前快照） ----
+
+/** 单个因子在某未来收益视角下的横截面 Rank IC 统计 */
+export interface FactorIcStat {
+  /** 参与统计的交易日数 */
+  days: number;
+  /** 平均 Rank IC */
+  meanIc: number;
+  /** IC 信息比（mean/std），衡量稳健性 */
+  icir: number;
+  /** t 值（icir * sqrt(days)），衡量显著性 */
+  t: number;
+  /** IC 为正的交易日比例 */
+  posRate: number;
+}
+
+/** 因子目录条目（含分类、中文介绍、公式、方向、IC 统计） */
+export interface FactorCatalogItem {
+  /** 因子代码（与快照 values 的 key 对应） */
+  name: string;
+  /** 中文名 */
+  cn: string;
+  /** 分类（16 大族之一或「其他」） */
+  category: string;
+  /** 中文介绍（无精修文案时回退到分类级介绍） */
+  desc: string;
+  /** 公式简述（可能为空） */
+  formula: string;
+  /** 方向：pos 越大越看多，neg 为反向信号 */
+  direction: 'pos' | 'neg';
+  /** 信号簇：横截面/主题强度 | 绝对趋势动量 | 反向信号 */
+  cluster: string;
+  /** 强度档：strong | ok | weak | na（按 5 日口径） */
+  strength: 'strong' | 'ok' | 'weak' | 'na';
+  /** 未来 5 日 IC 统计 */
+  ic5: FactorIcStat | null;
+  /** 未来 10 日 IC 统计 */
+  ic10: FactorIcStat | null;
+}
+
+/** 因子目录元信息（样本范围 + 口径说明） */
+export interface FactorCatalogMeta {
+  /** 生成时间（ISO，含 +08:00） */
+  generatedAt: string;
+  sampleEtfCount: number;
+  tradingDays: number;
+  factorCount: number;
+  /** 快照对应的交易日 */
+  snapshotDate: string;
+  /** 未来收益视角（如 [5, 10]） */
+  horizons: number[];
+  /** 分类 → 分类级介绍 */
+  categoryIntro: Record<string, string>;
+  /** 必须在 UI 展示的诚实口径提示 */
+  caveats: string[];
+}
+
+/** GET /api/factors/catalog 响应数据 */
+export interface FactorCatalogResponse {
+  meta: FactorCatalogMeta;
+  catalog: FactorCatalogItem[];
+}
+
+/** 最新交易日单只 ETF 的全因子值 */
+export interface FactorSnapshotItem {
+  code: string;
+  name: string;
+  /** 因子代码 → 当日值 */
+  values: Record<string, number>;
+}
+
+/** GET /api/factors/snapshot 响应数据 */
+export interface FactorSnapshotResponse {
+  snapshotDate: string;
+  generatedAt: string;
+  items: FactorSnapshotItem[];
+}
+
+// ---- 量化研究模式库 ----
+
+/** 研究标的库条目（独立于 ETF 关注列表） */
+export interface ResearchUniverseItem {
+  code: string;
+  name: string;
+  tags?: string | null;
+  note?: string | null;
+  addedAt: string;
+}
+export interface ResearchUniverseInput {
+  code: string;
+  name: string;
+  tags?: string | null;
+  note?: string | null;
+}
+
+export type ModeStatus = 'experiment' | 'recommended' | 'baseline' | 'retired';
+export type TrackingMode = 'system' | 'external';
+
+/** 退出规则（声明式，站内跟踪引擎可执行的白名单） */
+export type ModeExit =
+  | { type: 'rankDrop' }
+  | { type: 'belowMaDrawdown'; ma: number; drawdownPct: number }
+  | { type: 'supertrend'; period: number; mult: number };
+
+/** 声明式策略规格：system 跟踪模式必填，引擎据此每日算持仓/信号 */
+export interface ModeSpec {
+  /** 选股因子（可加权组合），名称取站内可计算白名单：rs90 / momN / trendQuality / crossRank 等 */
+  selectorFactors: Array<{ name: string; weight: number }>;
+  /** 持仓数 */
+  topN: number;
+  /** 各仓权重（如 [0.7,0.3]），省略则等权 */
+  weights?: number[];
+  /** 调仓周期（交易日） */
+  rebalanceDays: number;
+  /** 是否同主题去重 */
+  dedupTheme?: boolean;
+  /** 退出规则集 */
+  exits?: ModeExit[];
+}
+
+/** 回测核心指标（均为可选，缺失即不展示） */
+export interface ModeBacktestMetrics {
+  /** 复利总收益（%），受后期权益基数放大，存在路径依赖偏差 */
+  return?: number;
+  /** 非复利（等权）累计收益（%），每段等权，用于去除复利的路径依赖偏差 */
+  flatReturn?: number;
+  annualized?: number;
+  maxDrawdown?: number;
+  trades?: number;
+  avgPositions?: number;
+  maxPositions?: number;
+  winRate?: number;
+}
+export interface ModeCostRow {
+  caliber: string;
+  return?: number;
+  maxDrawdown?: number;
+  trades?: number;
+}
+export interface ModeSegmentRow {
+  label: string;
+  return?: number;
+  maxDrawdown?: number;
+  trades?: number;
+}
+
+/** 回测结果列表项（不含交易记录 markdown，省带宽） */
+export interface ResearchModeBacktestListItem {
+  id: string;
+  modeId: string;
+  label: string;
+  range?: string | null;
+  poolSize?: number | null;
+  metrics: ModeBacktestMetrics;
+  costSensitivity: ModeCostRow[];
+  segments: ModeSegmentRow[];
+  concentrationMd?: string | null;
+  isRecommended: boolean;
+  createdAt: string;
+}
+export interface ResearchModeBacktestInput {
+  label: string;
+  range?: string;
+  poolSize?: number;
+  metrics: ModeBacktestMetrics;
+  costSensitivity?: ModeCostRow[];
+  segments?: ModeSegmentRow[];
+  concentrationMd?: string;
+  tradesMd?: string;
+  isRecommended?: boolean;
+}
+
+/** 当日应持仓 */
+export interface ModeHolding {
+  code: string;
+  name: string;
+  weight: number;
+}
+/** 当日买卖信号 */
+export interface ModeSignalAction {
+  kind: 'enter' | 'exit' | 'switch';
+  code: string;
+  name?: string;
+  note?: string;
+}
+export interface ResearchModeDaily {
+  modeId: string;
+  date: string;
+  holdings: ModeHolding[];
+  signal?: ModeSignalAction[] | null;
+  dayReturn?: number | null;
+  cumReturn?: number | null;
+  drawdown?: number | null;
+  source: TrackingMode;
+  createdAt?: string;
+}
+export interface ResearchModeDailyInput {
+  date: string;
+  holdings: ModeHolding[];
+  signal?: ModeSignalAction[];
+  dayReturn?: number;
+  cumReturn?: number;
+  drawdown?: number;
+}
+
+export interface ResearchModeEvent {
+  id: string;
+  modeId: string;
+  date: string;
+  kind: 'enter' | 'exit' | 'switch';
+  detail?: string | null;
+  createdAt: string;
+}
+
+/** 模式主体 */
+export interface ResearchMode {
+  id: string;
+  name: string;
+  category?: string | null;
+  tags?: string | null;
+  status: ModeStatus;
+  summary?: string | null;
+  buySellMd?: string | null;
+  recommendedConfig?: string | null;
+  analysisMd?: string | null;
+  universeNote?: string | null;
+  risksMd?: string | null;
+  followed: boolean;
+  trackingMode: TrackingMode;
+  spec?: ModeSpec | null;
+  source?: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 列表项：附带头条收益（推荐回测的 return）与回测数 */
+export interface ResearchModeListItem {
+  id: string;
+  name: string;
+  category?: string | null;
+  tags?: string | null;
+  status: ModeStatus;
+  summary?: string | null;
+  recommendedConfig?: string | null;
+  followed: boolean;
+  trackingMode: TrackingMode;
+  headlineReturn?: number | null;
+  /** 头条非复利（等权）收益，列表优先展示此项以去除复利偏差 */
+  headlineFlatReturn?: number | null;
+  headlineDrawdown?: number | null;
+  backtestCount: number;
+  updatedAt: string;
+}
+
+/** 详情：模式 + 多版本回测 + 最近跟踪 + 事件 */
+export interface ResearchModeDetail {
+  mode: ResearchMode;
+  backtests: ResearchModeBacktestListItem[];
+  recentDaily: ResearchModeDaily[];
+  events: ResearchModeEvent[];
+}
+
+/** 站内自跟踪即时触发结果 */
+export interface ModeTrackResult {
+  date: string;
+  holdings: ModeHolding[];
+  events: Array<{ kind: 'enter' | 'exit' | 'switch'; detail: string }>;
+  dayReturn: number;
+  cumReturn: number;
+  drawdown: number;
+}
+
+/** upsert 模式入参（codex/cursor 写 API） */
+export interface ResearchModeUpsert {
+  id: string;
+  name: string;
+  category?: string;
+  tags?: string;
+  status?: ModeStatus;
+  summary?: string;
+  buySellMd?: string;
+  recommendedConfig?: string;
+  analysisMd?: string;
+  universeNote?: string;
+  risksMd?: string;
+  trackingMode?: TrackingMode;
+  spec?: ModeSpec | null;
+  source?: string;
+}

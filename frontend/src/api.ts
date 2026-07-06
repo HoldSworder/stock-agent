@@ -27,6 +27,17 @@ import type {
   EtfPoolItem,
   EtfOverview,
   EtfRotationOverview,
+  FactorCatalogResponse,
+  FactorSnapshotResponse,
+  ResearchModeListItem,
+  ResearchModeDetail,
+  ResearchModeUpsert,
+  ResearchModeBacktestInput,
+  ResearchModeBacktestListItem,
+  ResearchUniverseItem,
+  ResearchUniverseInput,
+  ResearchMode,
+  ModeTrackResult,
   MidDrilldownResult,
   EtfSignalsResult,
   SentimentOverview,
@@ -574,6 +585,12 @@ export const api = {
       ),
   },
 
+  // 因子探索（只读离线因子目录 + IC + 当前快照）
+  factors: {
+    catalog: () => unwrap<FactorCatalogResponse>(http.get('/factors/catalog', { timeout: 60000 })),
+    snapshot: () => unwrap<FactorSnapshotResponse>(http.get('/factors/snapshot', { timeout: 60000 })),
+  },
+
   // S1 市场情绪周期（确定性 0-100 情绪指数 + 周期阶段 + 历史趋势）
   sentiment: {
     overview: () =>
@@ -738,6 +755,38 @@ export const api = {
       unwrap<ModuleScheduleJob>(http.put(`/${module}/schedules/${id}`, patch)),
     trigger: (module: string, id: string) =>
       unwrap<void>(http.post(`/${module}/schedules/${id}/trigger`)),
+  },
+
+  // 量化研究模式库
+  modes: {
+    list: () => unwrap<ResearchModeListItem[]>(http.get('/modes')),
+    detail: (id: string) => unwrap<ResearchModeDetail>(http.get(`/modes/${id}`)),
+    trades: (id: string, bid: string) =>
+      unwrap<{ tradesMd: string | null }>(http.get(`/modes/${id}/backtests/${bid}/trades`)),
+    upsert: (id: string, body: Omit<ResearchModeUpsert, 'id'>) =>
+      unwrap<ResearchMode>(http.put(`/modes/${id}`, body)),
+    addBacktest: (id: string, body: ResearchModeBacktestInput) =>
+      unwrap<ResearchModeBacktestListItem>(http.post(`/modes/${id}/backtests`, body)),
+    follow: (id: string, followed: boolean) =>
+      unwrap<void>(http.put(`/modes/${id}/follow`, { followed })),
+    remove: (id: string) => unwrap<void>(http.delete(`/modes/${id}`)),
+    trackNow: (id: string) =>
+      unwrap<ModeTrackResult>(http.post(`/modes/${id}/track-now`, {}, { timeout: 120000 })),
+    rebacktest: (id: string) =>
+      unwrap<ResearchModeBacktestListItem>(
+        http.post(`/modes/${id}/rebacktest`, {}, { timeout: 180000 }),
+      ),
+    reseed: () =>
+      unwrap<{ modes: number; backtests: number }>(http.post('/modes/reseed', {}, { timeout: 60000 })),
+  },
+
+  // 研究标的库（独立于 ETF 关注列表）
+  researchUniverse: {
+    list: () => unwrap<ResearchUniverseItem[]>(http.get('/research-universe')),
+    add: (body: ResearchUniverseInput) => unwrap<void>(http.post('/research-universe', body)),
+    update: (code: string, patch: { tags?: string | null; note?: string | null }) =>
+      unwrap<void>(http.put(`/research-universe/${code}`, patch)),
+    remove: (code: string) => unwrap<void>(http.delete(`/research-universe/${code}`)),
   },
 
   // 聊天

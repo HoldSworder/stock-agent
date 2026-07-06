@@ -600,6 +600,74 @@ CREATE TABLE IF NOT EXISTS board_newhigh_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_board_newhigh_date ON board_newhigh_snapshots(trade_date);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_board_newhigh_key ON board_newhigh_snapshots(trade_date, board_code);
+
+CREATE TABLE IF NOT EXISTS research_universe (
+  code TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  tags TEXT,
+  note TEXT,
+  added_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS research_modes (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  category TEXT,
+  tags TEXT,
+  status TEXT NOT NULL DEFAULT 'experiment',
+  summary TEXT,
+  buy_sell_md TEXT,
+  recommended_config TEXT,
+  analysis_md TEXT,
+  universe_note TEXT,
+  risks_md TEXT,
+  followed INTEGER NOT NULL DEFAULT 0,
+  tracking_mode TEXT NOT NULL DEFAULT 'external',
+  spec TEXT,
+  source TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS research_mode_backtests (
+  id TEXT PRIMARY KEY,
+  mode_id TEXT NOT NULL,
+  label TEXT NOT NULL,
+  range TEXT,
+  pool_size INTEGER,
+  metrics TEXT NOT NULL DEFAULT '{}',
+  cost_sensitivity TEXT NOT NULL DEFAULT '[]',
+  segments TEXT NOT NULL DEFAULT '[]',
+  concentration_md TEXT,
+  trades_md TEXT,
+  is_recommended INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mode_bt_mode ON research_mode_backtests(mode_id);
+
+CREATE TABLE IF NOT EXISTS research_mode_daily (
+  id TEXT PRIMARY KEY,
+  mode_id TEXT NOT NULL,
+  date TEXT NOT NULL,
+  holdings TEXT NOT NULL DEFAULT '[]',
+  signal TEXT,
+  day_return REAL,
+  cum_return REAL,
+  drawdown REAL,
+  source TEXT NOT NULL DEFAULT 'system',
+  created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_mode_daily_key ON research_mode_daily(mode_id, date);
+
+CREATE TABLE IF NOT EXISTS research_mode_events (
+  id TEXT PRIMARY KEY,
+  mode_id TEXT NOT NULL,
+  date TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  detail TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mode_evt_mode ON research_mode_events(mode_id);
 `;
 
 export function ensureSchema(): void {

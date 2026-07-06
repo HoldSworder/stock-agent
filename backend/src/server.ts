@@ -147,6 +147,10 @@ import { registerPositionsModule } from './positions';
 import { registerThemesModule } from './themes';
 import { registerRadarModule } from './radar';
 import { registerRotationModule } from './rotation';
+import { registerFactorModule } from './factor';
+import { registerModesModule } from './modes';
+import { seedUniverseIfEmpty } from './modes/universeRepo';
+import { seedResearchModesIfEmpty } from './seeds/researchModes';
 import { registerSentimentModule } from './sentiment';
 import { registerBreadthModule } from './breadth';
 import { registerConceptsModule } from './concepts';
@@ -181,6 +185,10 @@ async function main() {
   // 战法种子：创建两战法并按名绑定任务（幂等，仅首次执行妙想初次同步）
   const { seedStrategiesAndBind } = await import('./seeds/strategies');
   await seedStrategiesAndBind();
+  // 研究标的库种子（首次启动写入默认标的，幂等）
+  seedUniverseIfEmpty();
+  // 研究模式库种子（从 mode/ 解析的 research-modes-seed.json 灌入，库为空才执行，幂等）
+  seedResearchModesIfEmpty();
 
   const app = Fastify({ logger: { level: 'info' } });
   // 生产配置 CORS_ORIGINS 白名单则按白名单放行，否则反射任意来源（本地开发）
@@ -1024,6 +1032,12 @@ async function main() {
 
   // M1 ETF 行业轮动模块（确定性轮动榜 + agent 过滤研判，独立，删除此行整模块下线）
   registerRotationModule(app);
+
+  // 因子探索模块（只读离线因子目录 + IC + 快照，供因子探索页，独立，删除此行整模块下线）
+  registerFactorModule(app);
+
+  // 量化研究模式库模块（codex/cursor 读写 API + 声明式站内自跟踪 + 研究标的库，独立，删除此行整模块下线）
+  registerModesModule(app);
 
   // S1 市场情绪周期模块（确定性 0-100 情绪指数 + 周期阶段 + 收盘快照，纯只读，删除此行整模块下线）
   registerSentimentModule(app);
