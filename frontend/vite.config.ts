@@ -20,6 +20,9 @@ export default defineConfig({
     const backend = process.env.VITE_BACKEND ?? 'http://localhost:8787'
     return {
       port: 5373,
+      // 固定端口：dev 启动前已通过 scripts/backend.sh freeport 5373 抢回端口，
+      // strictPort 保证始终落在 5373（避免静默跳到 5374 导致地址漂移）。
+      strictPort: true,
       proxy: {
         '/api': { target: backend, changeOrigin: true },
         '/ws': { target: backend.replace(/^http/, 'ws'), ws: true, changeOrigin: true },

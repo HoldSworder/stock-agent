@@ -7,9 +7,11 @@
     "node": ">=22 <25"
   },
   "scripts": {
-    "dev": "tsx watch src/server.ts",
+    "dev": "bash ../scripts/backend.sh dev",
+    "dev:plain": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
     "typecheck": "tsc --noEmit",
+    "modes:reseed": "tsx src/scripts/reseed-modes.ts",
     "db:push": "drizzle-kit push"
   },
   "dependencies": {
