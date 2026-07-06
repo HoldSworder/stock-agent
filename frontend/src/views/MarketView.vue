@@ -54,6 +54,66 @@ const boardDetail = ref<string[]>([]);
 const reviewOpen = ref(false);
 const review = ref('');
 
+// 多周期走势研判（kind=trend-forecast，个股/板块通用）：选目标 → 弹窗流式研判短/中/长期方向 + 点位
+const forecastPickerOpen = ref(false);
+const forecastOpen = ref(false);
+const forecastKw = ref('');
+const forecastParams = ref<Record<string, unknown>>({});
+const forecastRefKey = ref('');
+const forecastTitle = ref('多周期走势研判');
+
+interface ForecastSuggest {
+  value: string;
+  code: string;
+  name: string;
+  targetType: 'stock' | 'board';
+}
+
+// 联想合并板块（BKxxxx）+ 个股：板块在前，方便「半导体」这类板块场景直达
+async function fetchForecastSuggest(q: string, cb: (items: ForecastSuggest[]) => void) {
+  const kw = q.trim();
+  if (!kw) {
+    cb([]);
+    return;
+  }
+  try {
+    const [boards, stocks] = await Promise.all([
+      api.searchBoard(kw).catch(() => []),
+      api.searchStocks(kw).catch(() => []),
+    ]);
+    const b: ForecastSuggest[] = boards.map((s) => ({
+      value: `【板块】${s.name} (${s.code})`,
+      code: s.code,
+      name: s.name,
+      targetType: 'board',
+    }));
+    const st: ForecastSuggest[] = stocks.map((s) => ({
+      value: `${s.name} (${s.code})`,
+      code: s.code,
+      name: s.name,
+      targetType: 'stock',
+    }));
+    cb([...b, ...st]);
+  } catch {
+    cb([]);
+  }
+}
+
+// 选中目标 → 组装 params + refKey，打开研判弹窗（el-autocomplete select 回传 Record）
+function pickForecast(picked: Record<string, unknown>) {
+  const item = picked as unknown as ForecastSuggest;
+  forecastParams.value = {
+    target: item.name,
+    targetType: item.targetType,
+    code: item.code,
+  };
+  forecastRefKey.value = item.code;
+  forecastTitle.value = `${item.targetType === 'board' ? '板块' : ''}${item.name} 走势研判`;
+  forecastKw.value = '';
+  forecastPickerOpen.value = false;
+  forecastOpen.value = true;
+}
+
 // 模块显隐
 const modules = ref<HomeModule[]>([]);
 const drawer = ref(false);
@@ -177,9 +237,11 @@ onUnmounted(() => {
     <div class="page-head">
       <div class="page-title">大盘</div>
       <div class="head-actions">
+        <el-button :icon="MagicStick" type="primary" @click="forecastPickerOpen = true">
+          走势研判
+        </el-button>
         <el-button :icon="Setting" @click="openDrawer">模块管理</el-button>
-        <ModuleScheduleDialog module="market" />
-        <ModuleScheduleDialog module="themes" />
+        <ModuleScheduleDialog :module="['market', 'themes']" />
         <el-button :icon="Refresh" :loading="loading || refreshing" @click="refresh">刷新</el-button>
       </div>
     </div>
@@ -268,6 +330,30 @@ onUnmounted(() => {
         kind="market-board"
         title="大盘与板块研判"
         @update:model-value="onReviewDialog"
+      />
+
+      <!-- 多周期走势研判：目标选择器（个股/板块）→ 流式研判弹窗 -->
+      <el-dialog v-model="forecastPickerOpen" title="多周期走势研判" width="440px">
+        <div class="forecast-picker">
+          <div class="forecast-tip">
+            输入个股或板块名称/代码（如「半导体」「贵州茅台」），选中后对其短/中/长期走势与关键点位做专业研判。
+          </div>
+          <el-autocomplete
+            v-model="forecastKw"
+            :fetch-suggestions="fetchForecastSuggest"
+            placeholder="搜索个股 / 行业概念板块"
+            clearable
+            style="width: 100%"
+            @select="pickForecast"
+          />
+        </div>
+      </el-dialog>
+      <AiAnalysisDialog
+        v-model="forecastOpen"
+        kind="trend-forecast"
+        :title="forecastTitle"
+        :params="forecastParams"
+        :ref-key="forecastRefKey"
       />
 
       <!-- 涨停板梯队 -->
@@ -823,5 +909,15 @@ onUnmounted(() => {
   .grid {
     grid-template-columns: 1fr;
   }
+}
+.forecast-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.forecast-tip {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
 }
 </style>

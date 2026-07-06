@@ -52,10 +52,12 @@ import { buildDragonOverview, formatDragonForAgent } from '../dragon/service';
 import { getAttribution, formatAttributionForAgent } from '../positions/attribution';
 import { getStockCapital, formatCapitalForAgent } from '../capital/service';
 import { getStockIndicators, formatIndicatorsForAgent } from '../market/indicators';
+import { getPriceLevels, formatLevelsForAgent } from '../market/levels';
 import { getChipDistribution, formatChipForAgent } from '../market/chip';
 import { listReviews } from '../repo';
 import type { MarketReviewResult } from '@stock-agent/shared';
 import type {
+  KlinePeriod,
   MarketStance,
   NewsCatalystInput,
   PlanFocusSector,
@@ -991,6 +993,33 @@ export const tools: ToolDef[] = [
       const code = asString(args.code).trim();
       if (!/^\d{6}$/.test(code)) return '请提供 6 位个股代码 code';
       return preview(formatIndicatorsForAgent(await getStockIndicators(code)));
+    },
+  },
+  {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'price_levels',
+        description:
+          '点位测算库（S10）：从 K 线用确定性算法给「专业点位」——主导波段（摆动高低点）、斐波那契回撤(23.6/38.2/50/61.8/78.6%)与扩展(127.2/161.8%)目标位、ATR(14) 波动率、经典枢轴点(PP/R1-3/S1-3)、多周期均线结构(MA5-250 排列 + 最近支撑/压力均线)。判断关键支撑/压力、买卖点区间、止损/目标位、多空排列时调用（个股研判、板块/大盘走势预测均适用）。纯确定性算法，不含主观预测。支持个股(6位 code)/行业概念板块(BKxxxx code)/大盘指数(显式 secid，如 1.000001 上证)；可选 period（day 看短期、week 看中长期，缺省 day）。',
+        parameters: {
+          type: 'object',
+          properties: {
+            code: { type: 'string', description: '6 位个股代码，或 BKxxxx 板块代码（大盘指数留空、改传 secid）' },
+            secid: { type: 'string', description: '大盘指数 secid（市场前缀.代码，如上证 1.000001、创业板 0.399006）；传了 secid 可不传 code' },
+            period: { type: 'string', description: 'K 线周期：day(默认，看短期) / week(看中长期) / month', enum: ['day', 'week', 'month'] },
+          },
+        },
+      },
+    },
+    run: async (args) => {
+      const code = asString(args.code).trim();
+      const secid = asString(args.secid).trim() || undefined;
+      const period = (asString(args.period).trim() || 'day') as KlinePeriod;
+      if (!secid && !/^(?:\d{6}|BK\d+)$/i.test(code)) {
+        return '请提供 6 位个股代码 / BKxxxx 板块代码 code，或大盘指数 secid';
+      }
+      return preview(formatLevelsForAgent(await getPriceLevels(code, period, secid)));
     },
   },
   {
@@ -1972,6 +2001,7 @@ const TOOL_GROUP: Record<string, string> = {
   dragon_ladder: '行情持仓',
   stock_capital: '行情持仓',
   stock_indicators: '行情持仓',
+  price_levels: '行情持仓',
   stock_chips: '行情持仓',
   market_board_strength: '行情持仓',
   sync_ths_watchlist: '行情持仓',

@@ -490,6 +490,76 @@ export interface StockIndicators {
   note: string;
 }
 
+/** S10 点位测算：主导波段（摆动高低点） */
+export interface SwingRange {
+  /** 波段方向：up=先低后高（回撤位在下方，看支撑）/ down=先高后低（回撤位在上方，看压力） */
+  direction: 'up' | 'down';
+  /** 波段高点价 */
+  high: number;
+  /** 波段低点价 */
+  low: number;
+  /** 高点所在日期 */
+  highTime: string;
+  /** 低点所在日期 */
+  lowTime: string;
+}
+
+/** S10 点位测算：单个斐波那契点位 */
+export interface FibLevel {
+  /** 比例标签，如 '38.2%'、'161.8%' */
+  ratio: string;
+  /** 该比例对应价位 */
+  price: number;
+}
+
+/** S10 点位测算：经典枢轴点（据上一根 H/L/C） */
+export interface PivotLevels {
+  pp: number;
+  r1: number;
+  r2: number;
+  r3: number;
+  s1: number;
+  s2: number;
+  s3: number;
+}
+
+/** S10 点位测算：多周期均线结构 */
+export interface MaStructure {
+  /** 各周期 SMA 值（数据不足的周期不返回） */
+  values: Array<{ period: number; value: number }>;
+  /** 均线排列：短周期在长周期上方=多头，反之空头，否则纠缠 */
+  alignment: '多头排列' | '空头排列' | '纠缠';
+  /** 距现价最近的上方压力均线（无则 null） */
+  resistanceMa: { period: number; value: number } | null;
+  /** 距现价最近的下方支撑均线（无则 null） */
+  supportMa: { period: number; value: number } | null;
+}
+
+/** S10 点位测算：斐波那契/摆动高低点/ATR/枢轴点/多周期均线，喂走势研判 agent（确定性、不含主观预测） */
+export interface PriceLevels {
+  code: string;
+  asOf: string;
+  /** 最新收盘 */
+  close: number;
+  /** K 线周期 */
+  period: KlinePeriod;
+  /** 主导波段（摆动高低点）；数据不足为 null */
+  swing: SwingRange | null;
+  /** 斐波那契回撤位（波段内 23.6/38.2/50/61.8/78.6%） */
+  fibRetracements: FibLevel[];
+  /** 斐波那契扩展位（顺势目标 127.2/161.8%） */
+  fibExtensions: FibLevel[];
+  /** ATR(14) 绝对值 */
+  atr: number | null;
+  /** ATR% =ATR/收盘×100 */
+  atrPct: number | null;
+  /** 经典枢轴点 */
+  pivot: PivotLevels | null;
+  /** 多周期均线结构 */
+  ma: MaStructure | null;
+  note: string;
+}
+
 /** S8 筹码分布：单日筹码快照（东财 stock_cyq_em，比例字段为 0-1） */
 export interface ChipSnapshot {
   date: string;

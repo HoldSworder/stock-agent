@@ -10,11 +10,18 @@ import type { ModuleScheduleJob } from '@stock-agent/shared';
 
 // 各模块通用「模块内定时」管理：页头时钟按钮触发 Dialog，用可视化 cron 编辑器配置，
 // 不占页面黄金位。module 为 API 前缀（trendradar / review / research / market）。
+// 传入数组时，可在同一按钮 / 弹窗中聚合管理多个模块的定时项（如大盘的 market + themes）。
 
-const props = defineProps<{ module: string }>();
+const props = defineProps<{ module: string | string[] }>();
+
+/** 携带所属模块的定时项，便于对每条 job 调用其对应模块的 API */
+type ScopedJob = ModuleScheduleJob & { module: string };
+
+/** 规范化为模块数组 */
+const modules = computed(() => (Array.isArray(props.module) ? props.module : [props.module]));
 
 const visible = ref(false);
-const jobs = ref<ModuleScheduleJob[]>([]);
+const jobs = ref<ScopedJob[]>([]);
 const loading = ref(false);
 // 各 job 的 cron 编辑缓冲（id -> 表达式），可视化编辑器与高级原始输入共用同一缓冲
 const cronEdit = ref<Record<string, string>>({});
@@ -34,7 +41,13 @@ const fmt = (iso: string | null) => (iso ? dayjs(iso).format('MM-DD HH:mm') : '�
 async function load() {
   loading.value = true;
   try {
-    jobs.value = await api.moduleSchedules.list(props.module);
+    // 并行拉取各模块定时项并打平，每条附加所属模块
+    const lists = await Promise.all(
+      modules.value.map(async (m) =>
+        (await api.moduleSchedules.list(m)).map((j) => ({ ...j, module: m })),
+      ),
+    );
+    jobs.value = lists.flat();
     for (const j of jobs.value) cronEdit.value[j.id] = j.cronExpr;
   } catch (e) {
     ElMessage.error(msg(e));
@@ -43,16 +56,16 @@ async function load() {
   }
 }
 
-function syncJob(updated: ModuleScheduleJob) {
+function syncJob(updated: ModuleScheduleJob, module: string) {
   const i = jobs.value.findIndex((j) => j.id === updated.id);
-  if (i >= 0) jobs.value[i] = updated;
+  if (i >= 0) jobs.value[i] = { ...updated, module };
   cronEdit.value[updated.id] = updated.cronExpr;
 }
 
-async function toggle(job: ModuleScheduleJob, enabled: boolean) {
+async function toggle(job: ScopedJob, enabled: boolean) {
   busy.value[job.id] = true;
   try {
-    syncJob(await api.moduleSchedules.update(props.module, job.id, { enabled }));
+    syncJob(await api.moduleSchedules.update(job.module, job.id, { enabled }), job.module);
     ElMessage.success(enabled ? '已启用' : '已停用');
   } catch (e) {
     ElMessage.error(msg(e));
@@ -62,13 +75,13 @@ async function toggle(job: ModuleScheduleJob, enabled: boolean) {
   }
 }
 
-async function saveCron(job: ModuleScheduleJob) {
+async function saveCron(job: ScopedJob) {
   const next = (cronEdit.value[job.id] ?? '').trim();
   // 无变化 / 空 / 校验未通过时不保存
   if (!next || next === job.cronExpr || cronError.value[job.id]) return;
   busy.value[job.id] = true;
   try {
-    syncJob(await api.moduleSchedules.update(props.module, job.id, { cronExpr: next }));
+    syncJob(await api.moduleSchedules.update(job.module, job.id, { cronExpr: next }), job.module);
     ElMessage.success('已保存定时表达式');
   } catch (e) {
     ElMessage.error(msg(e));
@@ -79,16 +92,16 @@ async function saveCron(job: ModuleScheduleJob) {
 }
 
 // 可视化编辑器变更：写入缓冲并防抖保存（与原始输入共用 saveCron）
-function onCronChange(job: ModuleScheduleJob, value: string) {
+function onCronChange(job: ScopedJob, value: string) {
   cronEdit.value[job.id] = value;
   if (saveTimers[job.id]) clearTimeout(saveTimers[job.id]);
   saveTimers[job.id] = setTimeout(() => saveCron(job), 350);
 }
 
-async function trigger(job: ModuleScheduleJob) {
+async function trigger(job: ScopedJob) {
   busy.value[job.id] = true;
   try {
-    await api.moduleSchedules.trigger(props.module, job.id);
+    await api.moduleSchedules.trigger(job.module, job.id);
     ElMessage.success('已触发，结果稍后在对应模块/运行记录查看');
   } catch (e) {
     ElMessage.error(msg(e));

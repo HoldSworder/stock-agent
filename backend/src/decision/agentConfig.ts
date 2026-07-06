@@ -80,7 +80,8 @@ const DEFS: AgentDef[] = [
     dataKeys: ['kline', 'series', 'relStrength', 'intraday', 'quote'],
     toggleable: true,
     baseInstruction:
-      '价格所处位置（高位/中位/低位）、趋势方向、量价配合、关键支撑/压力位与买卖结构',
+      '价格所处位置（高位/中位/低位）、趋势方向、量价配合、关键支撑/压力位与买卖结构。' +
+      '可调用 price_levels 拿确定性点位（斐波那契回撤/扩展、枢轴点、多周期均线、ATR），在斐波那契+均线+枢轴共振处给出具体支撑/压力与止损/目标位',
   },
   {
     key: 'analyst.capital',

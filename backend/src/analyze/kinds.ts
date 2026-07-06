@@ -196,6 +196,64 @@ registerKind('watchlist-combo', {
   timeoutSec: 300,
 });
 
+// ===== 大盘：多周期走势研判（perStock，个股/板块/大盘指数通用）=====
+// 盘中/盘后不知后续走势时的专业研判：agent 先用 price_levels（日线看短期 + 周线看中长期）拿确定性点位
+// （斐波那契/枢轴/均线/ATR），叠加技术指标 + 资金/情绪/消息面取证，产出短/中/长期方向 + 详细点位 + 失效条件。
+
+/** 多周期走势研判 prompt：据目标类型（个股/板块/大盘指数）生成取数与研判指令。 */
+function buildTrendForecastPrompt(params: Record<string, unknown>): string {
+  const code = String(params.code ?? '').trim();
+  const secid = String(params.secid ?? '').trim();
+  const targetType = String(params.targetType ?? '').trim(); // stock / board / index
+  const target = String(params.target ?? '').trim() || code || secid;
+  if (!code && !secid && !target) throw new Error('缺少研判目标');
+
+  // 据类型给 price_levels 的取数入参提示（个股/板块传 code，大盘指数传 secid）
+  const levelsArg =
+    targetType === 'index' || (!code && secid)
+      ? `price_levels（secid=${secid}，先 period=day 再 period=week）`
+      : `price_levels（code=${code || target}，先 period=day 再 period=week）`;
+  const extraTools =
+    targetType === 'board'
+      ? '用 market_board_strength 看板块资金/强度，用 mx_search 查该板块最新催化与消息面；'
+      : targetType === 'index'
+        ? '用 market_snapshot / market_sentiment 看大盘情绪与量能，用 mx_search 查宏观与政策消息面；'
+        : '用 stock_indicators 看 MACD/KDJ/RSI/BOLL，用 stock_capital / stock_chips 看资金与筹码，用 mx_finance_data 查量价估值、mx_search 查消息面与公告；';
+
+  const label =
+    targetType === 'board' ? `板块「${target}」` : targetType === 'index' ? `大盘指数「${target}」` : `${target}`;
+
+  return (
+    `请对 ${label} 做一次「多周期走势研判」，重点解决「盘中/盘后不知后续如何走」的判断需求：\n` +
+    `1) 先调用 ${levelsArg} 拿确定性点位（主导波段、斐波那契回撤/扩展、枢轴点、多周期均线结构、ATR）；\n` +
+    `2) ${extraTools}\n` +
+    '3) 综合以上，给出结论，必须包含：\n' +
+    '   - 【当前位置】所处波段位置、多空排列、量价配合；\n' +
+    '   - 【短期（数日）】方向（看多/看空/震荡）+ 依据 + 关键触发位；\n' +
+    '   - 【中期（数周）】方向 + 依据；\n' +
+    '   - 【长期（数月）】方向 + 依据；\n' +
+    '   - 【关键点位】关键支撑/压力（斐波那契+均线+枢轴共振处优先）、建议入场区间、目标位（斐波那契扩展）、止损位（ATR/结构位）；\n' +
+    '   - 【失效条件】跌破/站上哪个位则观点反转，供盘中纠偏。\n' +
+    '点位给具体数值并注明依据来源，结论精炼、分点，禁止 Markdown 表格。'
+  );
+}
+
+registerKind('trend-forecast', {
+  taskName: '多周期走势研判',
+  title: '多周期走势研判',
+  group: '大盘',
+  scope: 'perStock',
+  buildPrompt: buildTrendForecastPrompt,
+  preflight: (p) => {
+    const has = String(p.code ?? '').trim() || String(p.secid ?? '').trim() || String(p.target ?? '').trim();
+    if (!has) throw new Error('请指定研判目标（个股/板块/大盘指数）');
+  },
+  deriveRefKey: (p) =>
+    String(p.code ?? '').trim() || String(p.secid ?? '').trim() || String(p.target ?? '').trim() || null,
+  modelConfig: { thinking: false, maxSteps: 14, maxTokens: 14000 },
+  timeoutSec: 420,
+});
+
 // ===== 决策：仅入目录（perStock）。发起仍走 /ws/decision 自有结构化落库，中心只读其 ai_analyses 历史 =====
 
 registerKind('decision', {
