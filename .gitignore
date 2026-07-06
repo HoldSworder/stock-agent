@@ -11,3 +11,6 @@ frontend/dist/
 backend/public/
 .playwright-cli
 .codegraph
+.pnpm-store/
+__pycache__/
+*.pyc
