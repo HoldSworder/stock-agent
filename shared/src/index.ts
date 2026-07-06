@@ -1704,6 +1704,30 @@ export interface TrendRssItem {
   date: string | null;
 }
 
+/** 赛道资讯：单个赛道定义（吸收 investment-news 12 赛道，源经 TrendRadar RSS 抓取） */
+export interface SectorDef {
+  /** 赛道 id（ai/semi/robot/auto/energy/bio/space/security/tech/consumer/macro/science） */
+  id: string;
+  /** 赛道中文名 */
+  label: string;
+  /** 该赛道配置的源数量 */
+  feedCount: number;
+}
+
+/** 赛道资讯：单条文章（在 TrendRssItem 上附赛道归属） */
+export interface SectorRssItem extends TrendRssItem {
+  /** 所属赛道 id */
+  sector: string;
+}
+
+/** 赛道资讯：单赛道「今日要点」AI 提炼结果 */
+export interface SectorDigest {
+  sector: string;
+  /** Markdown 正文（3-5 条要点 + 翻译 + 溯源） */
+  content: string;
+  createdAt: string;
+}
+
 /** 单条财经快讯/电报（首选财联社，失败按序降级到同花顺/富途/东财/新浪） */
 export interface ClsTelegraph {
   /** 稳定 id（发布时间 + 标题哈希，前端去重/key 用） */

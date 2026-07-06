@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router';
 import { MagicStick } from '@element-plus/icons-vue';
 import AiAnalysisDialog from '@/components/AiAnalysisDialog.vue';
 import IntelView from './IntelView.vue';
+import SectorIntelView from './SectorIntelView.vue';
 import ResearchView from './ResearchView.vue';
 import ClsTelegraphView from './ClsTelegraphView.vue';
 
@@ -12,7 +13,7 @@ const dialogOpen = ref(false);
 
 // 情报二合一：热点（TrendRadar 热榜/新闻/RSS + 热点 AI 研判）+ 研报（研报库/公告 + 研报机会 AI 研判）。
 // 两者底层 kind（hotspot / research-opportunity）与各自定时原样保留，今日计划照常读六源。
-const VALID_TABS = ['hotspot', 'research', 'cls'] as const;
+const VALID_TABS = ['hotspot', 'sector', 'research', 'cls'] as const;
 type IntelTab = (typeof VALID_TABS)[number];
 function normalizeTab(v: unknown): IntelTab {
   return VALID_TABS.includes(v as IntelTab) ? (v as IntelTab) : 'hotspot';
@@ -47,6 +48,9 @@ watch(tab, (v) => {
     <el-tabs v-model="tab" class="intel-hub-tabs">
       <el-tab-pane label="热点" name="hotspot" lazy>
         <IntelView embedded />
+      </el-tab-pane>
+      <el-tab-pane label="赛道资讯" name="sector" lazy>
+        <SectorIntelView />
       </el-tab-pane>
       <el-tab-pane label="研报 / 公告" name="research" lazy>
         <ResearchView embedded />

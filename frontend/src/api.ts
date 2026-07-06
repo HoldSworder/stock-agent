@@ -107,6 +107,9 @@ import type {
   TrendNews,
   TrendRadarStatus,
   TrendRssItem,
+  SectorDef,
+  SectorRssItem,
+  SectorDigest,
   TrendSummary,
   TrendSummaryHistoryItem,
   TrendTopic,
@@ -439,6 +442,20 @@ export const api = {
       unwrap<TrendSummaryHistoryItem[]>(
         http.get('/trendradar/summaries', { params: { limit }, timeout: 20000 }),
       ),
+  },
+
+  // 赛道资讯（吸收 investment-news 12 赛道全球源，经 TrendRadar RSS 取数 + LLM 提炼今日要点）
+  sectorintel: {
+    sectors: () =>
+      unwrap<SectorDef[]>(http.get('/sectorintel/sectors', { timeout: 20000 })),
+    rss: (sector: string, days = 2) =>
+      unwrap<SectorRssItem[]>(
+        http.get(`/sectorintel/${sector}/rss`, { params: { days }, timeout: 30000 }),
+      ),
+    latestDigest: (sector: string) =>
+      unwrap<SectorDigest | null>(http.get(`/sectorintel/${sector}/digest`, { timeout: 20000 })),
+    digest: (sector: string) =>
+      unwrap<SectorDigest>(http.post(`/sectorintel/${sector}/digest`, {}, { timeout: 180000 })),
   },
 
   // 财联社电报（签名直连，失效降级 AKShare 多源）：返回全量带 important，前端本地切换全部/重点

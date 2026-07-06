@@ -127,6 +127,7 @@ import { subscribe } from './ws';
 import { registerWatchModule, startWatchEngine } from './watch';
 import { registerEtfWatchModule, startEtfWatchEngine } from './etfwatch';
 import { registerTrendRadarModule } from './trendradar';
+import { registerSectorIntelModule } from './sectorintel';
 import { registerResearchModule } from './research';
 import { registerClsModule } from './cls';
 import { registerPlanModule } from './plan';
@@ -1053,6 +1054,9 @@ async function main() {
 
   // 热点雷达模块（独立，删除此行整模块下线）
   registerTrendRadarModule(app);
+
+  // 赛道资讯模块（吸收 investment-news 12 赛道全球源，经 TrendRadar RSS 取数 + LLM 提炼，独立，删除此行整模块下线）
+  registerSectorIntelModule(app);
 
   // 研报模块（独立，删除此行整模块下线）
   registerResearchModule(app);

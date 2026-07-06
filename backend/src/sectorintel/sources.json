@@ -1,0 +1,542 @@
+{
+  "iv_ai_1": {
+    "sector": "ai",
+    "name": "OpenAI",
+    "url": "https://openai.com/news/rss.xml"
+  },
+  "iv_ai_2": {
+    "sector": "ai",
+    "name": "Google Research",
+    "url": "https://research.google/blog/rss/"
+  },
+  "iv_ai_3": {
+    "sector": "ai",
+    "name": "Hugging Face",
+    "url": "https://huggingface.co/blog/feed.xml"
+  },
+  "iv_ai_4": {
+    "sector": "ai",
+    "name": "量子位",
+    "url": "https://www.qbitai.com/feed"
+  },
+  "iv_ai_5": {
+    "sector": "ai",
+    "name": "MIT Tech Review AI",
+    "url": "https://www.technologyreview.com/topic/artificial-intelligence/feed"
+  },
+  "iv_ai_6": {
+    "sector": "ai",
+    "name": "The Verge AI",
+    "url": "https://www.theverge.com/rss/ai-artificial-intelligence/index.xml"
+  },
+  "iv_ai_7": {
+    "sector": "ai",
+    "name": "TechCrunch AI",
+    "url": "https://techcrunch.com/category/artificial-intelligence/feed/"
+  },
+  "iv_ai_8": {
+    "sector": "ai",
+    "name": "arXiv cs.AI",
+    "url": "https://export.arxiv.org/rss/cs.AI"
+  },
+  "iv_ai_9": {
+    "sector": "ai",
+    "name": "KDnuggets",
+    "url": "https://www.kdnuggets.com/feed"
+  },
+  "iv_ai_10": {
+    "sector": "ai",
+    "name": "MarkTechPost",
+    "url": "https://www.marktechpost.com/feed/"
+  },
+  "iv_ai_11": {
+    "sector": "ai",
+    "name": "BAIR Blog",
+    "url": "https://bair.berkeley.edu/blog/feed.xml"
+  },
+  "iv_ai_12": {
+    "sector": "ai",
+    "name": "Import AI",
+    "url": "https://importai.substack.com/feed"
+  },
+  "iv_ai_13": {
+    "sector": "ai",
+    "name": "DeepMind",
+    "url": "https://deepmind.google/blog/rss.xml"
+  },
+  "iv_ai_14": {
+    "sector": "ai",
+    "name": "智东西",
+    "url": "https://zhidx.com/rss"
+  },
+  "iv_ai_15": {
+    "sector": "ai",
+    "name": "机器之心",
+    "url": "https://wechat2rss.xlab.app/feed/51e92aad2728acdd1fda7314be32b16639353001.xml"
+  },
+  "iv_ai_16": {
+    "sector": "ai",
+    "name": "新智元",
+    "url": "https://wechat2rss.xlab.app/feed/ede30346413ea70dbef5d485ea5cbb95cca446e7.xml"
+  },
+  "iv_semi_1": {
+    "sector": "semi",
+    "name": "DIGITIMES",
+    "url": "https://www.digitimes.com/rss/daily.xml"
+  },
+  "iv_semi_2": {
+    "sector": "semi",
+    "name": "SemiAnalysis",
+    "url": "https://semianalysis.substack.com/feed"
+  },
+  "iv_semi_3": {
+    "sector": "semi",
+    "name": "Semiconductor Engineering",
+    "url": "https://semiengineering.com/feed/"
+  },
+  "iv_semi_4": {
+    "sector": "semi",
+    "name": "EE Times",
+    "url": "https://www.eetimes.com/feed/"
+  },
+  "iv_semi_5": {
+    "sector": "semi",
+    "name": "IEEE Spectrum 半导体",
+    "url": "https://spectrum.ieee.org/feeds/topic/semiconductors.rss"
+  },
+  "iv_semi_6": {
+    "sector": "semi",
+    "name": "SemiWiki",
+    "url": "https://semiwiki.com/feed/"
+  },
+  "iv_semi_7": {
+    "sector": "semi",
+    "name": "Semiconductor Today",
+    "url": "https://www.semiconductor-today.com/rss/news.xml"
+  },
+  "iv_semi_8": {
+    "sector": "semi",
+    "name": "Electronics Weekly",
+    "url": "https://www.electronicsweekly.com/feed/"
+  },
+  "iv_semi_9": {
+    "sector": "semi",
+    "name": "All About Circuits",
+    "url": "https://www.allaboutcircuits.com/rss/news/"
+  },
+  "iv_robot_1": {
+    "sector": "robot",
+    "name": "The Robot Report",
+    "url": "https://www.therobotreport.com/feed/"
+  },
+  "iv_robot_2": {
+    "sector": "robot",
+    "name": "IEEE Spectrum 机器人",
+    "url": "https://spectrum.ieee.org/feeds/topic/robotics.rss"
+  },
+  "iv_robot_3": {
+    "sector": "robot",
+    "name": "Robohub",
+    "url": "https://robohub.org/feed/"
+  },
+  "iv_robot_4": {
+    "sector": "robot",
+    "name": "Robotics & Automation",
+    "url": "https://roboticsandautomationnews.com/feed/"
+  },
+  "iv_robot_5": {
+    "sector": "robot",
+    "name": "Robotics Business Review",
+    "url": "https://www.roboticsbusinessreview.com/feed/"
+  },
+  "iv_auto_1": {
+    "sector": "auto",
+    "name": "Electrek",
+    "url": "https://electrek.co/feed/"
+  },
+  "iv_auto_2": {
+    "sector": "auto",
+    "name": "InsideEVs",
+    "url": "https://insideevs.com/rss/articles/all/"
+  },
+  "iv_auto_3": {
+    "sector": "auto",
+    "name": "The Verge Transport",
+    "url": "https://www.theverge.com/rss/transportation/index.xml"
+  },
+  "iv_auto_4": {
+    "sector": "auto",
+    "name": "TechCrunch Transport",
+    "url": "https://techcrunch.com/category/transportation/feed/"
+  },
+  "iv_auto_5": {
+    "sector": "auto",
+    "name": "CnEVPost",
+    "url": "https://cnevpost.com/feed/"
+  },
+  "iv_energy_1": {
+    "sector": "energy",
+    "name": "CleanTechnica",
+    "url": "https://cleantechnica.com/feed/"
+  },
+  "iv_energy_2": {
+    "sector": "energy",
+    "name": "Utility Dive",
+    "url": "https://www.utilitydive.com/feeds/news/"
+  },
+  "iv_energy_3": {
+    "sector": "energy",
+    "name": "pv magazine",
+    "url": "https://www.pv-magazine.com/feed/"
+  },
+  "iv_energy_4": {
+    "sector": "energy",
+    "name": "Energy Storage News",
+    "url": "https://www.energy-storage.news/feed/"
+  },
+  "iv_energy_5": {
+    "sector": "energy",
+    "name": "OilPrice",
+    "url": "https://oilprice.com/rss/main"
+  },
+  "iv_energy_6": {
+    "sector": "energy",
+    "name": "Canary Media",
+    "url": "https://www.canarymedia.com/articles.rss"
+  },
+  "iv_energy_7": {
+    "sector": "energy",
+    "name": "PV Tech",
+    "url": "https://www.pv-tech.org/feed/"
+  },
+  "iv_energy_8": {
+    "sector": "energy",
+    "name": "Renewable Energy World",
+    "url": "https://www.renewableenergyworld.com/feed/"
+  },
+  "iv_energy_9": {
+    "sector": "energy",
+    "name": "国际能源网",
+    "url": "https://www.in-en.com/feed/rss.php?mid=21"
+  },
+  "iv_bio_1": {
+    "sector": "bio",
+    "name": "STAT News",
+    "url": "https://www.statnews.com/feed/"
+  },
+  "iv_bio_2": {
+    "sector": "bio",
+    "name": "Endpoints News",
+    "url": "https://endpts.com/feed/"
+  },
+  "iv_bio_3": {
+    "sector": "bio",
+    "name": "FierceBiotech",
+    "url": "https://www.fiercebiotech.com/rss/xml"
+  },
+  "iv_bio_4": {
+    "sector": "bio",
+    "name": "FiercePharma",
+    "url": "https://www.fiercepharma.com/rss/xml"
+  },
+  "iv_bio_5": {
+    "sector": "bio",
+    "name": "BioPharma Dive",
+    "url": "https://www.biopharmadive.com/feeds/news/"
+  },
+  "iv_bio_6": {
+    "sector": "bio",
+    "name": "GEN",
+    "url": "https://www.genengnews.com/feed/"
+  },
+  "iv_bio_7": {
+    "sector": "bio",
+    "name": "Nature Biotech",
+    "url": "https://www.nature.com/nbt.rss"
+  },
+  "iv_space_1": {
+    "sector": "space",
+    "name": "SpaceNews",
+    "url": "https://spacenews.com/feed/"
+  },
+  "iv_space_2": {
+    "sector": "space",
+    "name": "Space.com",
+    "url": "https://www.space.com/feeds/all"
+  },
+  "iv_space_3": {
+    "sector": "space",
+    "name": "Spaceflight Now",
+    "url": "https://spaceflightnow.com/feed/"
+  },
+  "iv_space_4": {
+    "sector": "space",
+    "name": "Payload",
+    "url": "https://payloadspace.com/feed/"
+  },
+  "iv_space_5": {
+    "sector": "space",
+    "name": "NASA",
+    "url": "https://www.nasa.gov/news-release/feed/"
+  },
+  "iv_space_6": {
+    "sector": "space",
+    "name": "NASASpaceflight",
+    "url": "https://www.nasaspaceflight.com/feed/"
+  },
+  "iv_security_1": {
+    "sector": "security",
+    "name": "Krebs on Security",
+    "url": "https://krebsonsecurity.com/feed/"
+  },
+  "iv_security_2": {
+    "sector": "security",
+    "name": "The Hacker News",
+    "url": "https://feeds.feedburner.com/TheHackersNews"
+  },
+  "iv_security_3": {
+    "sector": "security",
+    "name": "BleepingComputer",
+    "url": "https://www.bleepingcomputer.com/feed/"
+  },
+  "iv_security_4": {
+    "sector": "security",
+    "name": "Dark Reading",
+    "url": "https://www.darkreading.com/rss.xml"
+  },
+  "iv_security_5": {
+    "sector": "security",
+    "name": "SecurityWeek",
+    "url": "https://www.securityweek.com/feed/"
+  },
+  "iv_tech_1": {
+    "sector": "tech",
+    "name": "TechCrunch",
+    "url": "https://techcrunch.com/feed/"
+  },
+  "iv_tech_2": {
+    "sector": "tech",
+    "name": "The Verge",
+    "url": "https://www.theverge.com/rss/index.xml"
+  },
+  "iv_tech_3": {
+    "sector": "tech",
+    "name": "Ars Technica",
+    "url": "https://feeds.arstechnica.com/arstechnica/index"
+  },
+  "iv_tech_4": {
+    "sector": "tech",
+    "name": "Hacker News",
+    "url": "https://hnrss.org/frontpage"
+  },
+  "iv_tech_5": {
+    "sector": "tech",
+    "name": "WIRED",
+    "url": "https://www.wired.com/feed/rss"
+  },
+  "iv_tech_6": {
+    "sector": "tech",
+    "name": "Engadget",
+    "url": "https://www.engadget.com/rss.xml"
+  },
+  "iv_tech_7": {
+    "sector": "tech",
+    "name": "Techmeme",
+    "url": "https://www.techmeme.com/feed.xml"
+  },
+  "iv_tech_8": {
+    "sector": "tech",
+    "name": "36氪",
+    "url": "https://36kr.com/feed"
+  },
+  "iv_tech_9": {
+    "sector": "tech",
+    "name": "钛媒体",
+    "url": "https://www.tmtpost.com/rss.xml"
+  },
+  "iv_tech_10": {
+    "sector": "tech",
+    "name": "少数派",
+    "url": "https://sspai.com/feed"
+  },
+  "iv_tech_11": {
+    "sector": "tech",
+    "name": "IT之家",
+    "url": "https://www.ithome.com/rss/"
+  },
+  "iv_tech_12": {
+    "sector": "tech",
+    "name": "GitHub Blog",
+    "url": "https://github.blog/feed/"
+  },
+  "iv_tech_13": {
+    "sector": "tech",
+    "name": "Stratechery",
+    "url": "https://stratechery.com/feed/"
+  },
+  "iv_tech_14": {
+    "sector": "tech",
+    "name": "虎嗅",
+    "url": "https://rss.huxiu.com/"
+  },
+  "iv_tech_15": {
+    "sector": "tech",
+    "name": "动点科技",
+    "url": "https://cn.technode.com/feed/"
+  },
+  "iv_tech_16": {
+    "sector": "tech",
+    "name": "月光博客",
+    "url": "https://www.williamlong.info/rss.xml"
+  },
+  "iv_tech_17": {
+    "sector": "tech",
+    "name": "Solidot",
+    "url": "https://www.solidot.org/index.rss"
+  },
+  "iv_tech_18": {
+    "sector": "tech",
+    "name": "白鲸出海",
+    "url": "https://www.baijingapp.com/feed"
+  },
+  "iv_consumer_1": {
+    "sector": "consumer",
+    "name": "Engadget",
+    "url": "https://www.engadget.com/rss.xml"
+  },
+  "iv_consumer_2": {
+    "sector": "consumer",
+    "name": "9to5Mac",
+    "url": "https://9to5mac.com/feed/"
+  },
+  "iv_consumer_3": {
+    "sector": "consumer",
+    "name": "9to5Google",
+    "url": "https://9to5google.com/feed/"
+  },
+  "iv_consumer_4": {
+    "sector": "consumer",
+    "name": "GSMArena",
+    "url": "https://www.gsmarena.com/rss-news-reviews.php3"
+  },
+  "iv_consumer_5": {
+    "sector": "consumer",
+    "name": "Android Authority",
+    "url": "https://www.androidauthority.com/feed/"
+  },
+  "iv_consumer_6": {
+    "sector": "consumer",
+    "name": "DPReview",
+    "url": "https://www.dpreview.com/feeds/news.xml"
+  },
+  "iv_consumer_7": {
+    "sector": "consumer",
+    "name": "少数派",
+    "url": "https://sspai.com/feed"
+  },
+  "iv_macro_1": {
+    "sector": "macro",
+    "name": "CNBC",
+    "url": "https://www.cnbc.com/id/100003114/device/rss/rss.html"
+  },
+  "iv_macro_2": {
+    "sector": "macro",
+    "name": "Financial Times",
+    "url": "https://www.ft.com/rss/home"
+  },
+  "iv_macro_3": {
+    "sector": "macro",
+    "name": "WSJ Markets",
+    "url": "https://feeds.a.dj.com/rss/RSSMarketsMain.xml"
+  },
+  "iv_macro_4": {
+    "sector": "macro",
+    "name": "MarketWatch",
+    "url": "https://feeds.marketwatch.com/marketwatch/topstories/"
+  },
+  "iv_macro_5": {
+    "sector": "macro",
+    "name": "Yahoo Finance",
+    "url": "https://finance.yahoo.com/news/rssindex"
+  },
+  "iv_macro_6": {
+    "sector": "macro",
+    "name": "华尔街见闻",
+    "url": "https://dedicated.wallstreetcn.com/rss.xml"
+  },
+  "iv_macro_7": {
+    "sector": "macro",
+    "name": "Finextra",
+    "url": "https://www.finextra.com/rss/headlines.aspx"
+  },
+  "iv_macro_8": {
+    "sector": "macro",
+    "name": "SEC",
+    "url": "https://www.sec.gov/news/pressreleases.rss"
+  },
+  "iv_macro_9": {
+    "sector": "macro",
+    "name": "Federal Reserve",
+    "url": "https://www.federalreserve.gov/feeds/press_all.xml"
+  },
+  "iv_macro_10": {
+    "sector": "macro",
+    "name": "Seeking Alpha",
+    "url": "https://seekingalpha.com/market_currents.xml"
+  },
+  "iv_macro_11": {
+    "sector": "macro",
+    "name": "东方财富股票",
+    "url": "http://rss.eastmoney.com/rss_stock.xml"
+  },
+  "iv_macro_12": {
+    "sector": "macro",
+    "name": "东方财富资讯",
+    "url": "http://rss.eastmoney.com/rss_partener.xml"
+  },
+  "iv_macro_13": {
+    "sector": "macro",
+    "name": "经济观察网",
+    "url": "http://www.eeo.com.cn/rss.xml"
+  },
+  "iv_science_1": {
+    "sector": "science",
+    "name": "Nature News",
+    "url": "https://www.nature.com/nature.rss"
+  },
+  "iv_science_2": {
+    "sector": "science",
+    "name": "ScienceDaily",
+    "url": "https://www.sciencedaily.com/rss/all.xml"
+  },
+  "iv_science_3": {
+    "sector": "science",
+    "name": "Quanta Magazine",
+    "url": "https://api.quantamagazine.org/feed/"
+  },
+  "iv_science_4": {
+    "sector": "science",
+    "name": "New Scientist",
+    "url": "https://www.newscientist.com/feed/home/"
+  },
+  "iv_science_5": {
+    "sector": "science",
+    "name": "Live Science",
+    "url": "https://www.livescience.com/feeds/all"
+  },
+  "iv_science_6": {
+    "sector": "science",
+    "name": "MIT News",
+    "url": "https://news.mit.edu/rss/research"
+  },
+  "iv_science_7": {
+    "sector": "science",
+    "name": "Science News",
+    "url": "https://www.sciencenews.org/feed"
+  },
+  "iv_science_8": {
+    "sector": "science",
+    "name": "Ars Technica Science",
+    "url": "https://feeds.arstechnica.com/arstechnica/science"
+  }
+}
