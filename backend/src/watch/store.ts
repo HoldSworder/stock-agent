@@ -1,6 +1,7 @@
 import { and, desc, eq, gte, isNull, lt } from 'drizzle-orm';
 import type {
   WatchAlert,
+  WatchInstruction,
   WatchSource,
   WatchSignalType,
   WatchSeverity,
@@ -36,8 +37,19 @@ function rowToDto(r: Row): WatchAlert {
     strategyName: r.strategyName ?? null,
     execStatus: (r.execStatus as WatchAlert['execStatus']) ?? null,
     execNote: r.execNote ?? null,
+    instruction: parseInstruction(r.instructionJson),
     createdAt: r.createdAt,
   };
+}
+
+/** 反序列化执行指令 JSON（坏数据容错为 null，不阻断列表） */
+function parseInstruction(raw: string | null): WatchInstruction | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as WatchInstruction;
+  } catch {
+    return null;
+  }
 }
 
 export function insertAlert(input: {
@@ -59,11 +71,18 @@ export function insertAlert(input: {
   strategyName?: string | null;
   execStatus?: 'executed' | 'skipped' | null;
   execNote?: string | null;
+  instruction?: WatchInstruction | null;
 }): WatchAlert {
   const id = newId();
   const createdAt = nowIso();
+  const { instruction, ...rest } = input;
   db.insert(schema.watchAlerts)
-    .values({ id, createdAt, ...input })
+    .values({
+      id,
+      createdAt,
+      ...rest,
+      instructionJson: instruction ? JSON.stringify(instruction) : null,
+    })
     .run();
   return rowToDto(
     db.select().from(schema.watchAlerts).where(eq(schema.watchAlerts.id, id)).get()!,

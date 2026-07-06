@@ -2745,6 +2745,41 @@ export interface WatchSignal {
   disposition?: WatchDisposition;
 }
 
+/** 个股盯盘执行动作（可闭眼照做的明确动作） */
+export type WatchActionType =
+  | '买入'
+  | '加仓'
+  | '持有'
+  | '减仓'
+  | '清仓'
+  | '关注'
+  | '观望'
+  | '跳过';
+
+/**
+ * 个股盯盘结构化执行指令（买卖建议）：动作 + 价位 + 仓位 + 失效条件。
+ * 买点由 agent 产出（单 agent 路径解析 / 多 agent 路径由 DecisionResult 组装），
+ * 字段缺失为 null，前端按非空字段渲染（避免占位 0）。
+ */
+export interface WatchInstruction {
+  /** 明确动作 */
+  action: WatchActionType;
+  /** 建议买入价区间下沿（无则 null） */
+  entryLow: number | null;
+  /** 建议买入价区间上沿（无则 null） */
+  entryHigh: number | null;
+  /** 本次操作 / 目标仓位 %（减/清仓为撤出比例；无则 null） */
+  sizePct: number | null;
+  /** 止损价（无则 null） */
+  stopLoss: number | null;
+  /** 目标 / 止盈价（无则 null） */
+  takeProfit: number | null;
+  /** 失效条件（一句话，触发即离场/作废） */
+  invalidation: string;
+  /** 一句话依据 */
+  reason: string;
+}
+
 /** 落库的盯盘告警（含 AI 研判结论） */
 export interface WatchAlert {
   id: string;
@@ -2761,6 +2796,8 @@ export interface WatchAlert {
   adviceText: string | null;
   /** 结论枚举（买点：关注/买入/跳过；卖点：持有/减仓/清仓/观望） */
   verdict: string | null;
+  /** 结构化执行指令（买卖建议：动作/价位/仓位/失效条件）；无则 null */
+  instruction: WatchInstruction | null;
   /** 终审是否值得推送（默认沉默） */
   shouldAlert: boolean;
   /** Telegram 是否已投递（死信重试用） */
@@ -2880,6 +2917,8 @@ export interface WatchStrategyView {
   profile: StrategySellProfile | null;
   /** 现行 active 卖出 Skill 内容（无则 null） */
   sellSkill: string | null;
+  /** 是否纳入实时盯盘（缺省 true，关闭则该战法持仓不进监控池） */
+  monitorEnabled: boolean;
 }
 
 /** 监控池实时行情条目（推前端展示） */

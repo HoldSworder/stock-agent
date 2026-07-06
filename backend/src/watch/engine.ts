@@ -22,7 +22,7 @@ import { gateSignals, resetGate } from './gate';
 import { getAtrPct } from './volatility';
 import { evaluateOutcomes } from './reflect';
 import { sendDailyDigest } from './digest';
-import { resolveProfile, ETF_MID_PROFILE } from './strategyProfile';
+import { resolveProfile, ETF_MID_PROFILE, isStrategyMonitored } from './strategyProfile';
 import { getActivePlanItems } from '../plan/service';
 import type { QuoteCtx, RollState } from './types';
 import type { DailyPlanItem, StrategySellProfile } from '@stock-agent/shared';
@@ -45,6 +45,8 @@ let timer: NodeJS.Timeout | null = null;
 let running = false;
 let lastPollAt: string | null = null;
 let lastSignalCount = 0;
+/** 最近一轮监控池行情快照（供前端进入/重连时即时展示，避免空等下一 tick） */
+let lastQuotes: WatchQuoteItem[] = [];
 let lastRetryAt = 0;
 let lastOutcomeEvalDay = '';
 let lastDigestDay = '';
@@ -147,7 +149,7 @@ async function collectPool(cfg: WatchConfig, includeWatch: boolean): Promise<Map
     }
     // 本地战法持仓（仅 kind=local；妙想镜像盘不纳入。skipSync 避免每轮触发同步）
     try {
-      for (const s of listStrategies().filter((s) => s.kind === 'local')) {
+      for (const s of listStrategies().filter((s) => s.kind === 'local' && isStrategyMonitored(s.id))) {
         const snap = await getStrategySnapshot(s.id, { skipSync: true });
         const horizon = s.horizon === 'mid' ? 'mid' : 'short';
         const profile = resolveProfile(s.id, horizon);
@@ -461,6 +463,7 @@ async function tick(cfg: WatchConfig): Promise<void> {
   lastSignalCount = signals.length;
   lastPollAt = new Date().toISOString();
 
+  lastQuotes = quoteItems;
   broadcastWatch({ type: 'quotes', at: lastPollAt, items: quoteItems });
   broadcastWatch({ type: 'status', status: buildStatus(cfg) });
 
@@ -571,4 +574,12 @@ export function applyWatchConfig(): void {
 
 export function getWatchStatus(): WatchStatus {
   return buildStatus(getWatchConfig());
+}
+
+/**
+ * 最近一轮监控池行情快照（前端连接 /ws/watch 时即时补推，避免空等下一 tick）。
+ * ponytail: 不做跨日清理，连接时可能短暂展示上一交易时段快照（带 at 时间戳前端可辨），换日首 tick 即覆盖。
+ */
+export function getLastQuotes(): { at: string | null; items: WatchQuoteItem[] } {
+  return { at: lastPollAt, items: lastQuotes };
 }

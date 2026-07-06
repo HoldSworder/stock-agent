@@ -207,6 +207,7 @@ CREATE TABLE IF NOT EXISTS watch_alerts (
   strategy_name TEXT,
   exec_status TEXT,
   exec_note TEXT,
+  instruction_json TEXT,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_watch_alerts_created ON watch_alerts(created_at);
@@ -628,6 +629,7 @@ export function ensureSchema(): void {
     "ALTER TABLE watch_alerts ADD COLUMN strategy_name TEXT",
     "ALTER TABLE watch_alerts ADD COLUMN exec_status TEXT",
     "ALTER TABLE watch_alerts ADD COLUMN exec_note TEXT",
+    'ALTER TABLE watch_alerts ADD COLUMN instruction_json TEXT',
     "ALTER TABLE daily_plan_items ADD COLUMN asset_type TEXT NOT NULL DEFAULT 'stock'",
     'ALTER TABLE daily_plan_items ADD COLUMN debate_verdict TEXT',
     'ALTER TABLE daily_plan_items ADD COLUMN debate_confidence INTEGER',
@@ -672,7 +674,7 @@ function warnOnSchemaDrift(): void {
     strategies: ['kind', 'screen_engine', 'screen_strategy_id', 'horizon', 'rebalance_cron'],
     daily_plans: ['key_risks', 'intraday_guide'],
     daily_plan_items: ['asset_type', 'confirm_conditions', 'invalid_conditions', 'confidence'],
-    watch_alerts: ['strategy_id', 'exec_status'],
+    watch_alerts: ['strategy_id', 'exec_status', 'instruction_json'],
     screen_runs: ['engine', 'horizon'],
     market_themes: ['phase', 'strength_history'],
   };

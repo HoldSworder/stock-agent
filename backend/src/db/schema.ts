@@ -309,6 +309,8 @@ export const watchAlerts = sqliteTable(
     execStatus: text('exec_status'),
     /** 自动卖出回执或跳过原因 */
     execNote: text('exec_note'),
+    /** 结构化执行指令 JSON（WatchInstruction） */
+    instructionJson: text('instruction_json'),
     createdAt: text('created_at').notNull(),
   },
   (t) => ({

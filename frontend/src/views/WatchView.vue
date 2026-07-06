@@ -5,8 +5,11 @@ import { ElMessage } from 'element-plus';
 import { Refresh, Setting, VideoPlay, VideoPause } from '@element-plus/icons-vue';
 import { api } from '@/api';
 import StockLink from '@/components/StockLink.vue';
+import WatchAlertCard from '@/components/WatchAlertCard.vue';
+import RunResultDrawer from '@/components/RunResultDrawer.vue';
 import { useWatchStore } from '@/stores/watch';
 import type {
+  TaskRun,
   WatchConfig,
   WatchDisposition,
   WatchSignal,
@@ -44,10 +47,24 @@ async function loadStrategyViews() {
   }
 }
 
-/** 仅展示有卖点档案（启用战法专属触发）的战法 */
+/** 仅展示有卖点档案、且当前纳入盯盘的战法（关闭盯盘开关后卡片即时消失） */
 const profiledStrategies = computed(() =>
-  strategyViews.value.filter((v) => v.profile),
+  strategyViews.value.filter((v) => v.profile && v.monitorEnabled),
 );
+
+/** 本地模拟战法（妙想镜像盘不纳入盯盘，故不展示开关） */
+const localStrategies = computed(() =>
+  strategyViews.value.filter((v) => v.kind === 'local'),
+);
+
+async function toggleStrategyMonitor(strategyId: string, enabled: boolean) {
+  try {
+    strategyViews.value = await api.setWatchStrategyMonitor(strategyId, enabled);
+    ElMessage.success(enabled ? '已纳入盯盘' : '已移出盯盘');
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '操作失败');
+  }
+}
 
 /** 分钟数转 HH:mm（尾盘了结时间展示） */
 function minToHHmm(min: number): string {
@@ -192,6 +209,19 @@ function signalKey(s: WatchSignalRow) {
   return `${s.code}-${s.type}`;
 }
 
+// 关联 agent 运行抽屉
+const runDrawer = ref(false);
+const runDetail = ref<TaskRun | null>(null);
+async function openRun(runId: string) {
+  try {
+    const d = await api.getRun(runId);
+    runDetail.value = d.run;
+    runDrawer.value = true;
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '加载运行失败');
+  }
+}
+
 onMounted(async () => {
   store.connect();
   try {
@@ -284,10 +314,12 @@ watch(
     </section>
 
     <div class="grid">
+      <!-- 左栏：监控池行情 + 信号流 纵向叠放 -->
+      <div class="left-rail">
       <!-- 监控池实时行情 -->
       <section class="panel">
         <div class="panel-title">监控池行情</div>
-        <el-table v-if="sortedQuotes.length" :data="sortedQuotes" size="small" height="520">
+        <el-table v-if="sortedQuotes.length" :data="sortedQuotes" size="small" height="300">
           <el-table-column label="标的" min-width="150">
             <template #default="{ row }">
               <StockLink :code="row.code" :name="row.name" />
@@ -355,40 +387,25 @@ watch(
         </div>
         <el-empty v-else description="暂无触发信号" :image-size="80" />
       </section>
+      </div>
 
-      <!-- AI 建议 -->
-      <section class="panel">
+      <!-- 右主区：AI 建议（结构化买卖建议卡片流） -->
+      <section class="panel advice-panel">
         <div class="panel-title">AI 建议（已终审推送）</div>
-        <div v-if="store.alerts.length" class="feed">
-          <div v-for="a in store.alerts" :key="a.id" class="alert-card" :class="{ muted: !a.shouldAlert }">
-            <div class="alert-head">
-              <StockLink :code="a.code" :name="a.name" />
-              <el-tag v-if="a.strategyName" size="small" effect="plain" type="warning" class="strat-chip">
-                {{ a.strategyName }}
-              </el-tag>
-              <el-tag v-if="a.verdict" :type="a.source === 'position' ? 'danger' : 'success'" size="small">
-                {{ a.verdict }}
-              </el-tag>
-              <el-tag v-if="a.execStatus === 'executed'" type="success" size="small" effect="dark">已自动卖出</el-tag>
-              <el-tag v-else-if="a.execStatus === 'skipped'" type="warning" size="small" effect="plain">自动卖出跳过</el-tag>
-              <el-tag v-if="!a.shouldAlert" type="info" size="small" effect="plain">沉默</el-tag>
-              <el-tag v-if="a.shouldAlert && !a.delivered" type="warning" size="small" effect="plain">待补发</el-tag>
-              <span class="feed-time">{{ dayjs(a.createdAt).format('MM-DD HH:mm') }}</span>
-            </div>
-            <div class="alert-trigger">触发：{{ a.detail }}</div>
-            <div
-              v-if="a.execNote"
-              class="alert-exec"
-              :class="a.execStatus === 'executed' ? 'exec-ok' : 'exec-skip'"
-            >
-              {{ a.execNote }}
-            </div>
-            <div v-if="a.adviceText" class="alert-advice">{{ a.adviceText }}</div>
-          </div>
+        <div v-if="store.alerts.length" class="advice-list">
+          <WatchAlertCard
+            v-for="a in store.alerts"
+            :key="a.id"
+            :alert="a"
+            @open-run="openRun"
+          />
         </div>
         <el-empty v-else description="暂无 AI 建议" :image-size="80" />
       </section>
     </div>
+
+    <!-- 关联 agent 运行 -->
+    <RunResultDrawer v-model="runDrawer" :run="runDetail" />
 
     <!-- 配置抽屉 -->
     <el-drawer v-model="configVisible" title="盯盘配置" size="420px">
@@ -417,6 +434,20 @@ watch(
         <el-form-item label="全市场扫描">
           <el-switch v-model="form.watchScan" />
         </el-form-item>
+
+        <el-divider content-position="left">模拟战法盯盘</el-divider>
+        <div v-if="localStrategies.length" class="strat-monitor-list">
+          <div v-for="v in localStrategies" :key="v.strategyId" class="strat-monitor-row">
+            <span class="strat-monitor-name">{{ v.name }}</span>
+            <el-switch
+              :model-value="v.monitorEnabled"
+              :disabled="!form.watchPositions"
+              @update:model-value="(val: string | number | boolean) => toggleStrategyMonitor(v.strategyId, Boolean(val))"
+            />
+          </div>
+          <span class="form-hint">关闭后该战法持仓不再纳入监控池；需「持仓（卖点）」开启才生效</span>
+        </div>
+        <span v-else class="form-hint">暂无本地模拟战法</span>
 
         <el-divider content-position="left">轮询与限流</el-divider>
         <el-form-item label="轮询间隔(秒)">
@@ -602,15 +633,30 @@ watch(
 }
 .grid {
   display: grid;
-  grid-template-columns: 1.1fr 1fr 1.1fr;
+  grid-template-columns: minmax(340px, 380px) 1fr;
   gap: 16px;
+  align-items: start;
+}
+.left-rail {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
 }
 .panel {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg-2);
   padding: 14px;
+}
+/* 左栏面板按内容收敛；右主区拉满高度承载长卡片流 */
+.advice-panel {
   min-height: 560px;
+}
+.advice-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
 }
 .panel-title {
   font-weight: 600;
@@ -621,7 +667,7 @@ watch(
   display: flex;
   flex-direction: column;
   gap: 10px;
-  max-height: 520px;
+  max-height: 360px;
   overflow: auto;
 }
 .feed-row {
@@ -656,16 +702,6 @@ watch(
   font-size: 12px;
   color: var(--text-1);
 }
-.alert-card {
-  padding: 10px;
-  border-radius: var(--radius-sm);
-  background: var(--bg-1);
-  border-left: 3px solid var(--brand);
-}
-.alert-card.muted {
-  opacity: 0.6;
-  border-left-color: var(--border);
-}
 .st-item .muted {
   color: var(--text-2);
   font-size: 11px;
@@ -675,36 +711,20 @@ watch(
   font-size: 11px;
   color: var(--text-2);
 }
-.alert-head {
+.strat-monitor-list {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 8px;
 }
-.alert-trigger {
-  margin: 6px 0;
-  font-size: 12px;
-  color: var(--text-2);
+.strat-monitor-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
-.alert-exec {
-  margin: 6px 0;
-  padding: 6px 8px;
-  border-radius: var(--radius-sm);
-  font-size: 12px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-}
-.alert-exec.exec-ok {
-  color: var(--up);
-  background: color-mix(in srgb, var(--up) 12%, transparent);
-}
-.alert-exec.exec-skip {
-  color: var(--text-2);
-  background: var(--bg-2);
-}
-.alert-advice {
+.strat-monitor-name {
   font-size: 13px;
-  white-space: pre-wrap;
-  line-height: 1.6;
+  color: var(--text-1);
 }
 .num {
   font-family: var(--font-mono);

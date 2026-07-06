@@ -400,6 +400,8 @@ export const api = {
   getWatchStats: () => unwrap<WatchStats>(http.get('/watch/stats')),
   getWatchStrategyViews: () =>
     unwrap<WatchStrategyView[]>(http.get('/watch/strategy-views')),
+  setWatchStrategyMonitor: (strategyId: string, enabled: boolean) =>
+    unwrap<WatchStrategyView[]>(http.put('/watch/strategy-monitor', { strategyId, enabled })),
 
   // ETF 多周期分层盯盘（独立于个股盯盘）
   etfWatch: {

@@ -131,15 +131,17 @@ export const useNotificationsStore = defineStore('notifications', () => {
         },
         false,
       );
-    } else if (e.type === 'signal' && e.signal.severity === 'high') {
+    } else if (e.type === 'signal' && e.signal.disposition === 'to_ai') {
+      // 仅在信号首次通过迟滞门、实际送 AI 研判时弹一次「正在研判」heads-up；
+      // 每 tick 的 hysteresis/cooldown/over_capacity 重广播不再弹，避免刷屏。
       const s = e.signal;
       push(
         {
           id: `signal:${s.code}:${s.type}:${s.at}`,
           kind: 'watch',
-          level: 'warning',
+          level: s.severity === 'high' ? 'warning' : 'info',
           title: `盯盘信号 · ${s.name}（${s.code}）`,
-          summary: brief(s.detail) || '高优先级盯盘信号',
+          summary: brief(s.detail) || '已送 AI 研判',
           time: s.at,
         },
         false,

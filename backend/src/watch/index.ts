@@ -3,8 +3,8 @@ import type { WatchConfig, WatchEvent } from '@stock-agent/shared';
 import { getWatchConfig, updateWatchConfig } from './config';
 import { getStats, listAlerts } from './store';
 import { subscribeWatch } from './bus';
-import { applyWatchConfig, getWatchStatus, startWatchEngine } from './engine';
-import { getStrategyViews, seedStrategyProfiles } from './strategyProfile';
+import { applyWatchConfig, getLastQuotes, getWatchStatus, startWatchEngine } from './engine';
+import { getStrategyViews, seedStrategyProfiles, setStrategyMonitored } from './strategyProfile';
 
 export { startWatchEngine } from './engine';
 
@@ -44,6 +44,14 @@ export function registerWatchModule(app: FastifyInstance): void {
 
   app.get('/api/watch/strategy-views', () => ({ ok: true, data: getStrategyViews() }));
 
+  app.put<{ Body: { strategyId: string; enabled: boolean } }>(
+    '/api/watch/strategy-monitor',
+    (req) => {
+      setStrategyMonitored(String(req.body?.strategyId ?? ''), Boolean(req.body?.enabled));
+      return { ok: true, data: getStrategyViews() };
+    },
+  );
+
   // WebSocket：盯盘实时行情 / 信号 / 告警流
   app.get('/ws/watch', { websocket: true }, (socket) => {
     const send = (e: WatchEvent) => {
@@ -53,8 +61,10 @@ export function registerWatchModule(app: FastifyInstance): void {
         /* socket 可能已关闭 */
       }
     };
-    // 连接即推一次当前状态
+    // 连接即推一次当前状态 + 最近一轮监控池行情快照（避免前端空等下一 tick）
     send({ type: 'status', status: getWatchStatus() });
+    const q = getLastQuotes();
+    if (q.items.length) send({ type: 'quotes', at: q.at ?? new Date().toISOString(), items: q.items });
     const unsub = subscribeWatch(send);
     socket.on('close', unsub);
   });

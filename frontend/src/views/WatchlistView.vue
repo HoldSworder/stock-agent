@@ -117,6 +117,11 @@ const oneOpen = ref(false);
 const oneCode = ref('');
 const oneName = ref('');
 
+// 多周期走势研判弹窗（kind=trend-forecast，个股维度：短/中/长期方向 + 斐波那契/枢轴点位）
+const forecastOpen = ref(false);
+const forecastCode = ref('');
+const forecastName = ref('');
+
 async function load(silent = false) {
   if (!silent) loading.value = true;
   try {
@@ -259,6 +264,13 @@ function debateOne(row: WatchlistEntry) {
   router.push({ path: '/decision', query: { code: row.code, asset: 'stock' } });
 }
 
+// 走势研判：多周期方向 + 斐波那契/枢轴/均线点位（复用 trend-forecast kind，按 code 作用域）
+function forecastOne(row: WatchlistEntry) {
+  forecastCode.value = row.code;
+  forecastName.value = row.name;
+  forecastOpen.value = true;
+}
+
 function analyzeAll() {
   if (items.value.length === 0) {
     ElMessage.warning('关注列表为空');
@@ -398,10 +410,13 @@ onUnmounted(() => {
           <span v-else class="muted">—</span>
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="220" align="right">
+      <el-table-column label="操作" width="300" align="right">
         <template #default="{ row }">
           <el-button link type="primary" size="small" @click="analyzeOne(row)">
             快速研判
+          </el-button>
+          <el-button link type="success" size="small" @click="forecastOne(row)">
+            走势研判
           </el-button>
           <el-button link type="warning" size="small" @click="debateOne(row)">
             深度辩论
@@ -455,6 +470,15 @@ onUnmounted(() => {
       :title="oneName ? `${oneName}(${oneCode}) AI 研判` : '自选个股研判'"
       :params="{ code: oneCode }"
       :ref-key="oneCode"
+    />
+
+    <!-- 多周期走势研判弹窗（短/中/长期方向 + 斐波那契/枢轴点位；按 code 作用域历史） -->
+    <AiAnalysisDialog
+      v-model="forecastOpen"
+      kind="trend-forecast"
+      :title="forecastName ? `${forecastName}(${forecastCode}) 走势研判` : '多周期走势研判'"
+      :params="{ code: forecastCode, name: forecastName, targetType: 'stock', target: forecastName }"
+      :ref-key="forecastCode"
     />
 
     <!-- 组合研判弹窗（统一 AI 分析：全局历史） -->

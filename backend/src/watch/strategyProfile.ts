@@ -9,6 +9,7 @@ import { getActiveSkills, updateSkillManually } from '../strategy/skill';
 // 无档案的持仓（含真实持仓）只走通用下跌触发。
 
 const PROFILES_KEY = 'watch_strategy_profiles';
+const MONITOR_KEY = 'watch_strategy_monitor';
 const WEIPAN_SKILL_FLAG = 'watch_weipan_sell_skill_v2';
 const LOCAL_NAME = '尾盘动能套利';
 
@@ -96,6 +97,29 @@ export function getProfile(strategyId: string): StrategySellProfile | null {
   return map[strategyId] ?? null;
 }
 
+function loadMonitorMap(): Record<string, boolean> {
+  const raw = readRaw(MONITOR_KEY);
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/** 某战法是否纳入实时盯盘；缺省 true（保持现有全盯行为） */
+export function isStrategyMonitored(strategyId: string): boolean {
+  return loadMonitorMap()[strategyId] ?? true;
+}
+
+/** 设置某战法是否纳入实时盯盘 */
+export function setStrategyMonitored(strategyId: string, enabled: boolean): void {
+  const map = loadMonitorMap();
+  map[strategyId] = enabled;
+  writeRaw(MONITOR_KEY, JSON.stringify(map));
+}
+
 /**
  * 按战法周期解析卖点档案：显式档案优先；中线战法（horizon=mid）无显式档案时回退 MID_PROFILE
  * （趋势不破不走的中线纪律），短线战法无档案仍返回 null（只走通用下跌触发）。
@@ -119,6 +143,7 @@ export function getStrategyViews(): WatchStrategyView[] {
       kind: s.kind,
       profile: resolveProfile(s.id, s.horizon === 'mid' ? 'mid' : 'short'),
       sellSkill: sell?.content ?? null,
+      monitorEnabled: isStrategyMonitored(s.id),
     };
   });
 }

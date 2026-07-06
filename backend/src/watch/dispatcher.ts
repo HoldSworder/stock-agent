@@ -1,8 +1,11 @@
 import type {
+  DecisionResult,
   RunStatus,
   WatchAlert,
+  WatchActionType,
   WatchConfig,
   WatchDisposition,
+  WatchInstruction,
   WatchSeverity,
   WatchSignal,
 } from '@stock-agent/shared';
@@ -20,6 +23,7 @@ import { sendTelegram } from '../notify/telegram';
 import { recordWatchTrigger } from '../plan/service';
 import { broadcastWatch } from './bus';
 import { screenSignal } from './screen';
+import { parseVerdict, type Verdict } from './verdict';
 import {
   findRecentAlertByCode,
   insertAlert,
@@ -57,26 +61,30 @@ function cooldownMsFor(severity: WatchSeverity, cfg: WatchConfig): number {
   return cfg.cooldownMin * 60_000 * SEVERITY_COOLDOWN_FACTOR[severity];
 }
 
-/** 终审 JSON 结构 */
-interface Verdict {
-  shouldAlert: boolean;
-  verdict: string;
-  advice: string;
-}
+/** DecisionAction → 个股盯盘中文动作 */
+const DECISION_ACTION_TO_WATCH: Record<string, WatchActionType> = {
+  buy: '买入',
+  add: '加仓',
+  hold: '持有',
+  reduce: '减仓',
+  sell: '清仓',
+};
 
-function parseVerdict(text: string): Verdict {
-  const cleaned = text.trim().replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
-  try {
-    const obj = JSON.parse(cleaned) as Partial<Verdict>;
-    return {
-      shouldAlert: Boolean(obj.shouldAlert),
-      verdict: typeof obj.verdict === 'string' ? obj.verdict : '',
-      advice: typeof obj.advice === 'string' ? obj.advice : text.trim(),
-    };
-  } catch {
-    // 解析失败：保守按「值得提示」处理，正文用原文
-    return { shouldAlert: true, verdict: '', advice: text.trim() };
-  }
+/**
+ * 多 agent 辩论路径：把已有结构化裁决 DecisionResult 组装成执行指令，
+ * 避免 mapDecisionToVerdict 只取 verdict+narrative 而丢弃 targetPrice/stopLoss/positionPct。
+ */
+function instructionFromDecision(d: DecisionResult): WatchInstruction {
+  return {
+    action: DECISION_ACTION_TO_WATCH[d.action] ?? '观望',
+    entryLow: null,
+    entryHigh: null,
+    sizePct: d.positionPct ?? null,
+    stopLoss: d.stopLoss ?? null,
+    takeProfit: d.targetPrice ?? null,
+    invalidation: d.keyRisks[0] ?? '',
+    reason: d.thesis ?? '',
+  };
 }
 
 /** 该标的近期研判历史摘要（用于对比，避免重复同一逻辑） */
@@ -179,7 +187,11 @@ function buildPrompt(s: WatchSignal, cfg: WatchConfig): string {
       '这是我【持仓】标的的卖点信号，请做卖点研判。\n' +
       autoExecNote +
       common +
-      '{"shouldAlert":布尔(是否值得推送提醒),"verdict":"持有|减仓|清仓|观望","advice":"一句话结论+关键依据+应对建议(竖排要点,禁用表格)"}' +
+      '{"shouldAlert":布尔(是否值得推送提醒),"verdict":"持有|减仓|清仓|观望",' +
+      '"advice":"一句话结论+关键依据+应对建议(竖排要点,禁用表格)",' +
+      '"instruction":{"action":"持有|减仓|清仓|观望","sizePct":本次撤出仓位百分比数字或null,' +
+      '"stopLoss":止损价数字或null,"takeProfit":止盈/目标价数字或null,' +
+      '"invalidation":"一句话失效条件","reason":"一句话依据"}}' +
       buildStrategySellNote(s) +
       history
     );
@@ -193,7 +205,12 @@ function buildPrompt(s: WatchSignal, cfg: WatchConfig): string {
     head +
     buyIntro +
     common +
-    '{"shouldAlert":布尔(是否值得推送提醒),"verdict":"关注|买入|跳过","advice":"一句话结论+关键依据+买点建议(竖排要点,禁用表格)"}' +
+    '{"shouldAlert":布尔(是否值得推送提醒),"verdict":"关注|买入|跳过",' +
+    '"advice":"一句话结论+关键依据+买点建议(竖排要点,禁用表格)",' +
+    '"instruction":{"action":"买入|加仓|关注|观望|跳过","entryLow":买入区间下沿数字或null,' +
+    '"entryHigh":买入区间上沿数字或null,"sizePct":建议仓位百分比数字或null,' +
+    '"stopLoss":止损价数字或null,"takeProfit":目标/止盈价数字或null,' +
+    '"invalidation":"一句话失效条件","reason":"一句话依据"}}' +
     history
   );
 }
@@ -325,7 +342,7 @@ async function processSignal(s: WatchSignal, cfg: WatchConfig): Promise<void> {
     status = 'success';
     promptTokens = undefined;
     completionTokens = undefined;
-    verdict = mapDecisionToVerdict(decision);
+    verdict = { ...mapDecisionToVerdict(decision), instruction: instructionFromDecision(decision) };
   } else {
     // 单 agent 终审走统一门面：恒建 run（运行管理）+ 调用记录由 gateway 接管。
     // 盯盘不传 strategy：天然不挂载 mx_trade / sim_trade，只研判不下单。
@@ -365,7 +382,7 @@ async function processSignal(s: WatchSignal, cfg: WatchConfig): Promise<void> {
   let delivered = false;
   if ((verdict.shouldAlert || executed) && cfg.pushTelegram && status === 'success') {
     const pushAdvice = execNote ? `${verdict.advice}\n${execNote}`.trim() : verdict.advice;
-    delivered = await pushAlert(s, pushAdvice);
+    delivered = await pushAlert(s, pushAdvice, verdict.instruction);
   }
 
   const alert: WatchAlert = insertAlert({
@@ -378,6 +395,7 @@ async function processSignal(s: WatchSignal, cfg: WatchConfig): Promise<void> {
     runId,
     adviceText: verdict.advice || null,
     verdict: verdict.verdict || null,
+    instruction: verdict.instruction,
     shouldAlert: verdict.shouldAlert,
     delivered,
     triggerPrice: s.price,
@@ -400,11 +418,32 @@ async function processSignal(s: WatchSignal, cfg: WatchConfig): Promise<void> {
   }
 }
 
+/** 执行指令拼一行可读摘要（动作 + 关键价位/仓位），无有效内容返回空串 */
+function instructionLine(i: WatchInstruction | null): string {
+  if (!i) return '';
+  const parts: string[] = [`动作：${i.action}`];
+  if (i.entryLow != null || i.entryHigh != null) {
+    const lo = i.entryLow != null ? i.entryLow.toFixed(3) : '?';
+    const hi = i.entryHigh != null ? i.entryHigh.toFixed(3) : '?';
+    parts.push(`买入 ${lo}–${hi}`);
+  }
+  if (i.stopLoss != null) parts.push(`止损 ${i.stopLoss.toFixed(3)}`);
+  if (i.takeProfit != null) parts.push(`止盈 ${i.takeProfit.toFixed(3)}`);
+  if (i.sizePct != null) parts.push(`仓位 ${i.sizePct}%`);
+  return parts.length > 1 ? `\n执行：${parts.join(' · ')}` : '';
+}
+
 /** 推送 Telegram，成功返回 true（失败留待死信重投） */
-async function pushAlert(s: WatchSignal, advice: string): Promise<boolean> {
+async function pushAlert(
+  s: WatchSignal,
+  advice: string,
+  instruction: WatchInstruction | null = null,
+): Promise<boolean> {
   const tag = s.source === 'position' ? '卖点' : '买点';
   const stratTag = s.strategyName ? `·${s.strategyName}` : '';
-  const text = `【盯盘${tag}${stratTag}】${s.name}(${s.code})\n触发：${s.detail}\n\n${advice}`;
+  const text =
+    `【盯盘${tag}${stratTag}】${s.name}(${s.code})\n触发：${s.detail}` +
+    `${instructionLine(instruction)}\n\n${advice}`;
   try {
     const r = await sendTelegram(text);
     return r.ok;
