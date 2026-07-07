@@ -7,6 +7,7 @@ import { api, openWs } from '@/api';
 import TaskEditDialog from '@/components/TaskEditDialog.vue';
 import RunResultDrawer from '@/components/RunResultDrawer.vue';
 import PortfolioKindBadge from '@/components/PortfolioKindBadge.vue';
+import WeipanWatchPanel from '@/components/WeipanWatchPanel.vue';
 import type {
   ScheduledTask,
   ScreenNlStrategy,
@@ -407,6 +408,17 @@ async function submitRun() {
 
 const currentName = computed(() => snap.value?.strategy.name ?? '');
 const isMiaoxiang = computed(() => snap.value?.strategy.kind === 'miaoxiang');
+// 尾盘套利战法：额外展示「确定性盯盘」面板（无 LLM 的移动止盈/止盈/止损信号流）
+const isWeipan = computed(() => currentName.value === '尾盘动能套利');
+// 胜率（已了结）：按有已实现盈亏的卖出成交统计盈利占比
+const winStat = computed(() => {
+  const sells = (snap.value?.trades ?? []).filter(
+    (t) => t.side === 'sell' && t.realizedProfit != null,
+  );
+  if (!sells.length) return null;
+  const wins = sells.filter((t) => (t.realizedProfit ?? 0) > 0).length;
+  return { wins, total: sells.length, rate: wins / sells.length };
+});
 
 // ===== 妙想镜像同步 =====
 const syncing = ref(false);
@@ -864,6 +876,13 @@ onUnmounted(() => ws?.close());
                 <span class="sub">{{ pct(snap.totalProfitRate) }}</span>
               </div>
             </div>
+            <div v-if="winStat" class="card">
+              <div class="card-label">胜率（已了结）</div>
+              <div class="card-value num">
+                {{ (winStat.rate * 100).toFixed(1) }}%
+                <span class="sub">{{ winStat.wins }}/{{ winStat.total }}</span>
+              </div>
+            </div>
           </div>
 
           <!-- 前向验证：样本曲线统计 + 自动模拟闸门（确定性只读） -->
@@ -1103,6 +1122,11 @@ onUnmounted(() => ws?.close());
             </el-table-column>
             <template #empty>该战法暂无关联定时任务，点右上「新建任务」</template>
           </el-table>
+          </el-tab-pane>
+
+          <el-tab-pane v-if="isWeipan" name="weipan">
+            <template #label>尾盘盯盘</template>
+            <WeipanWatchPanel v-if="activeTab === 'weipan'" />
           </el-tab-pane>
 
           <el-tab-pane name="daily">

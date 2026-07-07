@@ -126,6 +126,7 @@ import {
 import { subscribe } from './ws';
 import { registerWatchModule, startWatchEngine } from './watch';
 import { registerEtfWatchModule, startEtfWatchEngine } from './etfwatch';
+import { registerWeipanModule, startWeipanEngine } from './weipan';
 import { registerTrendRadarModule } from './trendradar';
 import { registerSectorIntelModule } from './sectorintel';
 import { registerResearchModule } from './research';
@@ -153,6 +154,7 @@ import { seedUniverseIfEmpty } from './modes/universeRepo';
 import { seedResearchModesIfEmpty } from './seeds/researchModes';
 import { registerSentimentModule } from './sentiment';
 import { registerBreadthModule } from './breadth';
+import { registerBoardsModule } from './boards';
 import { registerConceptsModule } from './concepts';
 import { registerDragonModule } from './dragon';
 import { registerCapitalModule } from './capital';
@@ -1048,6 +1050,9 @@ async function main() {
   // 热门细分概念主线归纳（确定性：概念涨幅 + 主力净流入 + 新高宽度 合成热度分 + 主题归纳，纯只读，删除此行整模块下线）
   registerConceptsModule(app);
 
+  // 板块主线作战台（投影自主线共识 + 派生操盘标签 + 标的解析 + 持仓暴露，纯只读，删除此行整模块下线）
+  registerBoardsModule(app);
+
   // S6 龙头/连板梯队模块（确定性连板梯队 + 龙头辨识分层，纯只读，删除此行整模块下线）
   registerDragonModule(app);
   registerCapitalModule(app);
@@ -1065,6 +1070,11 @@ async function main() {
   // ETF 多周期分层盯盘模块（独立，可删除以下两行整模块下线）
   registerEtfWatchModule(app);
   startEtfWatchEngine();
+
+  // 尾盘套利确定性盯盘模块（独立、无 LLM：建仓当日尾盘选出的 3 只 + 次日移动止盈/止盈/止损/尾盘了结自动模拟卖出，
+  // 可删除以下两行整模块下线；与个股/ETF 盯盘互不干扰，尾盘战法在 LLM 盯盘保持 monitored=false）
+  registerWeipanModule(app);
+  startWeipanEngine();
 
   // 热点雷达模块（独立，删除此行整模块下线）
   registerTrendRadarModule(app);

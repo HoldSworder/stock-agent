@@ -14,7 +14,7 @@ import { db, schema } from '../db/client';
 import { getTodayDetail } from '../plan/service';
 import { trending } from '../trendradar/service';
 import { listReports, discoverWindowDays } from '../research/service';
-import { getSectorRanking, getSectorMoneyFlow } from '../market/eastmoney';
+import { getSectorRanking, getSectorMoneyFlow, searchBoard } from '../market/eastmoney';
 import { shanghaiDateStr } from '../market/calendar';
 import { newId, nowIso } from '../util';
 
@@ -472,14 +472,75 @@ function archiveStale(today: string): number {
   return changed;
 }
 
-/** 聚合刷新：跑全部来源适配器 + 推进退潮/归档，返回统计 */
+/** 板块名→boardCode 人工校准覆盖（settings kv 内部键，非用户凭据；读/解析失败返回空表） */
+function loadBoardCodeOverrides(): Record<string, string> {
+  try {
+    const row = db
+      .select()
+      .from(schema.settings)
+      .where(eq(schema.settings.key, 'theme_boardcode_overrides'))
+      .get();
+    return row?.value ? parseJson<Record<string, string>>(row.value, {}) : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * 回填 market_themes.boardCode（稳定 join key）：仅处理 boardCode 为空的活跃/退潮中主题。
+ * 优先级：人工校准覆盖 > searchBoard 唯一 BK 命中；多候选/无候选保持 null 留痕。
+ * @returns 四类计数：override 精确覆盖 / nameHit 名称唯一命中 / pending 多候选待校准 / empty 无候选
+ */
+async function backfillBoardCodes(): Promise<{
+  override: number;
+  nameHit: number;
+  pending: number;
+  empty: number;
+}> {
+  const overrides = loadBoardCodeOverrides();
+  const stat = { override: 0, nameHit: 0, pending: 0, empty: 0 };
+  const targets = listThemes(false).filter((t) => !t.boardCode);
+  for (const t of targets) {
+    let code: string | null = null;
+    const ov = overrides[t.theme];
+    if (ov && /^BK\d+$/.test(ov)) {
+      code = ov;
+      stat.override += 1;
+    } else {
+      const hits = await searchBoard(t.theme, 5).catch(() => []);
+      const codes = [...new Set(hits.map((h) => h.code).filter((c) => /^BK\d+$/.test(c)))];
+      if (codes.length === 1) {
+        code = codes[0];
+        stat.nameHit += 1;
+      } else if (codes.length > 1) {
+        stat.pending += 1; // 多候选：不自动写，留待人工校准（theme_boardcode_overrides）
+      } else {
+        stat.empty += 1;
+      }
+    }
+    if (code) {
+      db.update(schema.marketThemes)
+        .set({ boardCode: code, updatedAt: nowIso() })
+        .where(eq(schema.marketThemes.id, t.id))
+        .run();
+    }
+  }
+  return stat;
+}
+
+/** 聚合刷新：跑全部来源适配器 + 回填 boardCode + 推进退潮/归档，返回统计 */
 export async function refreshThemes(): Promise<ThemesRefreshResult> {
   const date = shanghaiDateStr(new Date());
-  // 主源先行（建立板块主线全集），再叠加 overlay 证据，最后推进退潮/归档
+  // 主源先行（建立板块主线全集），再叠加 overlay 证据，回填稳定关联键，最后推进退潮/归档
   const fromBoards = await ingestFromBoards(date);
   const fromPlan = ingestFromPlan(date);
   const fromHot = await ingestFromHotspots(date);
   const fromResearch = await ingestFromResearch(date);
+  // 回填 boardCode（board 主源天然带 code，plan/hotspot/research 源需在此补齐稳定 join key）
+  const bf = await backfillBoardCodes();
+  console.log(
+    `[themes] boardCode 回填：覆盖 ${bf.override} · 名称命中 ${bf.nameHit} · 待校准 ${bf.pending} · 空值 ${bf.empty}`,
+  );
   const archived = archiveStale(date);
   const activeTotal = listThemes(false).filter((t) => t.status === 'active').length;
   return {

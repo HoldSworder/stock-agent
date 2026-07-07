@@ -3,6 +3,7 @@ import { ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { MagicStick } from '@element-plus/icons-vue';
 import AiAnalysisDialog from '@/components/AiAnalysisDialog.vue';
+import BoardExposurePanel from '@/components/BoardExposurePanel.vue';
 import PositionsView from './PositionsView.vue';
 import WatchlistView from './WatchlistView.vue';
 
@@ -42,6 +43,9 @@ watch(tab, (v) => {
     <div class="page-sub">
       真实持仓（股票 + 场外基金）与自选分组集中管理；监控池 / 今日计划读取同源数据。
     </div>
+
+    <!-- 持仓/自选板块暴露：反查我的票是否在主线 / 退潮 / 拥挤（无命中时自动隐藏） -->
+    <BoardExposurePanel />
 
     <el-tabs v-model="tab" class="account-tabs">
       <el-tab-pane label="真实持仓" name="positions" lazy>

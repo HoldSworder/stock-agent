@@ -15,6 +15,7 @@ import BoardStrengthPanel from '@/components/BoardStrengthPanel.vue';
 import BoardBreadthPanel from '@/components/BoardBreadthPanel.vue';
 import MarketThemesPanel from '@/components/MarketThemesPanel.vue';
 import MainlineConsensusPanel from '@/components/MainlineConsensusPanel.vue';
+import BoardWorkbenchPanel from '@/components/BoardWorkbenchPanel.vue';
 import HotConceptsPanel from '@/components/HotConceptsPanel.vue';
 import SentimentPanel from '@/components/SentimentPanel.vue';
 import MacroPanel from '@/components/MacroPanel.vue';
@@ -525,6 +526,8 @@ onUnmounted(() => {
       <!-- ===== 板块（主线共识 + 热门细分概念 + 中线/主线明细下钻）===== -->
       <!-- 信息架构：顶部「主线共识」决策区先给结论，再「热门细分概念」常驻供赛道内下钻，其余明细按需折叠下钻（省请求） -->
       <el-tab-pane label="板块" name="board" lazy>
+        <!-- 0) 板块主线作战台（常驻头：操盘动作/周期/风险决策卡片 + 下钻龙头/补涨/暴露） -->
+        <BoardWorkbenchPanel />
         <!-- 1) 主线共识决策区（常驻，三源对齐先给结论） -->
         <MainlineConsensusPanel />
         <!-- 2) 热门细分概念（常驻，锁强赛道 → 赛道内下钻龙头） -->

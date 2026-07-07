@@ -55,9 +55,22 @@ export async function buildMainlineConsensus(): Promise<MainlineConsensus> {
     (it) => it.verdict === 'confirmed' || it.verdict === 'candidate',
   );
 
+  // 跨源关联未命中留痕（boardCode 优先命中失败、退回名称匹配的锚板块），供 boardCode 回填校准参考
+  const unmatched: string[] = [];
+
   const items: MainlineConsensusItem[] = anchors.map((b) => {
-    const theme = themes.find((t) => nameMatch(t.theme, b.boardName)) ?? null;
-    const radar = radarInds.find((r) => nameMatch(r.name, b.boardName)) ?? null;
+    // themes 关联：boardCode 优先（稳定 join key），无 code 或未命中再退回板块名模糊匹配
+    const theme =
+      (b.boardCode ? themes.find((t) => t.boardCode === b.boardCode) : undefined) ??
+      themes.find((t) => nameMatch(t.theme, b.boardName)) ??
+      null;
+    // radar 关联：同样 boardCode(IndustryStrength.code) 优先，退回名称匹配
+    const radar =
+      (b.boardCode ? radarInds.find((r) => r.code === b.boardCode) : undefined) ??
+      radarInds.find((r) => nameMatch(r.name, b.boardName)) ??
+      null;
+    // 锚有 code 但 theme 侧只能靠名称命中（说明该主题 boardCode 尚未回填），记入未命中清单
+    if (b.boardCode && theme && theme.boardCode !== b.boardCode) unmatched.push(b.boardName);
 
     const themeUp = theme
       ? theme.strengthTrend === 'rising' || theme.phase === '加速' || theme.phase === '启动'
@@ -92,6 +105,7 @@ export async function buildMainlineConsensus(): Promise<MainlineConsensus> {
     if (radar) parts.push(`中线趋势${TREND_TEXT[radar.trend]}（强度${radar.strengthScore}）`);
 
     return {
+      boardCode: b.boardCode ?? null,
       board: b.boardName,
       etf: b.etf,
       breadthVerdict: b.verdict,
@@ -112,6 +126,11 @@ export async function buildMainlineConsensus(): Promise<MainlineConsensus> {
   items.sort(
     (a, b) => rank[a.consensus] - rank[b.consensus] || (b.newHighCount ?? 0) - (a.newHighCount ?? 0),
   );
+
+  // 未命中留痕：这些锚板块的 theme 只能靠名称命中，提示对应主题的 boardCode 待回填
+  if (unmatched.length > 0) {
+    console.warn(`[consensus] boardCode 未命中(退回名称匹配)：${unmatched.join('、')}`);
+  }
 
   return {
     asOf: nowIso(),

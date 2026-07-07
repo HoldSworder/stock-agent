@@ -334,6 +334,8 @@ export function buildScreenerPicks(limit = 6): CockpitScreenerPick[] {
 /** 驾驶舱一屏概览（全部本地 DB 读取，秒开） */
 export function buildCockpitOverview(): CockpitOverview {
   const detail = getTodayDetail();
+  // 主线取自 market_themes（含 boardCode/phase/strength），与板块作战台/主线共识同源，
+  // 故三处按 boardCode 对齐时阶段/强度天然一致；此处保持纯本地 DB 读，不引入 breadth 取数破坏秒开。
   const themes = listThemes(false)
     .sort((a, b) => b.strength - a.strength)
     .slice(0, 6);

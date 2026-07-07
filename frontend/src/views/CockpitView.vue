@@ -8,7 +8,10 @@ import { api } from '@/api';
 import { useWatchStore } from '@/stores/watch';
 import AiAnalysisHub from '@/components/AiAnalysisHub.vue';
 import StockLink from '@/components/StockLink.vue';
+import { ACTION_TAG_TYPE, EXPO_STATUS_LABEL, EXPO_STATUS_TYPE } from '@/constants/boardTags';
 import type {
+  BoardExposureHolding,
+  BoardWorkbenchItem,
   CockpitEvent,
   CockpitModuleSummary,
   CockpitOverview,
@@ -21,6 +24,10 @@ const loading = ref(false);
 const acting = ref(false);
 // 当日盈亏归因（只读旁路，收盘后落库；驾驶舱仅显示账户贡献 + 最大赢/输家）
 const attribution = ref<PositionAttributionReport | null>(null);
+// 今日主线作战台（旁路：投影自主线共识，含操盘动作标签）
+const boardItems = ref<BoardWorkbenchItem[]>([]);
+// 持仓/自选板块暴露（旁路：主线板块成分 ∩ 我的持仓/自选）
+const exposure = ref<BoardExposureHolding[]>([]);
 
 const route = useRoute();
 const router = useRouter();
@@ -109,7 +116,19 @@ async function load() {
   } catch {
     attribution.value = null;
   }
+  // 主线作战台 + 板块暴露：旁路拉取（依赖 breadth 取数，稍慢），失败不影响主视图
+  try {
+    boardItems.value = (await api.boards.workbench()).items.slice(0, 6);
+  } catch {
+    boardItems.value = [];
+  }
+  try {
+    exposure.value = (await api.boards.exposure()).holdings;
+  } catch {
+    exposure.value = [];
+  }
 }
+
 
 // 贡献（小数）格式化为百分点文本：+0.42pct / -0.18pct
 const contribText = (v: number) => (v >= 0 ? '+' : '') + (v * 100).toFixed(2) + 'pct';
@@ -311,41 +330,8 @@ onUnmounted(() => {
             </el-button>
           </div>
 
-          <!-- 自动成交实时流：自动建仓/卖出与总闸拒绝（经盯盘总线推送，看得见为何自动/未自动） -->
-          <div v-if="autoTrades.length" class="auto-trades">
-            <div class="at-head">自动成交实时流</div>
-            <div class="at-list">
-              <div v-for="(t, i) in autoTrades" :key="`${t.at}:${i}`" class="at-item" :class="{ rejected: t.kind === 'rejected' }">
-                <span class="at-tag" :class="t.kind">{{ TRADE_KIND_LABEL[t.kind] }}</span>
-                <span class="at-strategy">{{ t.strategyName || '—' }}</span>
-                <StockLink :code="t.code" :name="t.name" class="at-code" />
-                <span v-if="t.kind !== 'rejected'" class="at-detail num">{{ t.qty }} 股 @ {{ t.price }}</span>
-                <span v-else class="at-reason">{{ t.reason }}</span>
-                <span class="at-time num">{{ dayjs(t.at).format('HH:mm:ss') }}</span>
-              </div>
-            </div>
-          </div>
-
-          <!-- 当日盈亏归因（精简卡）：账户当日贡献 + 最大赢家/输家，详情见持仓页 -->
-          <div v-if="attribution && attribution.items.length" class="attr-card">
-            <span class="attr-card-title">当日盈亏归因</span>
-            <span class="attr-card-total">
-              账户贡献
-              <b class="num" :class="dir(attribution.totalDayPnl)">
-                {{ contribText(attribution.totalDayRate) }}
-              </b>
-            </span>
-            <span v-if="attribution.topWinner" class="attr-card-item">
-              赢家
-              <StockLink :code="attribution.topWinner.code" :name="attribution.topWinner.name" />
-              <b class="num up">{{ contribText(attribution.topWinner.contribution) }}</b>
-            </span>
-            <span v-if="attribution.topLoser" class="attr-card-item">
-              输家
-              <StockLink :code="attribution.topLoser.code" :name="attribution.topLoser.name" />
-              <b class="num down">{{ contribText(attribution.topLoser.contribution) }}</b>
-            </span>
-          </div>
+          <!-- ===== 盘前：今天能不能做 / 主线是什么 / 我的计划 ===== -->
+          <div class="flow-head"><span class="flow-tag pre">盘前</span>今天能不能做 · 主线是什么 · 今日计划</div>
 
           <div class="grid">
             <!-- 当日计划兑现 -->
@@ -410,6 +396,87 @@ onUnmounted(() => {
               </div>
               <el-empty v-else :image-size="60" description="暂无活跃主线" />
             </section>
+          </div>
+
+          <!-- 今日主线作战台：投影自主线共识，每条给操盘动作标签（观察/试错/持有/加仓候选/减仓/回避/等待） -->
+          <section class="panel">
+            <div class="panel-head">
+              <span class="section-title">今日主线作战台</span>
+              <span class="panel-meta">确定性锚 + 多源协同 + 中线趋势 · 仅研判不下单</span>
+            </div>
+            <div v-if="boardItems.length" class="wb-list">
+              <div v-for="b in boardItems" :key="b.boardCode ?? b.board" class="wb-row">
+                <el-tag size="small" effect="dark" :type="ACTION_TAG_TYPE[b.actionTag]">
+                  {{ b.actionTag }}
+                </el-tag>
+                <span class="wb-board">{{ b.board }}</span>
+                <span class="wb-cycle">{{ b.cycleFit }}</span>
+                <span v-if="b.phase" class="wb-phase">{{ b.phase }}</span>
+                <span v-if="b.strength != null" class="wb-strength num">强度{{ b.strength }}</span>
+                <StockLink v-if="b.etf" :code="b.etf.code" :name="b.etf.name" class="wb-etf" />
+                <span v-for="r in b.riskTags" :key="r" class="wb-risk">{{ r }}</span>
+              </div>
+            </div>
+            <el-empty v-else :image-size="60" description="暂无主线（收盘后板块新高宽度确认主线时生成）" />
+          </section>
+
+          <!-- ===== 盘中：我的票有没有风险 / 下一步动作 ===== -->
+          <div class="flow-head"><span class="flow-tag mid">盘中</span>持仓风险 · 主线暴露 · 自动成交</div>
+
+          <!-- 持仓/自选板块暴露：我的票是否处于主线 / 退潮 / 拥挤 -->
+          <section v-if="exposure.length" class="panel">
+            <div class="panel-head">
+              <span class="section-title">持仓 / 自选板块暴露</span>
+              <span class="panel-meta">主线板块成分 ∩ 我的持仓/自选</span>
+            </div>
+            <div class="expo-list">
+              <div v-for="h in exposure" :key="`${h.account}:${h.code}`" class="expo-row">
+                <el-tag size="small" :type="EXPO_STATUS_TYPE[h.status]" effect="plain">
+                  {{ EXPO_STATUS_LABEL[h.status] }}
+                </el-tag>
+                <StockLink :code="h.code" :name="h.name" class="expo-code" />
+                <span class="expo-boards">{{ h.boards.map((x) => x.boardName).join('、') }}</span>
+              </div>
+            </div>
+          </section>
+
+          <!-- 自动成交实时流：自动建仓/卖出与总闸拒绝（经盯盘总线推送，看得见为何自动/未自动） -->
+          <div v-if="autoTrades.length" class="auto-trades">
+            <div class="at-head">自动成交实时流</div>
+            <div class="at-list">
+              <div v-for="(t, i) in autoTrades" :key="`${t.at}:${i}`" class="at-item" :class="{ rejected: t.kind === 'rejected' }">
+                <span class="at-tag" :class="t.kind">{{ TRADE_KIND_LABEL[t.kind] }}</span>
+                <span class="at-strategy">{{ t.strategyName || '—' }}</span>
+                <StockLink :code="t.code" :name="t.name" class="at-code" />
+                <span v-if="t.kind !== 'rejected'" class="at-detail num">{{ t.qty }} 股 @ {{ t.price }}</span>
+                <span v-else class="at-reason">{{ t.reason }}</span>
+                <span class="at-time num">{{ dayjs(t.at).format('HH:mm:ss') }}</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- ===== 盘后：复盘归因 / 各模块产出 / 事件时间线 ===== -->
+          <div class="flow-head"><span class="flow-tag post">盘后</span>盈亏归因 · 模块产出 · 事件复盘</div>
+
+          <!-- 当日盈亏归因（精简卡）：账户当日贡献 + 最大赢家/输家，详情见持仓页 -->
+          <div v-if="attribution && attribution.items.length" class="attr-card">
+            <span class="attr-card-title">当日盈亏归因</span>
+            <span class="attr-card-total">
+              账户贡献
+              <b class="num" :class="dir(attribution.totalDayPnl)">
+                {{ contribText(attribution.totalDayRate) }}
+              </b>
+            </span>
+            <span v-if="attribution.topWinner" class="attr-card-item">
+              赢家
+              <StockLink :code="attribution.topWinner.code" :name="attribution.topWinner.name" />
+              <b class="num up">{{ contribText(attribution.topWinner.contribution) }}</b>
+            </span>
+            <span v-if="attribution.topLoser" class="attr-card-item">
+              输家
+              <StockLink :code="attribution.topLoser.code" :name="attribution.topLoser.name" />
+              <b class="num down">{{ contribText(attribution.topLoser.contribution) }}</b>
+            </span>
           </div>
 
           <!-- 模块总结卡：各模块最新一次持久化产出（只读，秒开） -->
@@ -1070,5 +1137,85 @@ onUnmounted(() => {
   .tl-item {
     transition: none;
   }
+}
+
+/* 交易日节奏分组标题（盘前/盘中/盘后） */
+.flow-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 18px 0 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-1);
+}
+.flow-tag {
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: #fff;
+}
+.flow-tag.pre {
+  background: var(--brand, #409eff);
+}
+.flow-tag.mid {
+  background: var(--status-warn, #e6a23c);
+}
+.flow-tag.post {
+  background: var(--text-2, #909399);
+}
+
+/* 主线作战台行 */
+.wb-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.wb-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+.wb-board {
+  font-weight: 600;
+  color: var(--text-0);
+}
+.wb-cycle,
+.wb-phase {
+  font-size: 12px;
+  color: var(--text-2);
+}
+.wb-strength {
+  font-size: 12px;
+  color: var(--text-1);
+}
+.wb-etf {
+  font-size: 12px;
+}
+.wb-risk {
+  font-size: 11px;
+  color: var(--status-warn, #e6a23c);
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  padding: 0 4px;
+}
+
+/* 持仓板块暴露行 */
+.expo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.expo-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
+.expo-boards {
+  font-size: 12px;
+  color: var(--text-2);
 }
 </style>

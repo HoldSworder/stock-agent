@@ -48,6 +48,10 @@ import type {
   ConceptStocksResult,
   ConceptWindow,
   MainlineConsensus,
+  BoardWorkbench,
+  BoardWorkbenchDetail,
+  BoardExposure,
+  AiActionVerdict,
   DragonOverview,
   StockCapitalDetail,
   StockIndicators,
@@ -136,6 +140,9 @@ import type {
   EtfWatchLayerState,
   EtfWatchProbe,
   EtfWatchStatus,
+  WeipanStatus,
+  WeipanConfig,
+  WeipanAlert,
   WatchlistBulkInput,
   WatchlistBulkResult,
   WatchlistEntry,
@@ -436,6 +443,20 @@ export const api = {
     analyze: (code: string) => unwrap<EtfWatchProbe>(http.post('/etf-watch/analyze', { code })),
   },
 
+  // 尾盘套利确定性盯盘（无 LLM）
+  weipan: {
+    status: () => unwrap<WeipanStatus>(http.get('/weipan/status')),
+    config: () => unwrap<WeipanConfig>(http.get('/weipan/config')),
+    updateConfig: (patch: Partial<WeipanConfig>) =>
+      unwrap<WeipanConfig>(http.put('/weipan/config', patch)),
+    toggle: (enabled: boolean) => unwrap<WeipanConfig>(http.post('/weipan/toggle', { enabled })),
+    trigger: () => unwrap<WeipanStatus>(http.post('/weipan/trigger', {})),
+    build: () =>
+      unwrap<{ built: number; skipped: string[]; note: string }>(http.post('/weipan/build', {})),
+    alerts: (limit?: number, scope?: 'today' | 'all') =>
+      unwrap<WeipanAlert[]>(http.get('/weipan/alerts', { params: { limit, scope } })),
+  },
+
   // 热点雷达（TrendRadar）
   trendradar: {
     status: () => unwrap<TrendRadarStatus>(http.get('/trendradar/status', { timeout: 20000 })),
@@ -620,6 +641,17 @@ export const api = {
       unwrap<ConceptStocksResult>(
         http.get('/concepts/stocks', { params: { name }, timeout: 60000 }),
       ),
+  },
+
+  // 板块主线作战台（投影自主线共识 + 派生操盘标签 + 标的解析 + 持仓暴露）
+  boards: {
+    workbench: () =>
+      unwrap<BoardWorkbench>(http.get('/boards/workbench', { timeout: 120000 })),
+    detail: (code: string) =>
+      unwrap<BoardWorkbenchDetail>(http.get(`/boards/${code}/detail`, { timeout: 120000 })),
+    exposure: () => unwrap<BoardExposure>(http.get('/boards/exposure', { timeout: 60000 })),
+    aiAction: (code: string) =>
+      unwrap<AiActionVerdict>(http.post(`/boards/${code}/ai-action`, {}, { timeout: 120000 })),
   },
 
   // S6 龙头/连板梯队（确定性连板梯队 + 龙头辨识分层）

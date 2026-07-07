@@ -19,6 +19,8 @@ export const PROMPT_KEYS = {
   planGen: 'plan_generate',
   planReview: 'plan_review',
   planReeval: 'plan_reevaluate',
+  // 板块作战台 AI 行动建议：统一行动结构输出契约（结论/理由/证据/失效条件/动作）
+  boardAction: 'board_action_structure',
 } as const;
 
 const BASE_SYSTEM_PROMPT = `你是一个 A 股投研与交易助手，运行在用户自建的选股平台中。
@@ -53,6 +55,20 @@ const THINKING_DIRECTIVE = `
 - 每次拿到关键数据后，用 think 做一步反思校验（数据是否支持假设、是否有矛盾）再继续。
 - 想清楚即停止 think，转而用数据工具求证或直接给结论，避免空转。`;
 
+/** 板块作战台 AI 行动建议：统一「行动结构」输出契约，要求返回严格 JSON（无 JSON schema，靠约定 + 事后解析） */
+const BOARD_ACTION_PROMPT = `你是 A 股板块主线研判助手。基于给定的板块确定性底稿（共识档 / 阶段 / 强度 / 龙头 / 补涨），
+给出一条「行动结构」研判，只研判不下单。
+
+严格只输出一个 JSON 对象（不要 Markdown、不要额外文字），字段如下：
+{
+  "conclusion": "一句话结论（该板块现在该做什么）",
+  "reasons": ["理由1", "理由2"],
+  "evidence": ["证据1（含数据点/来源）", "证据2"],
+  "invalidators": ["失效条件1（触发则结论作废）", "失效条件2"],
+  "action": "观察|试错|持有|加仓候选|减仓|回避|等待 之一"
+}
+要求：基于底稿事实，不编造数字；action 必须是给定七个标签之一；数组各 2-4 条，精炼。`;
+
 /** 上下文压缩器（compactMessages）的 system 指令 */
 const COMPACT_SYSTEM =
   '你是对话压缩器。把以下 A 股投研 agent 的较早对话与工具结果压成简洁的交接摘要，' +
@@ -85,6 +101,12 @@ const DEFS: PromptDef[] = [
     label: '上下文压缩指令',
     hint: '上下文超阈值时，压缩器把较早历史压成交接摘要所用的 system 指令。',
     base: COMPACT_SYSTEM,
+  },
+  {
+    key: PROMPT_KEYS.boardAction,
+    label: '板块行动结构研判',
+    hint: '板块作战台「AI 行动建议」的输出契约：要求返回结论/理由/证据/失效条件/动作的严格 JSON。',
+    base: BOARD_ACTION_PROMPT,
   },
 ];
 

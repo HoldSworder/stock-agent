@@ -2470,6 +2470,8 @@ export type MainlineConsensusLevel = 'resonance' | 'diverge' | 'watch';
 
 /** 单条主线的三源对齐结果（以 breadth 新高宽度为确定性锚） */
 export interface MainlineConsensusItem {
+  /** 东财板块代码 BKxxxx（来自 breadth 锚板块，作跨源/跨页稳定 join key；取不到为 null） */
+  boardCode: string | null;
   /** 板块名（以 breadth 锚板块为准） */
   board: string;
   /** 对应代表 ETF（无映射为 null） */
@@ -2496,6 +2498,133 @@ export interface MainlineConsensus {
   asOf: string;
   items: MainlineConsensusItem[];
   note: string;
+}
+
+// ===== 板块主线作战台（board workbench：buildMainlineConsensus 的决策视图投影 + 派生操盘标签）=====
+// 不新造板块判断源：阶段/强度/趋势/ETF/共识直接投影自 MainlineConsensusItem；
+// actionTag / cycleFit / riskTags 为派生操盘标签；以 boardCode 为跨源/跨页稳定键。
+
+/** 统一操盘动作标签（首页作战台 / 板块卡片 / 持仓暴露共用） */
+export type BoardActionTag = '观察' | '试错' | '持有' | '加仓候选' | '减仓' | '回避' | '等待';
+
+/** 周期视角适配（板块更适合的交易周期，与生命周期阶段 ThemePhase 正交，是两个维度） */
+export type BoardCycleFit = '超短' | '短线' | '波段' | '中线' | '长线';
+
+/** 板块作战台列表项：投影自 MainlineConsensusItem + 派生操盘标签 */
+export interface BoardWorkbenchItem {
+  /** 东财板块代码 BKxxxx（稳定 join key；取不到为 null） */
+  boardCode: string | null;
+  /** 板块名（breadth 锚板块名） */
+  board: string;
+  /** 生命周期阶段（来自 themes 回流，未命中/未知为 null） */
+  phase: ThemePhase | null;
+  /** 多源协同强度 0-100（无 theme 命中为 null） */
+  strength: number | null;
+  /** 强度趋势 */
+  strengthTrend: 'rising' | 'flat' | 'falling' | null;
+  /** 三方共识档 */
+  consensus: MainlineConsensusLevel;
+  /** 代表 ETF（无映射为 null） */
+  etf: { code: string; name: string } | null;
+  /** 派生操盘动作标签 */
+  actionTag: BoardActionTag;
+  /** 适配交易周期（派生自共识 + 趋势） */
+  cycleFit: BoardCycleFit;
+  /** 风险标签（退潮/拥挤/分歧等；无则空数组） */
+  riskTags: string[];
+  /** 核心证据摘要（一行，来自共识 note） */
+  evidenceNote: string;
+}
+
+/** 板块作战台总览（board Tab 常驻头 + 首页作战台复用） */
+export interface BoardWorkbench {
+  asOf: string;
+  items: BoardWorkbenchItem[];
+  note: string;
+}
+
+/** 板块内可执行标的（龙头 / 补涨复用同一结构） */
+export interface BoardStockPick {
+  code: string;
+  name: string;
+  /** 最新价（取不到为 null） */
+  price: number | null;
+  /** 当日涨跌幅 %（取不到为 null） */
+  pct: number | null;
+  /** 总市值（亿元，取不到为 null） */
+  marketCap: number | null;
+  /** 日线趋势/位置/量能强度分 0-100（越高越强，用于龙头排序） */
+  trendScore: number | null;
+  /** 资金确认分 0-100（近5日主力净流入持续性，用于补涨判定） */
+  fundScore: number | null;
+  /** 一句话入选理由 */
+  reason: string;
+}
+
+/** 板块详情（作战台下钻）：workbench item + 标的解析 + 暴露 + AI 行动建议 */
+export interface BoardWorkbenchDetail {
+  /** 列表项主干（投影自共识） */
+  item: BoardWorkbenchItem;
+  /** 龙头（成分内市值 + 趋势强度排序取头部） */
+  leaders: BoardStockPick[];
+  /** 补涨（相对强度低 + 位置不高 + 资金确认） */
+  laggards: BoardStockPick[];
+  /** 失效条件（研判 / 派生，条列） */
+  invalidators: string[];
+  /** 用户在该板块的持仓/自选暴露（无则空数组） */
+  exposure: BoardExposureHolding[];
+  /** AI 行动建议（未生成为 null） */
+  aiAction: AiActionVerdict | null;
+  /** 数据快照日 YYYY-MM-DD（对齐 breadth 快照，标注时效） */
+  snapshotDate: string;
+  note: string;
+}
+
+// ===== 持仓 / 自选 板块暴露（懒相交：主线板块成分 ∩ 用户持仓/自选）=====
+
+/** 单条标的的暴露状态：在主线 / 退潮 / 拥挤 / 无主线关联 */
+export type BoardExposureStatus = 'mainline' | 'fading' | 'crowded' | 'none';
+
+/** 命中的板块及其阶段（一只票可命中多个主线板块） */
+export interface BoardExposureHolding {
+  code: string;
+  name: string;
+  /** 账户来源：real 真实持仓 / sim 模拟 / watch 自选 */
+  account: 'real' | 'sim' | 'watch';
+  /** 命中的主线板块 */
+  boards: Array<{
+    boardCode: string | null;
+    boardName: string;
+    consensus: MainlineConsensusLevel;
+    phase: ThemePhase | null;
+  }>;
+  /** 综合暴露状态 */
+  status: BoardExposureStatus;
+}
+
+/** 板块暴露总览 */
+export interface BoardExposure {
+  asOf: string;
+  /** 数据快照日 YYYY-MM-DD（对齐 breadth 快照） */
+  snapshotDate: string;
+  holdings: BoardExposureHolding[];
+  note: string;
+}
+
+// ===== AI 行动结构输出契约（结论 / 理由 / 证据 / 失效条件 / 动作，减少报告式长文）=====
+
+/** 结构化 AI 行动研判（对齐 DecisionResult 先例，经 prompt 约定 + parseJsonObject 解析产出） */
+export interface AiActionVerdict {
+  /** 一句话结论 */
+  conclusion: string;
+  /** 理由（条列） */
+  reasons: string[];
+  /** 证据（条列，含来源/数据点） */
+  evidence: string[];
+  /** 失效条件（触发则结论作废） */
+  invalidators: string[];
+  /** 建议动作（统一标签） */
+  action: BoardActionTag;
 }
 
 /** 设置项（key-value）。模型为任意 OpenAI 兼容服务，非固定 DeepSeek。 */
@@ -3220,6 +3349,91 @@ export type EtfWatchEvent =
   | { type: 'signal'; signal: EtfWatchSignal }
   | { type: 'alert'; alert: EtfWatchAlert }
   | { type: 'states'; at: string; states: EtfWatchLayerState[] };
+
+// ===== 尾盘套利确定性盯盘（weipan：只买当日选出的 3 只 + 次日确定性移动止盈/止盈/止损/尾盘了结，无 LLM）=====
+
+/** 尾盘盯盘卖出原因：止损 / 止盈 / 移动止盈(冲高回落) / 尾盘了结 */
+export type WeipanExitReason = 'stop_loss' | 'take_profit' | 'trailing' | 'eod';
+
+/** 信号去向：emitted 已确定性执行并推送 / cooldown 冷却内跳过 / skipped 命中但下单被市场规则拒 */
+export type WeipanDisposition = 'emitted' | 'cooldown' | 'skipped';
+
+/** 尾盘盯盘确定性信号（纯规则命中，无 LLM） */
+export interface WeipanSignal {
+  code: string;
+  name: string;
+  reason: WeipanExitReason;
+  /** 现价（触发价） */
+  price: number;
+  /** 当日涨跌幅 % */
+  pct: number;
+  /** 建仓均价 */
+  avgCost: number;
+  /** 盘中观测到的当日最高 */
+  dayHigh: number;
+  /** 相对成本浮盈 % */
+  gainPct: number;
+  /** 自当日高点回撤 %（trailing 触发依据） */
+  drawdownPct: number;
+  /** 人话触发说明 */
+  detail: string;
+  at: string;
+  disposition?: WeipanDisposition;
+}
+
+/** 尾盘盯盘告警（一次确定性卖出的留痕） */
+export interface WeipanAlert {
+  id: string;
+  code: string;
+  name: string;
+  reason: WeipanExitReason;
+  detail: string;
+  /** 触发价 */
+  triggerPrice: number;
+  /** 实际模拟卖出股数（被市场规则拒则为 0） */
+  soldQty: number;
+  /** 已实现盈亏（未成交为 null） */
+  realizedProfit: number | null;
+  /** 是否成功推送 */
+  delivered: boolean;
+  /** 未成交时的跳过原因（如跌停不可卖/T+1/可卖不足） */
+  skipNote: string | null;
+  createdAt: string;
+}
+
+/** 尾盘盯盘配置（独立持久化，前缀 weipan_） */
+export interface WeipanConfig {
+  /** 总开关（另受全局 autoLocalSimEnabled 安全总闸约束） */
+  enabled: boolean;
+  /** 轮询秒 */
+  pollSec: number;
+  /** 每只建仓占「建仓时可用现金」的百分比 */
+  perPositionPct: number;
+  /** 同标同因冷却分钟 */
+  cooldownMin: number;
+  /** 命中是否推送 Telegram */
+  pushTelegram: boolean;
+}
+
+/** 尾盘盯盘引擎状态（心跳） */
+export interface WeipanStatus {
+  enabled: boolean;
+  running: boolean;
+  inSession: boolean;
+  lastPollAt: string | null;
+  lastSignalCount: number;
+  /** 当前跟踪（持仓）标的数 */
+  trackedCount: number;
+  /** 绑定的尾盘战法 id（未找到为 null） */
+  strategyId: string | null;
+  config: WeipanConfig;
+}
+
+/** 尾盘盯盘 WebSocket 推送事件 */
+export type WeipanEvent =
+  | { type: 'status'; status: WeipanStatus }
+  | { type: 'signal'; signal: WeipanSignal }
+  | { type: 'alert'; alert: WeipanAlert };
 
 /** 手动检测的动作建议（含持仓视角的减/清仓） */
 export type EtfWatchProbeAction = '建仓' | '加仓' | '观察' | '减仓' | '清仓' | '放弃';

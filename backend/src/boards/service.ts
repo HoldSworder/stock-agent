@@ -1,0 +1,113 @@
+import type {
+  BoardActionTag,
+  BoardCycleFit,
+  BoardWorkbench,
+  BoardWorkbenchDetail,
+  BoardWorkbenchItem,
+  MainlineConsensusItem,
+  ThemePhase,
+} from '@stock-agent/shared';
+import { cached } from '../lib/ttlCache';
+import { shanghaiDateStr } from '../market/calendar';
+import { buildMainlineConsensus } from '../breadth/consensus';
+import { buildBreadthOverview } from '../breadth/service';
+import { resolveBoardPicks } from './resolver';
+import { computeBoardExposure } from './exposure';
+
+// 板块主线作战台（唯一聚合产物，确定性只读，不下单/不调 LLM）：
+// 包装 buildMainlineConsensus（以 breadth 新高宽度为确定性锚 ⋈ themes 多源协同 ⋈ radar 中线趋势），
+// 投影为带操盘动作/周期/风险标签的决策卡片。不新造板块判断源——所有阶段/强度均源自共识产物，
+// 以 boardCode 为跨源/跨页稳定键，保证首页、大盘、持仓、AI 各处板块口径一致。
+
+/** 派生操盘动作标签：退潮回避 > 背离减仓 > 共振加/持 > 观察级试错/观察 */
+function deriveActionTag(it: MainlineConsensusItem): BoardActionTag {
+  const rising = it.themeTrend === 'rising';
+  const hot = it.themePhase === '加速' || it.themePhase === '启动';
+  if (it.themePhase === '退潮') return '回避';
+  if (it.consensus === 'diverge') return '减仓';
+  if (it.consensus === 'resonance') return rising || hot ? '加仓候选' : '持有';
+  // watch（仅锚成立）：走强可小仓试错，否则观察
+  return rising ? '试错' : '观察';
+}
+
+/** 派生周期视角（与生命周期阶段正交）：启动/加速偏短线，共振偏中线，其余波段 */
+function deriveCycleFit(it: MainlineConsensusItem): BoardCycleFit {
+  if (it.themePhase === '加速' || it.themePhase === '启动') return '短线';
+  if (it.consensus === 'resonance') return '中线';
+  return '波段';
+}
+
+/** 派生风险标签：退潮 / 分歧背离 / 强度走弱 / 拥挤（长期居首） */
+function deriveRiskTags(it: MainlineConsensusItem): string[] {
+  const tags: string[] = [];
+  if (it.themePhase === '退潮') tags.push('退潮');
+  if (it.consensus === 'diverge') tags.push('分歧背离');
+  if (it.themeTrend === 'falling') tags.push('强度走弱');
+  // ponytail: 拥挤用「居首天数≥5」近似（长期霸榜易过热），后续可接换手/拥挤度指标细化
+  if ((it.topDays ?? 0) >= 5) tags.push('拥挤');
+  return tags;
+}
+
+/** 组装板块作战台：共识产物 → 决策卡片投影（派生操盘标签）。 */
+export async function buildBoardWorkbench(): Promise<BoardWorkbench> {
+  const consensus = await buildMainlineConsensus();
+  const items: BoardWorkbenchItem[] = consensus.items.map((it) => ({
+    boardCode: it.boardCode,
+    board: it.board,
+    phase: (it.themePhase as ThemePhase | null) ?? null,
+    strength: it.themeStrength,
+    strengthTrend: it.themeTrend,
+    consensus: it.consensus,
+    etf: it.etf,
+    actionTag: deriveActionTag(it),
+    cycleFit: deriveCycleFit(it),
+    riskTags: deriveRiskTags(it),
+    evidenceNote: it.note,
+  }));
+  return {
+    asOf: consensus.asOf,
+    items,
+    note: '板块作战台：投影自主线共识（确定性锚 + 多源协同 + 中线趋势），派生操盘动作/周期/风险标签，仅研判不下单，仅供参考。',
+  };
+}
+
+/** 派生失效条件（研判级，非硬规则）：锚失效 / 强度转弱 / ETF 破位 */
+function deriveInvalidators(item: BoardWorkbenchItem): string[] {
+  const list = ['板块跌出「新高宽度」确认（确定性主线锚失效）'];
+  if (item.strengthTrend !== 'falling') list.push('多源协同强度转为走弱（rising/flat → falling）');
+  if (item.etf) list.push(`${item.etf.name} 跌破关键均线（代表 ETF 趋势破位）`);
+  return list;
+}
+
+/**
+ * 组装板块详情（作战台下钻）：workbench 主干 + 龙头/补涨标的解析 + 持仓暴露 + 失效条件。
+ * AI 行动建议（aiAction）为按需生成，此处置 null（由 board-detail kind 单独产出）。
+ * @returns 找不到该 boardCode 的锚板块时返回 null（供路由 404）
+ */
+export async function buildBoardDetail(boardCode: string): Promise<BoardWorkbenchDetail | null> {
+  const wb = await buildBoardWorkbench();
+  const item = wb.items.find((it) => it.boardCode === boardCode);
+  if (!item) return null;
+
+  // boardCode → kind（东财成分接口按行业/概念区分），从 breadth 概览取
+  const breadthOv = await cached('breadth:overview', 30 * 60_000, () => buildBreadthOverview()).catch(
+    () => null,
+  );
+  const kind = (breadthOv?.items ?? []).find((b) => b.boardCode === boardCode)?.kind;
+
+  const picks = kind
+    ? await resolveBoardPicks(kind, item.board).catch(() => ({ leaders: [], laggards: [] }))
+    : { leaders: [], laggards: [] };
+  const expo = await computeBoardExposure(boardCode).catch(() => null);
+
+  return {
+    item,
+    leaders: picks.leaders,
+    laggards: picks.laggards,
+    invalidators: deriveInvalidators(item),
+    exposure: expo?.holdings ?? [],
+    aiAction: null,
+    snapshotDate: shanghaiDateStr(new Date()),
+    note: '板块详情：龙头/补涨为确定性排序研判，持仓暴露为主线成分懒相交，仅供参考不下单。',
+  };
+}
