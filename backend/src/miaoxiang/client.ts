@@ -192,6 +192,8 @@ function postJson(
   body: unknown,
   retries = 5,
   signal?: AbortSignal,
+  /** 校验覆盖：默认按 code===200 判成功、否则视为可重试失败；下单等需保留业务拒单原文的场景可传入更宽松的校验 */
+  validate?: (json: Record<string, unknown>) => string | null,
 ): Promise<Record<string, unknown>> {
   return mxSchedule(() =>
     requestJson({
@@ -205,12 +207,24 @@ function postJson(
       retryBaseMs: 400,
       errorLabel: '妙想接口',
       makeError: (msg) => new MiaoxiangError(msg),
-      validate: (json) =>
-        isSuccessCode(json.code)
-          ? null
-          : `妙想接口返回非成功 code=${String(json.code)} message=${String(json.message ?? '')}`,
+      validate:
+        validate ??
+        ((json) =>
+          isSuccessCode(json.code)
+            ? null
+            : `妙想接口返回非成功 code=${String(json.code)} message=${String(json.message ?? '')}`),
     }),
   );
+}
+
+/** 妙想全局限流（超频回 code=112「请求频率过高」）——属瞬时故障，可重试 */
+function isRateLimited(json: Record<string, unknown>): boolean {
+  return String(json.code) === '112' || String(json.message ?? '').includes('频率过高');
+}
+
+/** 下单响应是否为业务拒单（非成功 code，如 T+1 当日买入不可卖、资金/持仓不足、数量非法） */
+export function isTradeRejected(body: Record<string, unknown>): boolean {
+  return !isSuccessCode(body.code);
 }
 
 export interface TradeParams {
@@ -390,7 +404,12 @@ export const miaoxiang = {
       const dp = ['6', '9'].includes(p.stockCode[0]) ? 2 : 3;
       payload.price = Math.round(p.price * 10 ** dp);
     }
-    return postJson(ENDPOINTS.trade, payload);
+    // 下单是确定性动作：业务拒单（如 T+1「当日买入不可卖」、资金/持仓不足、数量非法）不该被当作瞬时
+    // 故障重试后吞成通用报错。这里只对限流(112)重试，其余（含拒单）一律直接返回完整响应体，
+    // 让 code / message 等拒单原因原样透传给调用方（mx_trade 会 preview 给模型据实回复）。
+    return postJson(ENDPOINTS.trade, payload, 5, undefined, (json) =>
+      isRateLimited(json) ? '妙想下单被限流(code=112)，重试' : null,
+    );
   },
   cancel(p: CancelParams) {
     const payload = p.all

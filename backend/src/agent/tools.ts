@@ -1,5 +1,5 @@
 import type OpenAI from 'openai';
-import { miaoxiang, MiaoxiangQuotaError } from '../miaoxiang/client';
+import { miaoxiang, MiaoxiangQuotaError, isTradeRejected } from '../miaoxiang/client';
 import { sendTelegram } from '../notify/telegram';
 import { fetchRealPositions } from '../realPositions';
 import { evaluateDiscipline } from '../positions/discipline';
@@ -525,15 +525,17 @@ export const tools: ToolDef[] = [
       } catch (e) {
         return `下单被安全守卫拒绝：${e instanceof Error ? e.message : String(e)}`;
       }
-      const result = preview(
-        await miaoxiang.trade({
-          type: side,
-          stockCode,
-          quantity: Number(args.quantity) || 0,
-          useMarketPrice: Boolean(args.useMarketPrice),
-          price: typeof args.price === 'number' ? args.price : undefined,
-        }),
-      );
+      const body = await miaoxiang.trade({
+        type: side,
+        stockCode,
+        quantity: Number(args.quantity) || 0,
+        useMarketPrice: Boolean(args.useMarketPrice),
+        price: typeof args.price === 'number' ? args.price : undefined,
+      });
+      const result = preview(body);
+      // 业务拒单（如 T+1 当日买入不可卖）：原样返回拒单响应体供模型据实回复，
+      // 不记录操作原因、不回同步（本次没有成交，避免登记幽灵成交/误报「已同步」）。
+      if (isTradeRejected(body)) return result;
       // 双写：若当前运行绑定的是妙想镜像战法，落库操作原因/持有逻辑，再成交后回拉同步本地账户
       if (ctx.strategyId) {
         const s = getStrategy(ctx.strategyId);

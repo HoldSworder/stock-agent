@@ -16,6 +16,7 @@ import { nowIso, shanghaiToday } from '../util';
 import { getSafetyState } from '../safety/guard';
 import { getTodayDetail, computePlanFulfillment } from '../plan/service';
 import { listThemes } from '../themes/service';
+import { getRegimeSummaryForCockpit } from '../regime/service';
 import { listVerdicts } from '../decision/verdictCache';
 import { listDisciplineEvents } from '../positions/discipline';
 import { listAlerts } from '../watch/store';
@@ -343,6 +344,8 @@ export function buildCockpitOverview(): CockpitOverview {
   return {
     asOf: nowIso(),
     safety: getSafetyState(),
+    // 大盘阶段：读最近一次收盘快照（纯本地，秒开）；完整明细在大盘页实时接口
+    regime: getRegimeSummaryForCockpit(),
     plan: computePlanFulfillment(detail),
     planStance: detail
       ? {

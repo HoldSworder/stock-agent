@@ -2306,6 +2306,170 @@ export interface SentimentHistoryItem {
   phase: SentimentPhase;
 }
 
+// ===== 大盘阶段（Market Regime，确定性只读，不下单/不调 LLM）=====
+
+/** 大盘阶段：主升（重仓进攻）/ 反弹（控仓快打）/ 退潮（降频防守）/ 震荡（观望精选） */
+export type MarketRegimePhase = '主升' | '反弹' | '退潮' | '震荡';
+
+/** 明日/近期方向倾向（只给方向，不伪装点位预测） */
+export type MarketRegimeBias = '偏强' | '偏弱' | '中性';
+
+/** 建议交易频率 */
+export type MarketRegimeFrequency = '积极' | '正常' | '降低' | '观望';
+
+/** 单个权重指数的结构读数（用于多指数共振判定） */
+export interface MarketRegimeIndexItem {
+  /** 指数名（如 上证指数 / 沪深300 / 创业板指） */
+  name: string;
+  /** 东财 secid（如 1.000001） */
+  secid: string;
+  /** 最新收盘 */
+  close: number;
+  /** 均线排列（多头/空头/纠缠） */
+  alignment: MaStructure['alignment'];
+  /** 是否站上 MA20 */
+  aboveMa20: boolean;
+  /** 是否站上 MA60 */
+  aboveMa60: boolean;
+  /** MA20 是否走平转上（近 5 日斜率为正） */
+  ma20SlopeUp: boolean;
+  /** 近 20 日涨跌幅 %（趋势方向） */
+  trendPct20: number;
+}
+
+/** 等权口径读数（880008 全A等权 优先，取不到回退宽度代理） */
+export interface MarketRegimeEqualWeight {
+  /** 数据来源：880008 全A等权 / 东财等权指数 / 宽度代理 */
+  source: 'tdx880008' | 'em' | 'breadth';
+  /** 口径名（如 全A等权880008 / 沪深300等权 / 上涨家数占比代理） */
+  name: string;
+  /** 是否站上 MA60（宽度代理时用占比阈值近似） */
+  aboveMa60: boolean;
+  /** 近 20 日涨跌幅 %（宽度代理时为占比变化近似） */
+  trendPct20: number;
+  /** 成分股上涨占比 %（880008 自带 up/down 家数；宽度代理直读） */
+  upRatio: number | null;
+}
+
+/** 单维度打分明细（原始分 + 白话解读 + 关键证据，供面板逐维展示） */
+export interface MarketRegimeDimension {
+  /** 维度键 */
+  key: string;
+  /** 展示名 */
+  label: string;
+  /** 原始得分 0-100（该维度自身强弱，未加权） */
+  rawScore: number;
+  /** 权重（%） */
+  weight: number;
+  /** 对综合分的贡献点数（加权重归一后，合计≈score） */
+  contribution: number;
+  /** 白话解读（不需量化知识） */
+  reading: string;
+  /** 关键证据数值（供核对） */
+  evidence: string;
+}
+
+/** 权重 vs 等权背离信号（区分护盘失真 vs 真普涨的关键） */
+export interface MarketRegimeDivergence {
+  /** 是否存在明显背离（权重强而等权弱=护盘失真） */
+  active: boolean;
+  /** 白话说明 */
+  note: string;
+}
+
+/** 大盘阶段总览（确定性合成 + 白话建议，仅供参考不构成投资建议） */
+export interface MarketRegimeOverview {
+  /** 数据时刻 ISO */
+  asOf: string;
+  /** 交易日 YYYY-MM-DD（Asia/Shanghai） */
+  tradeDate: string;
+  /** 当前阶段 */
+  phase: MarketRegimePhase;
+  /** 综合强度分 0-100（越高越偏进攻） */
+  score: number;
+  /** 明日/近期方向倾向 */
+  tomorrowBias: MarketRegimeBias;
+  /** 建议交易频率 */
+  suggestedFrequency: MarketRegimeFrequency;
+  /** 建议仓位区间（白话，如 "60-90%"） */
+  positionRange: string;
+  /** 上一交易日阶段（无历史为 null） */
+  prevPhase: MarketRegimePhase | null;
+  /** 已连续处于当前阶段的交易日数（含今日，>=1） */
+  consecutiveDays: number;
+  /** 较上一交易日的分数变动（无历史为 null） */
+  delta: number | null;
+  /** 各维度贡献拆解（可审计，合计≈score；向后兼容徽标用） */
+  breakdown: StrengthBreakdown;
+  /** 六维度打分明细（原始分 + 白话解读 + 证据，供完整面板逐维展示） */
+  dimensions: MarketRegimeDimension[];
+  /** 明日及后续一段时间走势展望（确定性模板文字） */
+  outlook: string;
+  /** 关键正向驱动因素 */
+  drivers: string[];
+  /** 关键风险提示 */
+  risks: string[];
+  /** 参与判定的权重指数明细 */
+  indices: MarketRegimeIndexItem[];
+  /** 等权口径读数（取不到为 null） */
+  equalWeight: MarketRegimeEqualWeight | null;
+  /** 权重 vs 等权背离信号 */
+  divergence: MarketRegimeDivergence;
+  /** 白话操作建议（不需量化知识） */
+  advice: string;
+  /** 备注 */
+  note: string;
+  /** 是否有数据源降级（部分维度缺失，结论为不完整估计） */
+  stale: boolean;
+  /** HMM 影子信号（隐马尔可夫概率视角，best-effort，取不到为 null；摘要路径不填） */
+  hmm?: MarketRegimeHmm | null;
+}
+
+/** HMM 单个隐状态的统计画像（训后按均值收益排序赋名） */
+export interface MarketRegimeHmmState {
+  /** 状态名：强势 / 震荡 / 弱势 */
+  name: '强势' | '震荡' | '弱势';
+  /** 该状态历史天数 */
+  days: number;
+  /** 该状态年化收益 %（缺失为 null） */
+  annRet: number | null;
+  /** 该状态年化波动 %（缺失为 null） */
+  annVol: number | null;
+}
+
+/**
+ * 大盘阶段 HMM 影子信号（隐马尔可夫概率视角，与规则四态并列、相互印证）。
+ * sidecar 在全A等权(880008)日线上现训 GaussianHMM，纯确定性、不调 LLM，取不到为 null。
+ */
+export interface MarketRegimeHmm {
+  /** 数据日 YYYY-MM-DD */
+  asOf: string;
+  /** 当前最可能隐状态：强势 / 震荡 / 弱势 */
+  state: '强势' | '震荡' | '弱势';
+  /** 最新一日三态后验概率（%，合计≈100） */
+  probs: { 强势: number; 震荡: number; 弱势: number };
+  /** 强弱读数 0-100（强势概率−弱势概率归一，越高越偏进攻，供与规则 score 对照） */
+  strength: number;
+  /** 各隐状态画像（从弱到强） */
+  perState: MarketRegimeHmmState[];
+  /** 状态转移矩阵（行=当前态，列=次态概率） */
+  transition: number[][];
+  /** 实际训练用有效样本数（交易日） */
+  window: number;
+  /** 隐状态数 */
+  nStates: number;
+  /** 训练标的（默认 880008 全A等权） */
+  symbol: string;
+}
+
+/** 大盘阶段历史点（趋势图用） */
+export interface MarketRegimeHistoryItem {
+  tradeDate: string;
+  phase: MarketRegimePhase;
+  score: number;
+  tomorrowBias: MarketRegimeBias;
+}
+
 // ===== 板块新高宽度（主线识别，确定性只读，不下单/不调 LLM）=====
 
 /** 板块口径：行业 / 概念 */
@@ -4612,6 +4776,8 @@ export interface CockpitScreenerPick {
 export interface CockpitOverview {
   asOf: string;
   safety: SafetyState;
+  /** 大盘阶段研判（确定性，best-effort；取数失败为 null） */
+  regime: MarketRegimeOverview | null;
   /** 当日计划兑现（无当日计划时为 null） */
   plan: PlanFulfillment | null;
   /** 当日计划定调（无当日计划时为 null），供驾驶舱直达计划全文 */

@@ -153,6 +153,7 @@ import { registerModesModule } from './modes';
 import { seedUniverseIfEmpty } from './modes/universeRepo';
 import { seedResearchModesIfEmpty } from './seeds/researchModes';
 import { registerSentimentModule } from './sentiment';
+import { registerRegimeModule } from './regime';
 import { registerBreadthModule } from './breadth';
 import { registerBoardsModule } from './boards';
 import { registerConceptsModule } from './concepts';
@@ -1043,6 +1044,9 @@ async function main() {
 
   // S1 市场情绪周期模块（确定性 0-100 情绪指数 + 周期阶段 + 收盘快照，纯只读，删除此行整模块下线）
   registerSentimentModule(app);
+
+  // 大盘阶段研判模块（确定性：多指数均线/趋势 + 全A等权失真校正 + 宽度/情绪/量能 → 主升/反弹/退潮/震荡，删除此行整模块下线）
+  registerRegimeModule(app);
 
   // 板块新高宽度主线识别（确定性：各板块创新高个股数横向排名 + 持续性判主线 + 收盘快照，删除此行整模块下线）
   registerBreadthModule(app);

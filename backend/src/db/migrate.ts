@@ -550,6 +550,19 @@ CREATE TABLE IF NOT EXISTS sentiment_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_sentiment_snapshots_date ON sentiment_snapshots(trade_date);
 
+CREATE TABLE IF NOT EXISTS regime_snapshots (
+  trade_date TEXT PRIMARY KEY,
+  phase TEXT NOT NULL,
+  score REAL NOT NULL,
+  tomorrow_bias TEXT NOT NULL,
+  suggested_frequency TEXT NOT NULL,
+  position_range TEXT NOT NULL,
+  breakdown TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_regime_snapshots_date ON regime_snapshots(trade_date);
+
 CREATE TABLE IF NOT EXISTS position_attributions (
   id TEXT PRIMARY KEY,
   account TEXT NOT NULL DEFAULT 'real',

@@ -42,6 +42,8 @@ import type {
   EtfSignalsResult,
   SentimentOverview,
   SentimentHistoryItem,
+  MarketRegimeOverview,
+  MarketRegimeHistoryItem,
   BoardBreadthOverview,
   BoardBreadthHistoryItem,
   HotConceptOverview,
@@ -618,6 +620,14 @@ export const api = {
       unwrap<SentimentOverview>(http.get('/sentiment/overview', { timeout: 60000 })),
     history: (limit?: number) =>
       unwrap<SentimentHistoryItem[]>(http.get('/sentiment/history', { params: { limit } })),
+  },
+
+  // 大盘阶段（确定性：主升/反弹/退潮/震荡 + 明日倾向 + 建议频率/仓位 + 历史趋势）
+  regime: {
+    overview: () =>
+      unwrap<MarketRegimeOverview>(http.get('/market/regime', { timeout: 60000 })),
+    history: (limit?: number) =>
+      unwrap<MarketRegimeHistoryItem[]>(http.get('/market/regime/history', { params: { limit } })),
   },
 
   // 板块新高宽度主线识别（确定性：各板块创新高个股数横向排名 + 持续性判主线）

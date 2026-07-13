@@ -8,6 +8,7 @@ import { api } from '@/api';
 import { useWatchStore } from '@/stores/watch';
 import AiAnalysisHub from '@/components/AiAnalysisHub.vue';
 import StockLink from '@/components/StockLink.vue';
+import MarketRegimeBadge from '@/components/MarketRegimeBadge.vue';
 import { ACTION_TAG_TYPE, EXPO_STATUS_LABEL, EXPO_STATUS_TYPE } from '@/constants/boardTags';
 import type {
   BoardExposureHolding,
@@ -56,6 +57,7 @@ const watchStore = useWatchStore();
 const autoTrades = computed(() => watchStore.trades.slice(0, 8));
 const plan = computed(() => data.value?.plan ?? null);
 const planStance = computed(() => data.value?.planStance ?? null);
+const regime = computed(() => data.value?.regime ?? null);
 const themes = computed(() => data.value?.themes ?? []);
 const modules = computed(() => data.value?.modules ?? []);
 const screenerPicks = computed(() => data.value?.screenerPicks ?? []);
@@ -244,6 +246,9 @@ onUnmounted(() => {
     <el-tabs v-model="tab" class="cockpit-tabs">
       <el-tab-pane label="驾驶舱" name="cockpit">
         <div v-loading="loading">
+          <!-- 大盘阶段研判（最近一次收盘快照，完整明细见大盘页） -->
+          <MarketRegimeBadge v-if="regime" :regime="regime" />
+
           <!-- 安全总闸 / 急停 -->
           <div v-if="safety" class="safety-bar" :class="{ killed: safety.killSwitch }">
             <div class="safety-state">

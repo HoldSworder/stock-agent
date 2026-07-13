@@ -81,6 +81,15 @@ def mootdx_kline(symbol: str, category: int = 4, offset: int = 100) -> Any:
     return client.bars(symbol=symbol, frequency=category, offset=offset)
 
 
+def mootdx_index(symbol: str, frequency: int = 9, offset: int = 100) -> Any:
+    # 通达信板块/自建指数（如 880008 全A等权、880003 平均股价）走 client.index；
+    # 个股/ETF 用 mootdx_kline(client.bars)——板块指数走 bars 会返回空。
+    # frequency 频率码同 bars：4/9=日 5=周 6=月 7/8=1分 0=5分 1=15分 2=30分 3=60分。
+    # 返回除 OHLC/量额外，含 up_count/down_count 成分股涨跌家数（等权宽度可直接用）。
+    client = af.tdx_client()
+    return client.index(symbol=symbol, frequency=frequency, offset=offset)
+
+
 def mootdx_quote(symbols: list[str]) -> Any:
     client = af.tdx_client()
     return client.quotes(symbol=symbols)
@@ -106,6 +115,122 @@ def mootdx_f10_announcement(symbol: str) -> Any:
     return client.F10(symbol=symbol, name="最新提示")
 
 
+# ── 大盘阶段 HMM 影子信号（hmmlearn，纯确定性，零 token）─────────────────────
+# 与 backend 的确定性六维规则并列的「概率视角」：在全A等权(880008)日线上现训
+# GaussianHMM，用「对数收益 + 20日滚动波动」两特征聚出 强势/震荡/弱势 三态，
+# 输出最新一日三态后验概率 + 强弱读数，供与规则四态相互印证（分歧即预警）。
+_ANN = 244  # A股年化交易日近似
+
+
+def _regime_hmm_from_closes(
+    closes: "Any", n_states: int, as_of: str, symbol: str,
+) -> dict:
+    """核心：给定收盘序列，现训 HMM 并解码为三态概率 + 强弱读数（可脱网自检）。
+
+    状态无语义标签，训后按各态「平均对数收益」升序赋名（最低=弱势、最高=强势、
+    中间=震荡），保证跨次重训标签稳定。`random_state` 固定 → 完全确定性。
+    """
+    import numpy as np
+    import pandas as pd
+    from hmmlearn.hmm import GaussianHMM
+    from sklearn.preprocessing import StandardScaler
+
+    s = pd.Series(np.asarray(closes, dtype=float))
+    logret = np.log(s).diff()
+    vol20 = logret.rolling(20).std()
+    feat = pd.concat([logret, vol20], axis=1).dropna()
+    feat.columns = ["ret", "vol"]
+    if len(feat) < 120:
+        raise ValueError(f"有效特征样本不足({len(feat)})，HMM 不训练")
+
+    real_ret = feat["ret"].to_numpy()  # 未标准化对数收益（算各态年化用）
+    x = StandardScaler().fit_transform(feat.to_numpy())
+    model = GaussianHMM(
+        n_components=n_states, covariance_type="full",
+        n_iter=1000, random_state=42, tol=1e-4,
+    )
+    model.fit(x)
+    states = model.predict(x)          # Viterbi
+    last_probs = model.predict_proba(x)[-1]
+
+    # 按标准化收益列（第0列，与真实收益单调）升序：最低=弱势、最高=强势
+    order = list(np.argsort(model.means_[:, 0]))
+    labels: dict = {}
+    if n_states == 2:
+        labels = {order[0]: "弱势", order[1]: "强势"}
+    else:
+        labels[order[0]] = "弱势"
+        labels[order[-1]] = "强势"
+        for mid in order[1:-1]:
+            labels[mid] = "震荡"
+
+    prob_by_label = {"强势": 0.0, "震荡": 0.0, "弱势": 0.0}
+    for st in range(n_states):
+        prob_by_label[labels[st]] += float(last_probs[st])
+    # 强弱读数：强势概率 − 弱势概率 ∈ [-1,1] → 归一到 0-100，供与规则 score 对照
+    strength = round((prob_by_label["强势"] - prob_by_label["弱势"] + 1) / 2 * 100, 1)
+
+    per_state = []
+    for st in order:  # 从弱到强
+        mask = states == st
+        cnt = int(mask.sum())
+        if cnt == 0:
+            per_state.append({"name": labels[st], "days": 0, "annRet": None, "annVol": None})
+            continue
+        r = real_ret[mask]
+        per_state.append({
+            "name": labels[st],
+            "days": cnt,
+            "annRet": round(float(np.mean(r)) * _ANN * 100, 1),
+            "annVol": round(float(np.std(r)) * math.sqrt(_ANN) * 100, 1),
+        })
+    trans = [[round(float(v), 3) for v in row] for row in model.transmat_]
+
+    return {
+        "asOf": as_of,
+        "state": labels[int(states[-1])],
+        "probs": {k: round(v * 100, 1) for k, v in prob_by_label.items()},
+        "strength": strength,
+        "perState": per_state,
+        "transition": trans,
+        "window": len(feat),
+        "nStates": n_states,
+        "symbol": symbol,
+    }
+
+
+def regime_hmm(symbol: str = "880008", n_states: int = 3, window: int = 750) -> Any:
+    """大盘阶段 HMM 影子信号：全A等权(880008)日线上现训，输出三态概率 + 强弱读数。
+
+    纯只读、纯确定性（random_state 固定）、不调 LLM；样本不足/`fit` 不收敛时抛错，
+    由 backend 服务层降级隐藏（不阻断规则四态结论）。
+    ponytail: 每请求现训（T≈window，fit<1s，可接受），不缓存模型；上限=可取样本量，
+    突破需 backend 落库长历史序列后改传入序列。
+    """
+    n_states = max(2, min(int(n_states), 4))
+    window = max(250, min(int(window), 1200))
+
+    df = mootdx_index(symbol=symbol, frequency=9, offset=window + 40)
+    if df is None or len(df) == 0:
+        raise ValueError(f"全A等权({symbol}) K线为空")
+    try:
+        import pandas as pd
+        if not isinstance(df, pd.DataFrame):
+            df = pd.DataFrame(df)
+        tcol = "datetime" if "datetime" in df.columns else ("date" if "date" in df.columns else None)
+        if tcol:
+            df = df.sort_values(tcol)
+        closes = pd.to_numeric(df["close"], errors="coerce").dropna().to_numpy()
+        as_of = str(df[tcol].iloc[-1])[:10] if tcol else _today()
+    except Exception as e:  # noqa
+        raise ValueError(f"全A等权 K线解析失败：{e}")
+
+    if len(closes) < 200:
+        raise ValueError(f"样本不足(closes={len(closes)})，HMM 不训练")
+    closes = closes[-window:]
+    return _regime_hmm_from_closes(closes, n_states, as_of, symbol)
+
+
 def _today() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
@@ -122,6 +247,9 @@ _SPEC: list[dict] = [
     {"name": "mootdx_kline", "fn": mootdx_kline, "layer": "行情",
      "params": [("symbol", "str", True, None), ("category", "int", False, 4), ("offset", "int", False, 100)],
      "desc": "mootdx 通达信 K线（不封IP）。category(频率码):0=5分 1=15分 2=30分 3=60分 4=日 5=周 6=月 7/8=1分 9=日 10=季 11=年", "sample": {"symbol": "688017"}},
+    {"name": "mootdx_index", "fn": mootdx_index, "layer": "行情",
+     "params": [("symbol", "str", True, None), ("frequency", "int", False, 9), ("offset", "int", False, 100)],
+     "desc": "mootdx 通达信板块/自建指数K线（880008全A等权、880003平均股价等，走 client.index；板块指数用 mootdx_kline 会返回空）。frequency:4/9=日 5=周 6=月，返回含 up_count/down_count 涨跌家数", "sample": {"symbol": "880008"}},
     {"name": "mootdx_quote", "fn": mootdx_quote, "layer": "行情",
      "params": [("symbols", "codes", True, None)],
      "desc": "mootdx 实时报价含五档盘口（46字段）", "sample": {"symbols": "688017,300476"}},
@@ -228,6 +356,11 @@ _SPEC: list[dict] = [
     {"name": "full_valuation", "fn": _af("full_valuation"), "layer": "估值",
      "params": [("code", "str", True, None)],
      "desc": "单票完整估值：实时价→一致预期EPS→前向PE/PEG/PE消化年数", "sample": {"code": "688017"}},
+    # 大盘阶段 HMM 影子信号
+    {"name": "regime_hmm", "fn": regime_hmm, "layer": "大盘阶段",
+     "params": [("symbol", "str", False, "880008"), ("n_states", "int", False, 3), ("window", "int", False, 750)],
+     "desc": "大盘阶段 HMM 影子信号：全A等权(880008)日线现训 GaussianHMM(对数收益+滚动波动)，输出 强势/震荡/弱势 三态概率+强弱读数(0-100)，供与规则四态相互印证。纯确定性、零 token",
+     "sample": {"symbol": "880008"}},
 ]
 
 # 仅保留 fn 解析成功的端点（上游若重命名/删除，自动跳过而非崩溃）
@@ -333,3 +466,28 @@ def selfcheck() -> dict:
         except Exception as e:  # noqa
             results.append({"endpoint": name, "status": "error", "error": str(e)[:200]})
     return {"checked_at": today, "ok": ok_count, "total_tested": len([r for r in results if r["status"] != "skipped"]), "results": results}
+
+
+# ── HMM 脱网自检（`python app.py` 直接运行；不触网、不落库）─────────────────
+# 构造「低波正收益 → 高波负收益」两段拼接序列，断言 HMM 能把强势态判为高收益、
+# 弱势态判为低收益，且标签排序正确（对齐 backend regime/service.ts 的 assert 范式）。
+if __name__ == "__main__":
+    import numpy as np
+
+    rng = np.random.default_rng(42)
+    up = rng.normal(0.0015, 0.006, 400)     # 低波正收益（强势）
+    down = rng.normal(-0.0020, 0.025, 300)  # 高波负收益（弱势）
+    rets = np.concatenate([up, down, up])
+    prices = 100.0 * np.exp(np.cumsum(rets))  # 收益 → 收盘价序列
+
+    out = _regime_hmm_from_closes(prices, n_states=3, as_of="2026-07-10", symbol="TEST")
+    assert set(out["probs"]) == {"强势", "震荡", "弱势"}, "三态概率键应为 强势/震荡/弱势"
+    assert 0 <= out["strength"] <= 100, f"强弱读数应在 0-100，实际 {out['strength']}"
+    strong = next(p for p in out["perState"] if p["name"] == "强势")
+    weak = next(p for p in out["perState"] if p["name"] == "弱势")
+    assert strong["annRet"] > weak["annRet"], (
+        f"强势态年化收益({strong['annRet']})应高于弱势态({weak['annRet']})"
+    )
+    assert out["state"] in {"强势", "震荡", "弱势"}, "当前态应为三态之一"
+    print(f"regime_hmm 自检通过：state={out['state']} strength={out['strength']} "
+          f"probs={out['probs']} 强势年化={strong['annRet']}% 弱势年化={weak['annRet']}%")

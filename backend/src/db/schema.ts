@@ -1014,6 +1014,33 @@ export const sentimentSnapshots = sqliteTable(
   (t) => ({ byDate: index('idx_sentiment_snapshots_date').on(t.tradeDate) }),
 );
 
+/**
+ * 大盘阶段日快照：每交易日记录一次大盘阶段（主升/反弹/退潮/震荡）+ 综合强度分 + 明日倾向 + 建议频率/仓位，
+ * 一天一行（trade_date 唯一），供「较昨分数变动 / 阶段已持续天数」与历史趋势图。纯只读统计，不参与交易。
+ */
+export const regimeSnapshots = sqliteTable(
+  'regime_snapshots',
+  {
+    /** 交易日 YYYY-MM-DD（Asia/Shanghai），唯一主键 */
+    tradeDate: text('trade_date').primaryKey(),
+    /** 阶段（主升/反弹/退潮/震荡） */
+    phase: text('phase').notNull(),
+    /** 综合强度分 0-100 */
+    score: real('score').notNull(),
+    /** 明日/近期方向倾向（偏强/偏弱/中性） */
+    tomorrowBias: text('tomorrow_bias').notNull(),
+    /** 建议交易频率（积极/正常/降低/观望） */
+    suggestedFrequency: text('suggested_frequency').notNull(),
+    /** 建议仓位区间（白话） */
+    positionRange: text('position_range').notNull(),
+    /** 各维度贡献拆解 StrengthBreakdown JSON */
+    breakdown: text('breakdown').notNull().default('{}'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => ({ byDate: index('idx_regime_snapshots_date').on(t.tradeDate) }),
+);
+
 /** 真实持仓纪律事件流（确定性体检命中止损/止盈/超配/超期等时落库，供历史与智能推送去重） */
 export const disciplineEvents = sqliteTable(
   'discipline_events',

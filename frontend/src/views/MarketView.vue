@@ -11,6 +11,7 @@ import ModuleScheduleDialog from '@/components/ModuleScheduleDialog.vue';
 import MarkdownView from '@/components/MarkdownView.vue';
 import StockLink from '@/components/StockLink.vue';
 import BoardReviewConclusion from '@/components/BoardReviewConclusion.vue';
+import MarketRegimePanel from '@/components/MarketRegimePanel.vue';
 import BoardStrengthPanel from '@/components/BoardStrengthPanel.vue';
 import BoardBreadthPanel from '@/components/BoardBreadthPanel.vue';
 import MarketThemesPanel from '@/components/MarketThemesPanel.vue';
@@ -257,6 +258,9 @@ onUnmounted(() => {
     <el-tabs v-if="ov" v-model="tab" class="market-tabs">
       <!-- ===== A股大盘 ===== -->
       <el-tab-pane label="A股大盘" name="astock">
+        <!-- 大盘阶段研判（确定性完整面板：阶段/强度分/明日展望/驱动风险/6维度/权重指数/全A等权背离/历史走势） -->
+        <MarketRegimePanel />
+
         <div class="tab-actions">
           <el-button :icon="MagicStick" type="primary" @click="reviewOpen = true">
             一键 AI 大盘与板块研判
