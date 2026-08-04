@@ -1,49 +1,39 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
-import { ElMessage } from 'element-plus';
-import { api, openWs } from '@/api';
+import { onMounted, ref } from 'vue';
+import { api } from '@/api';
 import AgentTrace from '@/components/AgentTrace.vue';
-import { applyStepEvent, type Step } from '@/composables/agentTrace';
-import type { ChatMessage, ChatSession, StreamEvent } from '@stock-agent/shared';
-
-interface UIMsg {
-  role: 'user' | 'assistant';
-  content: string;
-  steps: Step[];
-}
-
-const THINKING_KEY = 'sa_chat_thinking';
+import { useChatStream, type UIMsg } from '@/composables/chatStream';
+import type { Step } from '@/composables/agentTrace';
+import type { ChatMessage, ChatSession } from '@stock-agent/shared';
 
 const sessions = ref<ChatSession[]>([]);
 const currentId = ref<string | null>(null);
-const messages = ref<UIMsg[]>([]);
-const input = ref('');
-const busy = ref(false);
-// 深思开关：默认开启，记忆用户选择
-const deepThinking = ref<boolean>(localStorage.getItem(THINKING_KEY) !== '0');
-// 上下文预算（来自后端 context 事件，展示本轮 token 占用 / 窗口 / 是否触发压缩）
-const ctxUsed = ref(0);
-const ctxWindow = ref(0);
-const ctxCompacted = ref(false);
-const ctxPct = computed(() =>
-  ctxWindow.value > 0 ? Math.min(100, Math.round((ctxUsed.value / ctxWindow.value) * 100)) : 0,
-);
-const listRef = ref<HTMLElement | null>(null);
-let ws: WebSocket | null = null;
-// 当前 run 是否已正常收尾（run_finished）；用于区分「正常结束的断开」与「run 中途断开」
-let runFinished = true;
-// 主动关闭（卸载组件）标记，避免触发自动重连
-let closingByUser = false;
 
-function toggleThinking(v: boolean) {
-  localStorage.setItem(THINKING_KEY, v ? '1' : '0');
-}
-
-/** 取末尾 assistant 消息（流式写入目标） */
-function lastAssistant(): UIMsg | null {
-  const last = messages.value[messages.value.length - 1];
-  return last?.role === 'assistant' ? last : null;
-}
+// 流式对话链路（连接/事件归约/上下文预算/中止）由共享 composable 承担，本页只管会话列表与布局
+const {
+  messages,
+  input,
+  busy,
+  deepThinking,
+  ctxUsed,
+  ctxWindow,
+  ctxCompacted,
+  ctxPct,
+  listRef,
+  toggleThinking,
+  connectWs,
+  scrollBottom,
+  send,
+  stop,
+} = useChatStream({
+  sessionId: () => currentId.value,
+  ensureSession: async () => {
+    const s = await api.createSession();
+    currentId.value = s.id;
+    return s.id;
+  },
+  onRunFinished: () => void loadSessions(),
+});
 
 async function loadSessions() {
   sessions.value = await api.listSessions();
@@ -54,7 +44,7 @@ async function selectSession(id: string) {
   const list: ChatMessage[] = await api.listMessages(id);
   messages.value = list
     .filter((m) => m.role === 'user' || m.role === 'assistant')
-    .map((m) => {
+    .map<UIMsg>((m) => {
       const role = m.role as 'user' | 'assistant';
       // 历史消息不含轨迹：assistant 映射为单个 text 步骤渲染
       const steps: Step[] =
@@ -75,104 +65,10 @@ async function removeSession(id: string) {
   await loadSessions();
 }
 
-function scrollBottom() {
-  nextTick(() => {
-    if (listRef.value) listRef.value.scrollTop = listRef.value.scrollHeight;
-  });
-}
-
-function connectWs() {
-  ws = openWs('/ws/chat');
-  ws.onmessage = (ev) => {
-    const e: StreamEvent = JSON.parse(ev.data);
-    if (e.type === 'context') {
-      // 更新 token 预算指示
-      ctxUsed.value = e.usedTokens;
-      ctxWindow.value = e.contextWindow;
-      ctxCompacted.value = e.compacted;
-    } else if (e.type === 'run_finished') {
-      // 用户停止：补一句占位，避免空气泡
-      if (e.status === 'canceled') {
-        const cur = lastAssistant();
-        if (cur && !cur.content.trim()) cur.steps.push({ kind: 'text', content: '(已停止)' });
-      }
-      runFinished = true;
-      busy.value = false;
-      loadSessions();
-    } else if (e.type === 'error') {
-      ElMessage.error(e.message);
-      runFinished = true;
-      busy.value = false;
-    } else {
-      // 轨迹类事件（token/reasoning/tool_call/tool_result）交由共享归约器累积
-      const msg = lastAssistant();
-      if (!msg) return;
-      applyStepEvent(msg.steps, e);
-      if (e.type === 'token') msg.content += e.text;
-      if (e.type === 'token' || e.type === 'reasoning' || e.type === 'tool_call') scrollBottom();
-    }
-  };
-  ws.onerror = () => {
-    // 中断收尾（提示/清理/重连）统一在 onclose 处理，onerror 后必触发 onclose，避免重复弹窗
-  };
-  ws.onclose = () => {
-    // run 进行中被动断开（如后端热重启）：给出提示并清理半截气泡，避免空白卡死
-    if (busy.value && !runFinished) {
-      const msg = lastAssistant();
-      if (msg && !msg.content.trim()) {
-        msg.steps.push({ kind: 'text', content: '(连接中断，未完成，请重发)' });
-      }
-      ElMessage.error('连接中断，回答未完成，请重新发送');
-    }
-    busy.value = false;
-    // 非主动关闭且当前空闲时静默重连，便于后端重启后下一条无感续上
-    if (!closingByUser && !busy.value) {
-      setTimeout(() => {
-        if (!closingByUser && (!ws || ws.readyState === WebSocket.CLOSED)) connectWs();
-      }, 1000);
-    }
-  };
-}
-
-/** 停止当前运行：通知后端 abort 在飞 run（及时止损省 token） */
-function stop() {
-  if (!busy.value) return;
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ action: 'stop' }));
-  }
-}
-
-async function send() {
-  const content = input.value.trim();
-  if (!content || busy.value) return;
-  if (!currentId.value) {
-    const s = await api.createSession();
-    currentId.value = s.id;
-  }
-  if (!ws || ws.readyState !== WebSocket.OPEN) connectWs();
-  const thinking = deepThinking.value;
-  messages.value.push({ role: 'user', content, steps: [] });
-  messages.value.push({ role: 'assistant', content: '', steps: [] });
-  input.value = '';
-  runFinished = false;
-  busy.value = true;
-  scrollBottom();
-
-  const trySend = () => {
-    ws!.send(JSON.stringify({ sessionId: currentId.value, content, thinking }));
-  };
-  if (ws!.readyState === WebSocket.OPEN) trySend();
-  else ws!.addEventListener('open', trySend, { once: true });
-}
-
 onMounted(async () => {
   await loadSessions();
   if (sessions.value.length) await selectSession(sessions.value[0].id);
   connectWs();
-});
-onUnmounted(() => {
-  closingByUser = true;
-  ws?.close();
 });
 </script>
 
@@ -221,7 +117,7 @@ onUnmounted(() => {
           :rows="2"
           resize="none"
           placeholder="问点什么，回车发送，Shift+回车换行"
-          @keydown.enter.exact.prevent="send"
+          @keydown.enter.exact.prevent="send()"
         />
         <div class="composer-actions">
           <el-switch
@@ -237,7 +133,7 @@ onUnmounted(() => {
             <span class="ctx-text">{{ ctxPct }}%<span v-if="ctxCompacted" class="ctx-tag">已压缩</span></span>
           </div>
           <el-button v-if="busy" class="send-btn" @click="stop">停止</el-button>
-          <el-button v-else type="primary" class="send-btn" @click="send">发送</el-button>
+          <el-button v-else type="primary" class="send-btn" @click="send()">发送</el-button>
         </div>
       </footer>
     </div>

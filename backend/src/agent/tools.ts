@@ -1,5 +1,12 @@
 import type OpenAI from 'openai';
 import { miaoxiang, MiaoxiangQuotaError, isTradeRejected } from '../miaoxiang/client';
+import { formatPositions, formatBalance, formatOrders } from '../miaoxiang/format';
+import {
+  MAX_TRADE_REJECTS,
+  guardMxTradeParams,
+  isTradeRejectCapped,
+  noteTradeReject,
+} from '../miaoxiang/tradeGuard';
 import { sendTelegram } from '../notify/telegram';
 import { fetchRealPositions } from '../realPositions';
 import { evaluateDiscipline } from '../positions/discipline';
@@ -28,6 +35,28 @@ import * as rotation from '../rotation/service';
 import * as screener from '../screener/service';
 import * as radar from '../radar/service';
 import * as themes from '../themes/service';
+import * as symbolMarks from '../symbolMarks/repo';
+import * as symbolPlanOrch from '../symbolPlans/orchestrator';
+
+/**
+ * 每份上下文的提案被拒次数（含写入时刻，用于 TTL 清扫）。
+ * 达到 2 次就降级落观察计划，不让模型无限重试。
+ * 上下文本身有 TTL，这里跟着上下文 id 走即可，成功或降级后立即清除；
+ * 但模型首拒即放弃时不会走到那两条清除路径，故每次写入顺带清掉过期键，避免条目永久驻留。
+ */
+const proposalRetries = new Map<string, { tries: number; at: number }>();
+/** 提案重试记录的存活上限：略长于上下文缓存 TTL（30 分钟），过期即视为该轮已结束 */
+const PROPOSAL_RETRY_TTL_MS = 2 * 60 * 60 * 1000;
+
+/** 写入重试计数，并顺带清扫超过 TTL 的历史条目 */
+function setProposalRetries(contextId: string, tries: number): void {
+  const now = Date.now();
+  for (const [k, v] of proposalRetries) {
+    if (now - v.at > PROPOSAL_RETRY_TTL_MS) proposalRetries.delete(k);
+  }
+  proposalRetries.set(contextId, { tries, at: now });
+}
+import { formatCandidates, formatTechnicalContext } from '../symbolPlans/format';
 import {
   getIndices,
   getGlobalIndices,
@@ -65,10 +94,21 @@ import type {
   PlanTrigger,
   ResearchReportType,
   SkillDimension,
+  SymbolMarkKind,
+  SymbolMarkPoint,
+  SymbolTradePlanProposal,
   ToolAvailability,
   ToolInfo,
 } from '@stock-agent/shared';
 import { getOverrides } from './toolConfig';
+
+/** K 线标注形态中文名（工具回执文案用） */
+const MARK_KIND_LABEL: Record<SymbolMarkKind, string> = {
+  price_line: '价位线',
+  point: '点位',
+  range: '区间',
+  trend_line: '趋势线',
+};
 
 export interface ToolContext {
   runId: string | null;
@@ -254,7 +294,7 @@ export const tools: ToolDef[] = [
       function: {
         name: 'mx_simulator',
         description:
-          '妙想模拟盘查询。action=positions 查持仓；action=balance 查资金；action=orders 查委托。',
+          '妙想模拟盘查询（返回精简文本）。action=positions 查持仓（已过滤清仓项）；action=balance 查资金；action=orders 查委托（已过滤废单/撤单失败）。',
         parameters: {
           type: 'object',
           properties: {
@@ -266,9 +306,9 @@ export const tools: ToolDef[] = [
     },
     run: async (args, ctx) => {
       const action = asString(args.action, 'positions');
-      if (action === 'balance') return preview(await miaoxiang.balance(ctx.signal));
-      if (action === 'orders') return preview(await miaoxiang.orders(ctx.signal));
-      return preview(await miaoxiang.positions(ctx.signal));
+      if (action === 'balance') return preview(formatBalance(await miaoxiang.balance(ctx.signal)));
+      if (action === 'orders') return preview(formatOrders(await miaoxiang.orders(ctx.signal)));
+      return preview(formatPositions(await miaoxiang.positions(ctx.signal)));
     },
   },
   {
@@ -525,17 +565,80 @@ export const tools: ToolDef[] = [
       } catch (e) {
         return `下单被安全守卫拒绝：${e instanceof Error ? e.message : String(e)}`;
       }
+      // 确定性风控护栏：数量取整 100 倍 / 限价越涨跌停即成修正 / 买入单票超 30% 下调。
+      // 涨跌停价走东财免费源（不耗妙想额度），总资产用本地战法快照；取不到则对应校验自动跳过。
+      const useMarketPrice = Boolean(args.useMarketPrice);
+      const rawPrice = typeof args.price === 'number' ? args.price : undefined;
+      let limitUp: number | undefined;
+      let limitDown: number | undefined;
+      if (!useMarketPrice && rawPrice != null) {
+        const q = await getQuoteWithLimits(stockCode).catch(() => null);
+        if (q) {
+          limitUp = q.limitUp;
+          limitDown = q.limitDown;
+        }
+      }
+      let totalAsset: number | undefined;
+      let currentPositionValue: number | undefined;
+      if (side === 'buy' && ctx.strategyId) {
+        const s = getStrategy(ctx.strategyId);
+        if (s && s.kind === 'miaoxiang') {
+          // 同一次快照里同时取总资产与该标的现有持仓市值：单票 30% 上限必须按
+          // 「已持市值 + 本单金额」判定，否则分多次小额买入可累积超配。
+          // 取不到时两者都省略（护栏自动退化为只看本单），绝不能填 0 冒充「无持仓」。
+          const snap = await getStrategySnapshot(ctx.strategyId).catch(() => null);
+          if (snap) {
+            totalAsset = snap.totalAsset;
+            currentPositionValue = snap.positions.find((p) => p.code === stockCode)?.marketValue;
+          }
+        }
+      }
+      const guard = guardMxTradeParams({
+        side,
+        qty: Number(args.quantity) || 0,
+        price: rawPrice,
+        useMarketPrice,
+        limitUp,
+        limitDown,
+        totalAsset,
+        currentPositionValue,
+      });
+      if (!guard.ok) {
+        return `下单被风控护栏拒绝：${guard.rejectReason}`;
+      }
+      // 拒单熔断：同一标的同方向在本次运行内已被妙想拒单达上限，直接短路，
+      // 避免模型反复微调限价死磕把步数耗尽（历史上会导致整个任务以「超过最大步数」告败）。
+      if (isTradeRejectCapped(ctx.runId, side, stockCode)) {
+        return (
+          `下单已熔断：${stockCode} ${side === 'buy' ? '买入' : '卖出'}在本次运行内已被妙想连续拒单 ${MAX_TRADE_REJECTS} 次，` +
+          '不再重试。请停止改价重下（限价/市价都不要再试），把该票标注为「废单，未成交」并写明最后一次拒单原因，继续完成其余标的与报告。'
+        );
+      }
+      const guardNote = guard.notes.length ? `\n（护栏修正：${guard.notes.join('；')}）` : '';
       const body = await miaoxiang.trade({
         type: side,
         stockCode,
-        quantity: Number(args.quantity) || 0,
-        useMarketPrice: Boolean(args.useMarketPrice),
-        price: typeof args.price === 'number' ? args.price : undefined,
+        quantity: guard.qty,
+        useMarketPrice,
+        price: guard.price,
       });
-      const result = preview(body);
+      const result = preview(body) + guardNote;
       // 业务拒单（如 T+1 当日买入不可卖）：原样返回拒单响应体供模型据实回复，
       // 不记录操作原因、不回同步（本次没有成交，避免登记幽灵成交/误报「已同步」）。
-      if (isTradeRejected(body)) return result;
+      if (isTradeRejected(body)) {
+        const n = noteTradeReject(ctx.runId, side, stockCode);
+        const left = MAX_TRADE_REJECTS - n;
+        return (
+          result +
+          (left > 0
+            ? `\n（该票本次运行已被拒单 ${n} 次，最多再试 ${left} 次；请核对可卖数量/价格后一次改对，勿逐分微调）`
+            : '\n（该票本次运行已被拒单达上限，后续下单将被熔断。请标注「废单，未成交」并继续完成报告）')
+        );
+      }
+      // code=200 只代表委托已受理：挂单未成交(status=2)、废单(status=9) 都会返回 200，
+      // 提醒模型别把受理当成交（历史上因价格量纲错导致的废单被当成「已清仓」写进报告）。
+      const accepted =
+        result + '\n（code=200 仅表示委托已受理，是否成交请以 mx_simulator(orders/positions) 为准，勿直接断言已成交）';
       // 双写：若当前运行绑定的是妙想镜像战法，落库操作原因/持有逻辑，再成交后回拉同步本地账户
       if (ctx.strategyId) {
         const s = getStrategy(ctx.strategyId);
@@ -545,13 +648,13 @@ export const tools: ToolDef[] = [
           if (thesis != null) setPositionThesis(ctx.strategyId, stockCode, thesis);
           try {
             await syncMiaoxiangStrategy(ctx.strategyId);
-            return `${result}\n（已同步妙想模拟盘到本地战法账户${reason ? `，操作原因：${reason}` : ''}${thesis ? `，持有逻辑：${thesis}` : ''}）`;
+            return `${accepted}\n（已同步妙想模拟盘到本地战法账户${reason ? `，操作原因：${reason}` : ''}${thesis ? `，持有逻辑：${thesis}` : ''}）`;
           } catch (e) {
-            return `${result}\n（妙想模拟盘回同步失败：${e instanceof Error ? e.message : e}）`;
+            return `${accepted}\n（妙想模拟盘回同步失败：${e instanceof Error ? e.message : e}）`;
           }
         }
       }
-      return result;
+      return accepted;
     },
   },
   {
@@ -1777,6 +1880,303 @@ export const tools: ToolDef[] = [
       return preview(text, 12000);
     },
   },
+  {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'list_kline_marks',
+        description:
+          '列出某标的 K 线图上已有的标注（价位线/点位/区间/趋势线）。只列有效标注，已撤销的历史标注不返回。' +
+          '打新标注前先调它，避免同一结论重复画线；结论变了就先 remove_kline_mark 撤旧再打新。',
+        parameters: {
+          type: 'object',
+          properties: {
+            code: { type: 'string', description: '标的代码，如 600519 / 159740' },
+          },
+          required: ['code'],
+        },
+      },
+    },
+    run: async (args) => {
+      // 不传 includeHistorical：repo 默认只返回 status='active'，撤销过的标注不该再出现在查重清单里
+      const list = symbolMarks.listMarks(asString(args.code).trim());
+      if (list.length === 0) return '该标的暂无标注。';
+      const lines = list.map((m) => {
+        const pts = m.points
+          .map((p) => [p.time, p.price != null ? p.price.toFixed(2) : null].filter(Boolean).join(' @ '))
+          .join(' → ');
+        return `- [${m.id}] ${MARK_KIND_LABEL[m.kind] ?? m.kind}「${m.label}」${pts}${m.note ? `｜${m.note}` : ''}（${m.createdAt.slice(0, 10)}）`;
+      });
+      return preview(`该标的现有 ${list.length} 条标注：\n${lines.join('\n')}`);
+    },
+  },
+  {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'add_kline_mark',
+        description:
+          '在标的 K 线图上打一个长期留存的标注，把研判结论固化到图上供后续跟踪复核。' +
+          '四种形态：price_line 水平价位线（支撑/压力/目标价/止损位，1 个点、只填 price）；' +
+          'point 单 K 线点位标记（某日买卖点/关键事件，1 个点、填 time+price）；' +
+          'range 时间区间（主升浪/横盘区，2 个点、各填 time+price，构成矩形对角）；' +
+          'trend_line 趋势线（2 个点、各填 time+price 连成线段）。' +
+          'label 写图上短标签（如「压力 32.5」「主升浪起点」），note 写完整理由。' +
+          '打点前先 list_kline_marks 查重；同名标注会覆盖（先撤旧再新增），因此更新结论直接沿用同一 label 即可。',
+        parameters: {
+          type: 'object',
+          properties: {
+            code: { type: 'string', description: '标的代码，如 600519 / 159740' },
+            kind: {
+              type: 'string',
+              enum: ['price_line', 'point', 'range', 'trend_line'],
+              description: '标注形态',
+            },
+            label: { type: 'string', description: '图上显示的短标签，控制在 12 字内' },
+            note: { type: 'string', description: '判断理由与失效条件，可选但强烈建议填' },
+            points: {
+              type: 'array',
+              description: 'price_line/point 一个点，range/trend_line 两个点',
+              items: {
+                type: 'object',
+                properties: {
+                  time: {
+                    type: 'string',
+                    description: '日期 YYYY-MM-DD（分钟级用 YYYY-MM-DD HH:mm）；price_line 不需要',
+                  },
+                  price: { type: 'number', description: '价格' },
+                },
+              },
+            },
+          },
+          required: ['code', 'kind', 'label', 'points'],
+        },
+      },
+    },
+    run: async (args, ctx) => {
+      const code = asString(args.code).trim();
+      const label = asString(args.label).trim();
+      try {
+        // 同名视为结论更新：先撤旧，避免图上同义线越画越多
+        const replaced = symbolMarks.removeMarkByLabel(code, label);
+        const mark = symbolMarks.addMark({
+          code,
+          kind: asString(args.kind) as SymbolMarkKind,
+          label,
+          note: args.note ? asString(args.note) : null,
+          points: Array.isArray(args.points) ? (args.points as SymbolMarkPoint[]) : [],
+          runId: ctx.runId,
+        });
+        return (
+          `已在 ${code} 的 K 线上添加${MARK_KIND_LABEL[mark.kind]}标注「${label}」（id=${mark.id}）` +
+          `${replaced > 0 ? `，并撤销了 ${replaced} 条同名旧标注` : ''}。用户在标的详情弹窗的 K 线图上即可看到。`
+        );
+      } catch (e) {
+        return `打点失败：${e instanceof Error ? e.message : String(e)}`;
+      }
+    },
+  },
+  {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'get_symbol_technical_context',
+        description:
+          '取某标的的确定性技术上下文（个股/ETF 通用）：多周期读数、道氏摆动点与趋势、缠论候选结构、量价、' +
+          '统一市场阶段、相对强弱、板块广度、执行质量与事件风险、持仓与风险预算、大盘/板块阶段。' +
+          '阶段、趋势、结构、风险、仓位、主动作全部由后端算定，你不能修改，只能解释。' +
+          '返回 contextId，后续必须用同一个 contextId 调 list_symbol_plan_candidates 取候选、' +
+          '再调 save_symbol_trade_plan 提交。不返回原始 K 线，不要要求原始 K 线。' +
+          '这是做「标的技术计划 / K线阶段 / 触发失效」类任务的第一步。',
+        parameters: {
+          type: 'object',
+          properties: {
+            code: { type: 'string', description: '标的代码，如 600519 / 159516' },
+            name: { type: 'string', description: '标的名称，可选' },
+            secid: { type: 'string', description: '指数需传 secid，可选' },
+            horizon: {
+              type: 'string',
+              enum: ['next_session', 'swing'],
+              description: 'next_session 下一交易日计划 / swing 1~4 周波段计划',
+            },
+          },
+          required: ['code', 'horizon'],
+        },
+      },
+    },
+    run: async (args) => {
+      try {
+        const snap = await symbolPlanOrch.prepareContext({
+          code: asString(args.code).trim(),
+          name: args.name ? asString(args.name) : undefined,
+          secid: args.secid ? asString(args.secid) : undefined,
+          horizon: asString(args.horizon) === 'swing' ? 'swing' : 'next_session',
+        });
+        return preview(formatTechnicalContext(snap), 6000);
+      } catch (e) {
+        return `取技术上下文失败：${e instanceof Error ? e.message : String(e)}`;
+      }
+    },
+  },
+  {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'list_symbol_plan_candidates',
+        description:
+          '取后端已算好的候选价位目录或候选条件目录。必须先调 get_symbol_technical_context 拿 contextId。' +
+          '计划里的每个价位和每个条件都只能从这里按 candidateId 挑选，禁止自己写价格数字或发明条件。' +
+          'catalog=levels 取候选价位（含角色、评分、来源、距现价 ATR 倍数）；catalog=conditions 取候选条件。',
+        parameters: {
+          type: 'object',
+          properties: {
+            contextId: { type: 'string', description: 'get_symbol_technical_context 返回的 contextId' },
+            catalog: { type: 'string', enum: ['levels', 'conditions'], description: '取哪个目录' },
+          },
+          required: ['contextId', 'catalog'],
+        },
+      },
+    },
+    run: async (args) => {
+      const snap = symbolPlanOrch.getCachedContext(asString(args.contextId).trim());
+      if (!snap) return '上下文已过期或不存在，请重新调用 get_symbol_technical_context。';
+      const which = asString(args.catalog);
+      return preview(formatCandidates(snap.catalog, which === 'conditions' ? 'conditions' : 'levels'), 6000);
+    },
+  },
+  {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'save_symbol_trade_plan',
+        description:
+          '提交标的交易计划。你只提交摘要、相比上一版的变化，以及从候选目录里挑出的价位ID与条件ID组合；' +
+          '阶段、趋势、结构、风险、止盈止损、仓位、主动作由后端从证据编译，不接受你填写。' +
+          '每个情景必须同时给触发条件与失效条件，否则会被拒。' +
+          '校验失败会返回结构化错误与可用候选ID，按提示只修正问题项后可重试一次。',
+        parameters: {
+          type: 'object',
+          properties: {
+            contextId: { type: 'string' },
+            candidateModelVersion: { type: 'string', description: '来自 contextId 对应上下文' },
+            catalogHash: { type: 'string', description: '来自候选目录，防跨快照混用' },
+            horizon: { type: 'string', enum: ['next_session', 'swing'] },
+            summary: { type: 'string', description: '一句话说清当前阶段与该做什么' },
+            changes: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '相比上一版本变化的 1~3 条新证据；首次生成填「首次生成」',
+            },
+            levelSelections: {
+              type: 'array',
+              description: '从候选价位里挑，每条指定承担的角色',
+              items: {
+                type: 'object',
+                properties: {
+                  candidateLevelId: { type: 'string' },
+                  role: {
+                    type: 'string',
+                    enum: ['support', 'resistance', 'entry_trigger', 'add_trigger', 'invalidation', 'stop', 'target'],
+                  },
+                  label: { type: 'string', description: '图上短标签，可选' },
+                },
+                required: ['candidateLevelId', 'role'],
+              },
+            },
+            scenarioSelections: {
+              type: 'array',
+              description: '主路径必填；备选与风险路径可选',
+              items: {
+                type: 'object',
+                properties: {
+                  rank: { type: 'string', enum: ['primary', 'alternative', 'risk'] },
+                  name: { type: 'string' },
+                  conditionCandidateIds: { type: 'array', items: { type: 'string' } },
+                  invalidConditionCandidateIds: { type: 'array', items: { type: 'string' } },
+                  targetCandidateLevelIds: { type: 'array', items: { type: 'string' } },
+                },
+                required: ['rank', 'name', 'conditionCandidateIds', 'invalidConditionCandidateIds'],
+              },
+            },
+          },
+          // candidateModelVersion 必填：validateProposal 把它不匹配判为 catalog_mismatch，
+          // 若 schema 允许省略，模型合法省略也会被拒，两次后白白降级成观察计划
+          required: [
+            'contextId',
+            'candidateModelVersion',
+            'catalogHash',
+            'horizon',
+            'summary',
+            'levelSelections',
+            'scenarioSelections',
+          ],
+        },
+      },
+    },
+    run: async (args, ctx) => {
+      const proposal = args as unknown as SymbolTradePlanProposal;
+      try {
+        const plan = symbolPlanOrch.submitProposal(proposal, { runId: ctx.runId });
+        proposalRetries.delete(proposal.contextId);
+        return (
+          `已保存计划 v${plan.version}（${plan.code} ${plan.name}）：阶段 ${plan.marketPhase}，` +
+          `账户动作 ${plan.primaryAction}，${plan.levels.length} 条关键位已同步到 K 线图，` +
+          `${plan.scenarios.length} 个情景。建议仓位上限 ${plan.risk.suggestedPositionPct ?? '—'}%，` +
+          `结构止损 ${plan.risk.structuralStop ?? '—'}，有效期至 ${plan.expiresAt ?? '未设定'}。`
+        );
+      } catch (e) {
+        if (e instanceof symbolPlanOrch.ProposalRejected) {
+          // 同一份上下文连续两次被拒：别再让模型空转重试，落一份观察计划把结论固定下来，
+          // 用户至少能看到「为什么没给出可执行计划」，而不是一个什么都没有的标的
+          // ponytail: 非原文、按接口语义重建——原实现用的是自带 +1 的 bumpProposalRetry，
+          // 本文件恢复出的是只负责写入+TTL 清扫的 setProposalRetries，故读增写拆成两步，语义等价
+          const tries = (proposalRetries.get(proposal.contextId)?.tries ?? 0) + 1;
+          setProposalRetries(proposal.contextId, tries);
+          if (tries >= 2) {
+            proposalRetries.delete(proposal.contextId);
+            const reason = e.issues.map((i) => i.message).join('；');
+            const draft = symbolPlanOrch.fallbackDraft(proposal.contextId, reason, {
+              runId: ctx.runId,
+            });
+            if (draft) {
+              return (
+                `提案两次未通过校验，已降级为观察计划 v${draft.version}（不给出可执行点位）。` +
+                `原因：${preview(reason, 1500)}`
+              );
+            }
+          }
+          return preview(symbolPlanOrch.formatIssuesForRetry(e.issues), 6000);
+        }
+        return `保存计划失败：${e instanceof Error ? e.message : String(e)}`;
+      }
+    },
+  },
+  {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'remove_kline_mark',
+        description:
+          '删除一条 K 线标注（结论已失效、或打错了）。id 从 list_kline_marks 获取。' +
+          '只在结论确实作废时用，历史标注是用户复核判断质量的依据，不要为了清爽随意删。' +
+          '交易计划同步出来的计划标注不可删，只随新版本计划自动失效；要改结论请提交新版本计划。',
+        parameters: {
+          type: 'object',
+          properties: { id: { type: 'string', description: '标注 id' } },
+          required: ['id'],
+        },
+      },
+    },
+    run: async (args) => {
+      const id = asString(args.id).trim();
+      const r = symbolMarks.removeMark(id);
+      if (r === 'ok') return `已删除标注 ${id}。`;
+      if (r === 'plan_protected') {
+        return `标注 ${id} 属于交易计划（含版本号），不可删除：计划标注只随新版本计划自动失效，以保留版本可追溯。若结论已变，请提交新版本计划。`;
+      }
+      return `标注 ${id} 不存在。`;
+    },
+  },
 ];
 
 /**
@@ -2088,6 +2488,12 @@ const TOOL_GROUP: Record<string, string> = {
   propose_skill_update: '战法',
   notify_telegram: '通知',
   think: '推理',
+  list_kline_marks: '标的跟踪',
+  add_kline_mark: '标的跟踪',
+  remove_kline_mark: '标的跟踪',
+  get_symbol_technical_context: '标的计划',
+  list_symbol_plan_candidates: '标的计划',
+  save_symbol_trade_plan: '标的计划',
 };
 
 /** 工具名 → 挂载条件，供工具页展示与启停归类 */
@@ -2190,7 +2596,9 @@ export function buildSearchToolDef(): OpenAI.Chat.Completions.ChatCompletionTool
         '用自然语言/关键词描述你需要的能力，命中的工具会被加载进后续可调用工具列表。' +
         '示例：查行情写「行情/资金/估值」，下单写「妙想模拟盘 下单 买卖」，选股写「选股 筛选」，' +
         '研报写「券商研报 评级」，热点写「全网热点 新闻」，大盘写「大盘 指数 情绪」，' +
-        'ETF 写「ETF 信号」，计划写「今日计划 复盘」，自选写「自选股」，决策写「多空辩论 操作建议」。',
+        'ETF 写「ETF 信号」，计划写「今日计划 复盘」，自选写「自选股」，决策写「多空辩论 操作建议」，' +
+        '往 K 线图上画支撑压力/买卖点写「标注 打点」，' +
+        '生成某标的的技术交易计划（阶段/触发/失效/止盈止损）写「标的计划 K线阶段 触发失效」。',
       parameters: {
         type: 'object',
         properties: {

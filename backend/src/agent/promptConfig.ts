@@ -21,6 +21,9 @@ export const PROMPT_KEYS = {
   planReeval: 'plan_reevaluate',
   // 板块作战台 AI 行动建议：统一行动结构输出契约（结论/理由/证据/失效条件/动作）
   boardAction: 'board_action_structure',
+  // 标的专属会话（K 线弹窗 Agent 页签）注入的两段：常驻标的上下文 + 一键生成计划的标准指令
+  symbolSession: 'symbol_session_context',
+  symbolPlanGenerate: 'symbol_plan_generate',
 } as const;
 
 const BASE_SYSTEM_PROMPT = `你是一个 A 股投研与交易助手，运行在用户自建的选股平台中。
@@ -69,6 +72,29 @@ const BOARD_ACTION_PROMPT = `你是 A 股板块主线研判助手。基于给定
 }
 要求：基于底稿事实，不编造数字；action 必须是给定七个标签之一；数组各 2-4 条，精炼。`;
 
+/**
+ * 标的专属会话前缀：K 线弹窗 Agent 页签的每轮提问都会前置这段，
+ * 使模型无需追问即可锁定标的、并知道分析结论可以落到 K 线图与计划卡片上。
+ * 占位符：{code} 标的代码、{name} 标的名称（无名称时为空串）。
+ */
+const SYMBOL_SESSION_PROMPT = `【当前跟踪标的】{code}{name}
+（本会话所有分析默认针对该标的。
+要给「下一交易日/后续一段时间该怎么做」这类完整判断时，走结构化计划流程：先用 search_tools 检索「标的计划 K线阶段 触发失效」加载计划工具，再依次调 get_symbol_technical_context → list_symbol_plan_candidates（levels 与 conditions）→ save_symbol_trade_plan；阶段、风险、仓位、主动作由后端算定，你只挑候选 ID 并写摘要，禁止自己写价格数字。
+只是随手标一条线时，用 search_tools 检索「标注 打点」，再用 list_kline_marks 查重、add_kline_mark 打点）`;
+
+/**
+ * 一键生成标的交易计划的标准指令：由 Agent 页签的两个快捷按钮触发，
+ * 把 horizon 钉死在用户点的那条车道上，并要求必须真正落库，否则计划卡片仍是空的。
+ * 占位符：{horizon} 车道枚举值、{horizonLabel} 车道中文名。
+ */
+const SYMBOL_PLAN_GENERATE_PROMPT = `## 本轮任务：生成 horizon={horizon}（{horizonLabel}）的技术交易计划
+- 本轮只处理 horizon={horizon} 这一条车道。get_symbol_technical_context 与 save_symbol_trade_plan 的 horizon 都必须传 {horizon}，禁止改成另一条车道，也禁止一轮里同时生成两条。
+- 工具序列固定，不可跳步：get_symbol_technical_context（horizon={horizon}）→ list_symbol_plan_candidates（catalog=levels 与 catalog=conditions 各取一次）→ save_symbol_trade_plan。三次调用必须用同一个 contextId。
+- 阶段、趋势、风险、仓位、主动作全部由后端算定，你不能修改，只能解释。价位与条件只能按 candidateId 从候选目录里挑，禁止自己写价格数字、禁止发明条件。
+- 必须真正调用 save_symbol_trade_plan 才算完成本轮任务。只在对话里口述结论、没有落库的，视为未完成，要继续把提案提交上去；提案被拒就按返回的问题清单修正后重提。
+- summary 用一两句话说清「现在该做什么、什么条件下改变动作」；相对上一版有变化时写进 changes。
+- 收尾用一句话回报已保存的计划版本号与主动作，提示用户可切到「交易计划」页签核对。`;
+
 /** 上下文压缩器（compactMessages）的 system 指令 */
 const COMPACT_SYSTEM =
   '你是对话压缩器。把以下 A 股投研 agent 的较早对话与工具结果压成简洁的交接摘要，' +
@@ -107,6 +133,18 @@ const DEFS: PromptDef[] = [
     label: '板块行动结构研判',
     hint: '板块作战台「AI 行动建议」的输出契约：要求返回结论/理由/证据/失效条件/动作的严格 JSON。',
     base: BOARD_ACTION_PROMPT,
+  },
+  {
+    key: PROMPT_KEYS.symbolSession,
+    label: '标的会话上下文',
+    hint: 'K 线弹窗 Agent 页签每轮提问的前缀，锁定当前标的并指明打点与计划流程。占位符：{code} {name}。',
+    base: SYMBOL_SESSION_PROMPT,
+  },
+  {
+    key: PROMPT_KEYS.symbolPlanGenerate,
+    label: '标的计划一键生成指令',
+    hint: 'Agent 页签「生成下一交易日计划 / 1~4周波段计划」按钮注入的标准指令，钉死 horizon 并要求必须落库。占位符：{horizon} {horizonLabel}。',
+    base: SYMBOL_PLAN_GENERATE_PROMPT,
   },
 ];
 

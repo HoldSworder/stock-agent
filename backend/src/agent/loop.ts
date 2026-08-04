@@ -674,10 +674,14 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
       compacted: didCompact,
     });
 
-    const toolCalls = [...toolCallAcc.entries()]
-      .sort((a, b) => a[0] - b[0])
-      .map(([, v]) => v)
-      .filter((v) => v.name);
+    // 最后一步已不下发 tools，但个别模型（如 deepseek）仍会照抄前文继续吐工具调用；
+    // 一律丢弃不执行，直接以已累计的正文收尾，避免整轮以「超过最大步数」告败、报告丢失。
+    const toolCalls = isFinalStep
+      ? []
+      : [...toolCallAcc.entries()]
+          .sort((a, b) => a[0] - b[0])
+          .map(([, v]) => v)
+          .filter((v) => v.name);
 
     // 无工具调用：本轮为最终回答
     if (toolCalls.length === 0) {
@@ -695,12 +699,10 @@ export async function runAgent(opts: RunAgentOptions): Promise<RunAgentResult> {
         appendRunMessage({ runId: opts.runId, role: 'assistant', content });
         emit({ type: 'message', role: 'assistant', content });
       }
-      return {
-        status: 'success',
-        outputText: buildOutput(assistantTexts),
-        promptTokens,
-        completionTokens,
-      };
+      const outputText = buildOutput(assistantTexts);
+      // 收尾步被丢弃工具调用且全程没攒到任何正文：无可交付内容，仍按步数耗尽报错
+      if (isFinalStep && !outputText.trim()) break;
+      return { status: 'success', outputText, promptTokens, completionTokens };
     }
 
     // 带工具调用的这一轮里若有正文（模型常把完整报告写在此处），一并纳入最终输出
