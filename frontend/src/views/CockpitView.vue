@@ -1,18 +1,19 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import dayjs from 'dayjs';
 import { useRoute, useRouter } from 'vue-router';
 import { ElMessage, ElMessageBox } from 'element-plus';
-import { Refresh, Warning, VideoPause, VideoPlay, TopRight } from '@element-plus/icons-vue';
+import { Refresh, Warning, VideoPause, VideoPlay } from '@element-plus/icons-vue';
 import { api } from '@/api';
 import { useWatchStore } from '@/stores/watch';
 import AiAnalysisHub from '@/components/AiAnalysisHub.vue';
 import StockLink from '@/components/StockLink.vue';
-import MarketRegimeBadge from '@/components/MarketRegimeBadge.vue';
-import { ACTION_TAG_TYPE, EXPO_STATUS_LABEL, EXPO_STATUS_TYPE } from '@/constants/boardTags';
+import MoneyEffectBadge from '@/components/MoneyEffectBadge.vue';
+import PanoramaPanel from '@/components/PanoramaPanel.vue';
+import CockpitFocusPanel from '@/components/CockpitFocusPanel.vue';
+import { EXPO_STATUS_LABEL, EXPO_STATUS_TYPE } from '@/constants/boardTags';
 import type {
   BoardExposureHolding,
-  BoardWorkbenchItem,
   CockpitEvent,
   CockpitModuleSummary,
   CockpitOverview,
@@ -26,7 +27,6 @@ const acting = ref(false);
 // 当日盈亏归因（只读旁路，收盘后落库；驾驶舱仅显示账户贡献 + 最大赢/输家）
 const attribution = ref<PositionAttributionReport | null>(null);
 // 今日主线作战台（旁路：投影自主线共识，含操盘动作标签）
-const boardItems = ref<BoardWorkbenchItem[]>([]);
 // 持仓/自选板块暴露（旁路：主线板块成分 ∩ 我的持仓/自选）
 const exposure = ref<BoardExposureHolding[]>([]);
 
@@ -55,10 +55,7 @@ const safety = computed<SafetyState | null>(() => data.value?.safety ?? null);
 // 自动成交实时流（auto_buy/auto_sell/rejected），经盯盘总线 /ws/watch 推送
 const watchStore = useWatchStore();
 const autoTrades = computed(() => watchStore.trades.slice(0, 8));
-const plan = computed(() => data.value?.plan ?? null);
-const planStance = computed(() => data.value?.planStance ?? null);
-const regime = computed(() => data.value?.regime ?? null);
-const themes = computed(() => data.value?.themes ?? []);
+const moneyEffect = computed(() => data.value?.moneyEffect ?? null);
 const modules = computed(() => data.value?.modules ?? []);
 const screenerPicks = computed(() => data.value?.screenerPicks ?? []);
 const events = computed(() => data.value?.events ?? []);
@@ -66,17 +63,6 @@ const events = computed(() => data.value?.events ?? []);
 /** 跳转模块全文页（带可选 query） */
 function goModule(m: CockpitModuleSummary) {
   void router.push(m.routeQuery ? { path: m.route, query: m.routeQuery } : m.route);
-}
-
-// 大盘方向标签（与计划页一致：偏多红 / 偏空绿 / 中性）
-const BIAS_META: Record<'bull' | 'bear' | 'neutral', { label: string; cls: string }> = {
-  bull: { label: '偏多', cls: 'up' },
-  bear: { label: '偏空', cls: 'down' },
-  neutral: { label: '中性', cls: '' },
-};
-
-function goPlan() {
-  void router.push('/plan');
 }
 
 const KIND_LABEL: Record<CockpitEvent['kind'], string> = {
@@ -99,9 +85,6 @@ const kindTag = (k: CockpitEvent['kind']) =>
           : 'info';
 const sevDot = (s: CockpitEvent['severity']) =>
   s === 'high' ? 'high' : s === 'warn' ? 'warn' : 'info';
-// 强度热度分级，与中线雷达保持一致（hot/mid/low）
-const strengthClass = (v: number) => (v >= 70 ? 'hot' : v >= 50 ? 'mid' : 'low');
-const fmtPct = (v: number | null) => (v == null ? '—' : `${(v * 100).toFixed(1)}%`);
 
 async function load() {
   loading.value = true;
@@ -112,24 +95,26 @@ async function load() {
   } finally {
     loading.value = false;
   }
-  // 归因为只读旁路，独立拉取，失败不影响驾驶舱主视图
+  // 以下三块为只读旁路，独立拉取。失败时记下原因并在对应位置显示说明——
+  // 从前是 catch 后置空导致整块 section 凭空消失，用户看到的是「功能没了」而不是「数据没来」。
   try {
     attribution.value = await api.attribution();
-  } catch {
+    sideErrors.attribution = '';
+  } catch (e) {
     attribution.value = null;
-  }
-  // 主线作战台 + 板块暴露：旁路拉取（依赖 breadth 取数，稍慢），失败不影响主视图
-  try {
-    boardItems.value = (await api.boards.workbench()).items.slice(0, 6);
-  } catch {
-    boardItems.value = [];
+    sideErrors.attribution = e instanceof Error ? e.message : String(e);
   }
   try {
     exposure.value = (await api.boards.exposure()).holdings;
-  } catch {
+    sideErrors.exposure = '';
+  } catch (e) {
     exposure.value = [];
+    sideErrors.exposure = e instanceof Error ? e.message : String(e);
   }
 }
+
+/** 旁路区块的取数失败原因（空串=正常）；显式呈现，避免区块静默消失 */
+const sideErrors = reactive({ attribution: '', exposure: '' });
 
 
 // 贡献（小数）格式化为百分点文本：+0.42pct / -0.18pct
@@ -239,15 +224,19 @@ onUnmounted(() => {
       </div>
     </div>
     <div class="page-sub">
-      一屏概览 · 急停 · 跨模块事件时间线；AI 分析中心一处发起 / 看历史 / 定时调度。
+      系统唯一入口：各页结论收口于此，明细点各块「查看 →」下钻；急停与跨模块事件时间线常驻。
       <span v-if="data" class="as-of">更新于 {{ dayjs(data.asOf).format('MM-DD HH:mm:ss') }}</span>
     </div>
 
     <el-tabs v-model="tab" class="cockpit-tabs">
       <el-tab-pane label="驾驶舱" name="cockpit">
         <div v-loading="loading">
-          <!-- 大盘阶段研判（最近一次收盘快照，完整明细见大盘页） -->
-          <MarketRegimeBadge v-if="regime" :regime="regime" />
+          <!-- 今日全景：四层结论层，统一读模型（与大盘/纪律/计划页同源口径）。
+               大盘阶段、计划兑现、强势主线、主线作战台已并入其中，此处不再重复呈现。 -->
+          <PanoramaPanel />
+
+          <!-- 首板赚钱效应（883994·最近一次快照，完整趋势见大盘页情绪 tab） -->
+          <MoneyEffectBadge v-if="moneyEffect" :money-effect="moneyEffect" class="cockpit-me" />
 
           <!-- 安全总闸 / 急停 -->
           <div v-if="safety" class="safety-bar" :class="{ killed: safety.killSwitch }">
@@ -335,100 +324,16 @@ onUnmounted(() => {
             </el-button>
           </div>
 
-          <!-- ===== 盘前：今天能不能做 / 主线是什么 / 我的计划 ===== -->
-          <div class="flow-head"><span class="flow-tag pre">盘前</span>今天能不能做 · 主线是什么 · 今日计划</div>
-
-          <div class="grid">
-            <!-- 当日计划兑现 -->
-            <section class="panel">
-              <div class="panel-head">
-                <span class="section-title">今日计划兑现</span>
-                <span class="panel-head-right">
-                  <span v-if="plan" class="panel-meta num">{{ plan.planDate }}</span>
-                  <el-button link type="primary" :icon="TopRight" @click="goPlan">查看完整计划</el-button>
-                </span>
-              </div>
-              <div v-if="plan" class="plan-body">
-                <!-- 大盘定调（直达计划全文的轻量摘要） -->
-                <div v-if="planStance" class="plan-stance">
-                  <span
-                    v-if="planStance.bias"
-                    class="stance-bias"
-                    :class="BIAS_META[planStance.bias].cls"
-                  >
-                    {{ BIAS_META[planStance.bias].label }}
-                  </span>
-                  <span v-if="planStance.positionPct != null" class="stance-pos num">
-                    仓位 {{ planStance.positionPct }}%
-                  </span>
-                  <span v-if="planStance.summary" class="stance-summary">{{ planStance.summary }}</span>
-                </div>
-                <div class="plan-metrics">
-                  <div class="hit-rate">
-                    <span class="hit-value num">{{ fmtPct(plan.hitRate) }}</span>
-                    <span class="hit-label">兑现率</span>
-                  </div>
-                  <div class="plan-stats">
-                    <div class="ps"><span class="ps-n num">{{ plan.total }}</span><span class="ps-l">标的</span></div>
-                    <div class="ps"><span class="ps-n num">{{ plan.triggered }}</span><span class="ps-l">已触发</span></div>
-                    <div class="ps"><span class="ps-n num">{{ plan.done }}</span><span class="ps-l">已完成</span></div>
-                    <div class="ps"><span class="ps-n num">{{ plan.pending }}</span><span class="ps-l">待触发</span></div>
-                    <div class="ps"><span class="ps-n num">{{ plan.invalid }}</span><span class="ps-l">已失效</span></div>
-                  </div>
-                </div>
-              </div>
-              <el-empty v-else :image-size="60" description="今日暂无计划" />
-            </section>
-
-            <!-- 强势主线 -->
-            <section class="panel">
-              <div class="panel-head">
-                <span class="section-title">强势主线</span>
-                <span class="panel-meta">Top {{ themes.length }}</span>
-              </div>
-              <div v-if="themes.length" class="themes">
-                <div v-for="t in themes" :key="t.id" class="theme-row">
-                  <span class="theme-name">{{ t.theme }}</span>
-                  <div class="bar">
-                    <div
-                      class="bar-fill"
-                      :class="strengthClass(t.strength)"
-                      :style="{ width: `${Math.min(t.strength, 100)}%` }"
-                    />
-                  </div>
-                  <span class="theme-strength num">{{ t.strength }}</span>
-                </div>
-              </div>
-              <el-empty v-else :image-size="60" description="暂无活跃主线" />
-            </section>
-          </div>
-
-          <!-- 今日主线作战台：投影自主线共识，每条给操盘动作标签（观察/试错/持有/加仓候选/减仓/回避/等待） -->
-          <section class="panel">
-            <div class="panel-head">
-              <span class="section-title">今日主线作战台</span>
-              <span class="panel-meta">确定性锚 + 多源协同 + 中线趋势 · 仅研判不下单</span>
-            </div>
-            <div v-if="boardItems.length" class="wb-list">
-              <div v-for="b in boardItems" :key="b.boardCode ?? b.board" class="wb-row">
-                <el-tag size="small" effect="dark" :type="ACTION_TAG_TYPE[b.actionTag]">
-                  {{ b.actionTag }}
-                </el-tag>
-                <span class="wb-board">{{ b.board }}</span>
-                <span class="wb-cycle">{{ b.cycleFit }}</span>
-                <span v-if="b.phase" class="wb-phase">{{ b.phase }}</span>
-                <span v-if="b.strength != null" class="wb-strength num">强度{{ b.strength }}</span>
-                <StockLink v-if="b.etf" :code="b.etf.code" :name="b.etf.name" class="wb-etf" />
-                <span v-for="r in b.riskTags" :key="r" class="wb-risk">{{ r }}</span>
-              </div>
-            </div>
-            <el-empty v-else :image-size="60" description="暂无主线（收盘后板块新高宽度确认主线时生成）" />
-          </section>
-
           <!-- ===== 盘中：我的票有没有风险 / 下一步动作 ===== -->
           <div class="flow-head"><span class="flow-tag mid">盘中</span>持仓风险 · 主线暴露 · 自动成交</div>
 
+          <!-- 关注标的：自维护小清单，点标的直达详情弹窗（K线 + 交易规划 + 对话） -->
+          <CockpitFocusPanel />
+
           <!-- 持仓/自选板块暴露：我的票是否处于主线 / 退潮 / 拥挤 -->
+          <div v-if="sideErrors.exposure" class="side-fail panel">
+            ⚠ 板块暴露取数失败：{{ sideErrors.exposure }}（数据未到，不是功能下线）
+          </div>
           <section v-if="exposure.length" class="panel">
             <div class="panel-head">
               <span class="section-title">持仓 / 自选板块暴露</span>
@@ -464,7 +369,10 @@ onUnmounted(() => {
           <div class="flow-head"><span class="flow-tag post">盘后</span>盈亏归因 · 模块产出 · 事件复盘</div>
 
           <!-- 当日盈亏归因（精简卡）：账户当日贡献 + 最大赢家/输家，详情见持仓页 -->
-          <div v-if="attribution && attribution.items.length" class="attr-card">
+          <div v-if="sideErrors.attribution" class="side-fail">
+            ⚠ 当日归因取数失败：{{ sideErrors.attribution }}（数据未到，不是功能下线）
+          </div>
+          <div v-else-if="attribution && attribution.items.length" class="attr-card">
             <span class="attr-card-title">当日盈亏归因</span>
             <span class="attr-card-total">
               账户贡献
@@ -576,6 +484,9 @@ onUnmounted(() => {
 }
 
 /* ---- 安全总闸 / 急停 ---- */
+.cockpit-me {
+  margin: 0 0 12px;
+}
 .safety-bar {
   display: flex;
   align-items: center;
@@ -781,15 +692,7 @@ onUnmounted(() => {
 }
 
 /* ---- 概览面板 ---- */
-.grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 16px;
-}
 @media (max-width: 900px) {
-  .grid {
-    grid-template-columns: 1fr;
-  }
 }
 .panel {
   background: var(--bg-2);
@@ -818,114 +721,14 @@ onUnmounted(() => {
 }
 
 /* 计划兑现 */
-.plan-body {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-.plan-stance {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-.stance-bias {
-  font-weight: 700;
-  font-size: 15px;
-}
 .stance-bias.up {
   color: var(--el-color-danger, #f56c6c);
 }
 .stance-bias.down {
   color: var(--el-color-success, #67c23a);
 }
-.stance-pos {
-  font-size: 13px;
-  color: var(--text-2);
-}
-.stance-summary {
-  font-size: 13px;
-  color: var(--text-2);
-  line-height: 1.5;
-  flex: 1;
-  min-width: 0;
-}
-.plan-metrics {
-  display: flex;
-  align-items: center;
-  gap: 22px;
-}
-.hit-rate {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  min-width: 92px;
-  padding-right: 20px;
-  border-right: 1px solid var(--border-soft);
-}
-.hit-value {
-  font-size: 30px;
-  font-weight: 700;
-  line-height: 1.1;
-  color: var(--brand);
-}
-.hit-label {
-  font-size: 12px;
-  color: var(--text-2);
-  margin-top: 4px;
-}
-.plan-stats {
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  gap: 10px;
-  flex: 1;
-}
-.ps {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 3px;
-}
-.ps-n {
-  font-size: 18px;
-  font-weight: 600;
-  color: var(--text-0);
-}
-.ps-l {
-  font-size: 11.5px;
-  color: var(--text-2);
-}
 
 /* 强势主线 */
-.themes {
-  display: flex;
-  flex-direction: column;
-  gap: 9px;
-}
-.theme-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.theme-name {
-  width: 92px;
-  font-size: 13px;
-  color: var(--text-1);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.bar {
-  flex: 1;
-  height: 6px;
-  background: var(--bg-3);
-  border-radius: 3px;
-  overflow: hidden;
-}
-.bar-fill {
-  height: 100%;
-  border-radius: 3px;
-}
 .bar-fill.hot {
   background: var(--up);
 }
@@ -934,12 +737,6 @@ onUnmounted(() => {
 }
 .bar-fill.low {
   background: var(--text-2);
-}
-.theme-strength {
-  width: 30px;
-  text-align: right;
-  font-size: 13px;
-  color: var(--text-1);
 }
 
 /* ---- 模块总结卡 ---- */
@@ -1171,42 +968,12 @@ onUnmounted(() => {
 }
 
 /* 主线作战台行 */
-.wb-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
+.side-fail {
+  font-size: 12.5px;
+  color: #e6a23c;
+  line-height: 1.6;
+  margin: 8px 0;
 }
-.wb-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  font-size: 13px;
-}
-.wb-board {
-  font-weight: 600;
-  color: var(--text-0);
-}
-.wb-cycle,
-.wb-phase {
-  font-size: 12px;
-  color: var(--text-2);
-}
-.wb-strength {
-  font-size: 12px;
-  color: var(--text-1);
-}
-.wb-etf {
-  font-size: 12px;
-}
-.wb-risk {
-  font-size: 11px;
-  color: var(--status-warn, #e6a23c);
-  border: 1px solid currentColor;
-  border-radius: 3px;
-  padding: 0 4px;
-}
-
 /* 持仓板块暴露行 */
 .expo-list {
   display: flex;

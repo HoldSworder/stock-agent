@@ -14,6 +14,7 @@ import type {
   DailyPlanEvent,
   DailyPlanItem,
   DailyPlanSummary,
+  DisciplineReport,
   EtfAction,
   EtfSignal,
   PlanDirection,
@@ -68,11 +69,19 @@ async function loadLive() {
   quoteMap.value = new Map();
   etfSignalMap.value = new Map();
   realPortfolio.value = null;
+  disciplineReport.value = null;
   // 真实持仓独立拉取（供仓位对照），失败静默
   void api
     .getRealPositions()
     .then((rp) => {
       realPortfolio.value = rp;
+    })
+    .catch(() => {});
+  // 纪律体检独立拉取（供风险预算口径的仓位对照与超配股数），失败静默回退计划正文口径
+  void api.discipline
+    .check()
+    .then((r) => {
+      disciplineReport.value = r;
     })
     .catch(() => {});
   const list = detail.value?.items ?? [];
@@ -173,6 +182,7 @@ async function viewHistory(date: string) {
       quoteMap.value = new Map();
       etfSignalMap.value = new Map();
       realPortfolio.value = null;
+      disciplineReport.value = null;
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : String(e));
   } finally {
@@ -532,11 +542,18 @@ function actionTriggers(item: DailyPlanItem): { label: string; value: string; cl
 }
 
 // ===== C 建议仓位 vs 真实持仓对照 =====
+// 纪律体检（best-effort）：仓位对照以「风险预算档」为准，取不到才回退计划正文里的建议仓位。
+// 计划里的 positionPct 是 LLM 给的定性数字，风险预算档是按当前市场阶段 + 各票止损距离算出来的，
+// 两者冲突时应以后者为准，否则「建议仓位」和「纪律面板」会在同一屏给出两个不同口径。
+const disciplineReport = ref<DisciplineReport | null>(null);
+
 const positionCompare = computed(() => {
   if (!isLive.value) return null;
   const rp = realPortfolio.value;
   if (!rp) return null;
-  const target = plan.value?.marketStance?.positionPct ?? null;
+  const disc = disciplineReport.value;
+  const target = disc?.account.totalMaxPositionPct ?? plan.value?.marketStance?.positionPct ?? null;
+  const targetSource = disc ? `${disc.regimePhase ?? '震荡'}档风险预算上限` : '计划正文建议';
   const actual = Math.round(rp.positions.reduce((a, p) => a + (p.positionRate || 0), 0));
   const diff = target != null ? target - actual : null;
   const heldCodes = new Set(rp.positions.map((p) => p.code));
@@ -544,7 +561,11 @@ const positionCompare = computed(() => {
   const toReduce = items.value.filter(
     (i) => (i.direction === 'reduce' || i.direction === 'sell') && heldCodes.has(i.code),
   );
-  return { target, actual, diff, toBuild, toReduce };
+  // 纪律层算出「超出本档允许仓位」的持仓，即便计划没写也要提示减仓，并给到具体股数
+  const overweight = (disc?.items ?? [])
+    .filter((i) => i.sizing && i.sizing.reduceShares > 0)
+    .map((i) => ({ code: i.code, name: i.name, reduceShares: i.sizing!.reduceShares }));
+  return { target, targetSource, actual, diff, toBuild, toReduce, overweight };
 });
 
 // ===== D 盘中失效预警：pending 标的的失效条件提前置顶 =====
@@ -840,7 +861,7 @@ onUnmounted(() => {
         <div class="poscmp">
           <div class="poscmp-cards">
             <div class="card">
-              <div class="card-label">建议总仓位</div>
+              <div class="card-label">建议总仓位<span class="card-src">{{ positionCompare.targetSource }}</span></div>
               <div class="card-value num">{{ positionCompare.target != null ? positionCompare.target + '%' : '—' }}</div>
             </div>
             <div class="card">
@@ -866,6 +887,13 @@ onUnmounted(() => {
             <span v-for="it in positionCompare.toReduce" :key="it.id" class="poscmp-chip">
               <StockLink :code="it.code" :name="it.name" />
               <el-tag size="small" :type="DIR_META[it.direction].type as any" effect="plain">{{ DIR_META[it.direction].label }}</el-tag>
+            </span>
+          </div>
+          <div v-if="positionCompare.overweight.length" class="poscmp-line">
+            <span class="poscmp-cap down">超出风险预算</span>
+            <span v-for="it in positionCompare.overweight" :key="it.code" class="poscmp-chip">
+              <StockLink :code="it.code" :name="it.name" />
+              <span class="sub num">减 {{ it.reduceShares }} 股</span>
             </span>
           </div>
         </div>
@@ -1462,6 +1490,11 @@ onUnmounted(() => {
   font-size: 12px;
   color: var(--el-text-color-secondary);
   margin-bottom: 6px;
+}
+.card-src {
+  margin-left: 6px;
+  font-size: 11px;
+  opacity: 0.75;
 }
 .card-value {
   font-size: 20px;

@@ -2,7 +2,12 @@
 import { computed, onMounted, reactive, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import { api } from '@/api';
-import type { DataSourceHealth, DataSourceInfo, DataSourceRoute } from '@stock-agent/shared';
+import type {
+  DataSourceHealth,
+  DataSourceInfo,
+  DataSourceRoute,
+  KlineCacheStats,
+} from '@stock-agent/shared';
 
 // 数据源中心：统一管理所有外部取数（行情/选股/账本/资讯/研报/热点/本地）。
 // 总览行（始终可见）+ 点击展开详情（凭据/统计/健康/操作），是各模块取数路径的单一收口入口。
@@ -162,7 +167,39 @@ function fmtTime(iso: string | null): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
 }
 
-onMounted(load);
+function fmtDateTime(iso: string | null): string {
+  if (!iso) return '未运行';
+  const d = new Date(iso);
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${mm}-${dd} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+// 日K本地缓存状态（上游慢时由它顶住取数，避免板块宽度/情绪/纪律体检整块降级）
+const klineCache = ref<KlineCacheStats | null>(null);
+const kcBusy = ref(false);
+
+async function loadKlineCache(): Promise<void> {
+  klineCache.value = await api.datasource.klineCache().catch(() => null);
+}
+
+async function doPrewarm(full: boolean): Promise<void> {
+  kcBusy.value = true;
+  try {
+    const r = await api.datasource.klineCachePrewarm(full);
+    ElMessage.success(`${full ? '全量重刷' : '预热'}完成：${r.ok}/${r.total} 成功`);
+    await loadKlineCache();
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '预热失败');
+  } finally {
+    kcBusy.value = false;
+  }
+}
+
+onMounted(() => {
+  void load();
+  void loadKlineCache();
+});
 </script>
 
 <template>
@@ -215,6 +252,47 @@ onMounted(load);
           </span>
           <span v-if="r.lastServed" class="route-served">当前命中：{{ NAME_BY_ID[r.lastServed] ?? r.lastServed }}</span>
         </div>
+      </div>
+
+      <!-- 日K本地缓存：盘前预热 + 盘中增量 + 每周全量重刷（上游慢时由它顶住，避免整块降级） -->
+      <div v-if="klineCache" class="kc-card">
+        <div class="kc-head">
+          <span class="kc-title">日K本地缓存</span>
+          <span class="kc-sub">
+            盘前 09:10 预热 · 盘中每 10 分钟增量 · 每周六全量重刷（复权基准 {{ klineCache.adjBase || '—' }}）
+          </span>
+          <span class="kc-actions">
+            <el-button size="small" :loading="kcBusy" @click="doPrewarm(false)">立即预热</el-button>
+            <el-button size="small" :loading="kcBusy" @click="doPrewarm(true)">全量重刷</el-button>
+          </span>
+        </div>
+        <div class="kc-grid">
+          <div class="kc-item">
+            <span class="kc-v">{{ klineCache.codeCount }}</span>
+            <span class="kc-k">已缓存标的</span>
+          </div>
+          <div class="kc-item">
+            <span class="kc-v">{{ klineCache.rowCount }}</span>
+            <span class="kc-k">日线行数</span>
+          </div>
+          <div class="kc-item">
+            <span class="kc-v" :class="{ ok: klineCache.freshCodeCount > 0 }">{{ klineCache.freshCodeCount }}</span>
+            <span class="kc-k">覆盖至 {{ klineCache.latestDate ?? '—' }}</span>
+          </div>
+          <div class="kc-item">
+            <span class="kc-v small">{{ fmtDateTime(klineCache.lastPrewarmAt) }}</span>
+            <span class="kc-k">最近预热</span>
+          </div>
+          <div class="kc-item">
+            <span class="kc-v small">{{ fmtDateTime(klineCache.lastIntradayAt) }}</span>
+            <span class="kc-k">最近盘中增量</span>
+          </div>
+          <div class="kc-item">
+            <span class="kc-v small">{{ fmtDateTime(klineCache.lastFullRefreshAt) }}</span>
+            <span class="kc-k">最近全量重刷</span>
+          </div>
+        </div>
+        <div v-if="klineCache.lastError" class="kc-err">⚠ {{ klineCache.lastError }}</div>
       </div>
 
       <!-- 分组总览列表 -->
@@ -393,6 +471,63 @@ onMounted(load);
   flex-wrap: wrap;
   gap: 8px;
   font-size: 12.5px;
+}
+.kc-card {
+  margin-top: 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+.kc-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.kc-title {
+  font-weight: 600;
+  font-size: 13.5px;
+}
+.kc-sub {
+  flex: 1;
+  color: var(--text-2);
+  font-size: 12px;
+}
+.kc-actions {
+  display: flex;
+  gap: 6px;
+}
+.kc-grid {
+  margin-top: 10px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+}
+.kc-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.kc-v {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  font-weight: 600;
+}
+.kc-v.small {
+  font-size: 13px;
+}
+.kc-v.ok {
+  color: var(--up, #d64545);
+}
+.kc-k {
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+.kc-err {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--warn, #d98b00);
 }
 .route-label {
   font-family: var(--font-mono);

@@ -1,4 +1,4 @@
-import { desc } from 'drizzle-orm';
+import { desc, gte, sql } from 'drizzle-orm';
 import type {
   CockpitEvent,
   CockpitModuleSummary,
@@ -17,6 +17,7 @@ import { getSafetyState } from '../safety/guard';
 import { getTodayDetail, computePlanFulfillment } from '../plan/service';
 import { listThemes } from '../themes/service';
 import { getRegimeSummaryForCockpit } from '../regime/service';
+import { getMoneyEffectSummary } from '../moneyeffect/service';
 import { listVerdicts } from '../decision/verdictCache';
 import { listDisciplineEvents } from '../positions/discipline';
 import { listAlerts } from '../watch/store';
@@ -27,6 +28,9 @@ import {
   listReviews,
 } from '../repo';
 import { listRuns as listScreenRuns, getRunDetail as getScreenRunDetail } from '../screener/repo';
+import { countEtfAlertsToday, listEtfAlerts, listLayerStates } from '../etfwatch/store';
+import { countAlertsToday } from '../watch/store';
+import { listModes as listResearchModes, latestDaily as latestModeDaily } from '../modes/repo';
 
 // 驾驶舱聚合：纯只读、仅本地 DB 读取（不触发取数 / 不调 LLM / 不下单），保证一屏概览秒开。
 // 事件时间线把「持仓纪律 / 模拟成交 / 盯盘告警 / 决策研判」四类已落库事件合并按时间倒序，
@@ -195,14 +199,29 @@ function firstParagraph(text: string, max = 140): string {
   return para.length <= max ? para : `${para.slice(0, max)}…`;
 }
 
+/**
+ * 模块卡来源注册表。两种来源二选一：
+ *   latest —— AI 产出型（取最近一次落库正文，抽首段作摘要）；
+ *   build  —— 状态型（自己算出 headline/excerpt，供无 AI 正文的确定性域使用）。
+ *
+ * 之前只支持 latest，导致 ETF 盯盘、持仓纪律、情绪这些没有 AI 正文的域即使有产出也永远进不了驾驶舱。
+ * 新增域只需往本数组加一项，不必改 buildModuleSummaries。
+ */
 interface ModuleSource {
   key: string;
   title: string;
   route: string;
   routeQuery?: Record<string, string>;
-  latest: () => { createdAt: string | null; outputText: string | null } | undefined;
+  latest?: () => { createdAt: string | null; outputText: string | null } | undefined;
   /** 一键复盘为结构化 JSON，取 comprehensiveStance 作 headline */
   structured?: boolean;
+  /** 状态型来源：直接产出卡片内容；返回 null 表示该域当前无内容 */
+  build?: () => { headline: string; excerpt: string; createdAt: string | null } | null;
+}
+
+/** 今日（Asia/Shanghai）起始时刻的 ISO，用于「今日新增」类计数 */
+function todayStartIso(): string {
+  return `${shanghaiToday()}T00:00:00`;
 }
 
 const MODULE_SOURCES: ModuleSource[] = [
@@ -216,14 +235,165 @@ const MODULE_SOURCES: ModuleSource[] = [
     structured: true,
     latest: () => listReviews(3).find((r) => r.outputText),
   },
+  {
+    key: 'etf-watch',
+    title: 'ETF 多周期盯盘',
+    route: '/etf-watch',
+    build: () => {
+      const states = listLayerStates();
+      const alerts = listEtfAlerts(1, false);
+      if (states.length === 0 && alerts.length === 0) return null;
+      const held = states.filter((s) => s.heldLayers.length > 0);
+      return {
+        headline: `${held.length} 只在层 · 今日告警 ${countEtfAlertsToday()} 条`,
+        excerpt: held.length
+          ? held
+              .slice(0, 3)
+              .map((s) => `${s.name} L${s.heldLayers.join('/')}`)
+              .join('；')
+          : '暂无持层标的，等待首层触发',
+        createdAt: alerts[0]?.createdAt ?? states[0]?.updatedAt ?? null,
+      };
+    },
+  },
+  {
+    key: 'watch',
+    title: '实时盯盘',
+    route: '/watch',
+    build: () => {
+      const alerts = listAlerts(3).filter((a) => a.shouldAlert);
+      const n = countAlertsToday();
+      if (n === 0 && alerts.length === 0) return null;
+      return {
+        headline: `今日告警 ${n} 条`,
+        excerpt: alerts[0] ? `${alerts[0].name}：${alerts[0].adviceText || alerts[0].detail}` : '今日无需提醒的告警',
+        createdAt: alerts[0]?.createdAt ?? null,
+      };
+    },
+  },
+  {
+    key: 'discipline',
+    title: '持仓纪律',
+    route: '/positions',
+    build: () => {
+      const events = listDisciplineEvents(20);
+      const today = shanghaiToday();
+      const todays = events.filter((e) => e.createdAt.slice(0, 10) === today);
+      if (events.length === 0) return null;
+      const high = todays.filter((e) => e.severity === 'high').length;
+      return {
+        headline: todays.length === 0 ? '今日无新纪律事件' : `今日 ${todays.length} 条（高危 ${high}）`,
+        excerpt: events[0].detail,
+        createdAt: events[0].createdAt,
+      };
+    },
+  },
+  {
+    key: 'sentiment',
+    title: '市场情绪',
+    route: '/market',
+    routeQuery: { tab: 'sentiment' },
+    build: () => {
+      const row = db
+        .select()
+        .from(schema.sentimentSnapshots)
+        .orderBy(desc(schema.sentimentSnapshots.tradeDate))
+        .limit(1)
+        .get();
+      if (!row) return null;
+      return {
+        headline: `情绪 ${Math.round(row.indexScore)} · ${row.level} · ${row.phase}`,
+        excerpt: `最高连板 ${row.maxStreak ?? '—'} · 活跃度 ${row.activity ?? '—'}%`,
+        createdAt: row.updatedAt,
+      };
+    },
+  },
+  {
+    key: 'modes',
+    title: '模式跟踪',
+    route: '/modes',
+    build: () => {
+      const followed = listResearchModes().filter((m) => m.followed);
+      if (followed.length === 0) return null;
+      const lines = followed
+        .slice(0, 3)
+        .map((m) => {
+          const d = latestModeDaily(m.id);
+          return d ? `${m.name} ${fmtPctSigned(d.cumReturn)}` : `${m.name} 待跟踪`;
+        });
+      const newest = followed
+        .map((m) => latestModeDaily(m.id)?.date ?? null)
+        .filter((d): d is string => !!d)
+        .sort()
+        .pop();
+      return {
+        headline: `${followed.length} 个关注中`,
+        excerpt: lines.join('；'),
+        createdAt: newest ? `${newest}T15:10:00` : null,
+      };
+    },
+  },
+  {
+    key: 'kol',
+    title: '大V观点',
+    route: '/kol',
+    build: () => {
+      const start = todayStartIso();
+      const n = db
+        .select({ n: sql<number>`count(*)` })
+        .from(schema.kolPosts)
+        .where(gte(schema.kolPosts.createdAt, start))
+        .get()?.n ?? 0;
+      const latest = db
+        .select()
+        .from(schema.kolPosts)
+        .orderBy(desc(schema.kolPosts.createdAt))
+        .limit(1)
+        .get();
+      if (!latest) return null;
+      return {
+        headline: `今日 ${n} 条更新`,
+        excerpt: `${latest.screenName}：${latest.text.slice(0, 60)}`,
+        createdAt: latest.createdAt,
+      };
+    },
+  },
 ];
+
+/** 收益率格式化（小数 → 带符号百分比） */
+function fmtPctSigned(v: number | null | undefined): string {
+  if (v == null) return '—';
+  const p = v * 100;
+  return `${p > 0 ? '+' : ''}${p.toFixed(1)}%`;
+}
 
 /** 构建各模块最新产出摘要卡（纯本地读取已落库产出，不重算） */
 export function buildModuleSummaries(): CockpitModuleSummary[] {
   const today = shanghaiToday();
   const cards: CockpitModuleSummary[] = [];
   for (const m of MODULE_SOURCES) {
-    const row = m.latest();
+    // 状态型来源：自带 headline/excerpt，无 AI 正文可抽
+    if (m.build) {
+      const built = (() => {
+        try {
+          return m.build!();
+        } catch {
+          return null;
+        }
+      })();
+      cards.push({
+        key: m.key,
+        title: m.title,
+        route: m.route,
+        routeQuery: m.routeQuery,
+        headline: built?.headline ?? '',
+        excerpt: built?.excerpt ?? '暂无产出（该模块未启用或尚未运行）',
+        createdAt: built?.createdAt ?? null,
+        stale: built?.createdAt ? built.createdAt.slice(0, 10) !== today : true,
+      });
+      continue;
+    }
+    const row = m.latest?.();
     const createdAt = row?.createdAt ?? null;
     const stale = createdAt ? createdAt.slice(0, 10) !== today : true;
     if (!row?.outputText) {
@@ -346,6 +516,8 @@ export function buildCockpitOverview(): CockpitOverview {
     safety: getSafetyState(),
     // 大盘阶段：读最近一次收盘快照（纯本地，秒开）；完整明细在大盘页实时接口
     regime: getRegimeSummaryForCockpit(),
+    // 首板赚钱效应(883994)：读最近一次 meta 快照（纯本地，秒开）；完整趋势在大盘页情绪 tab
+    moneyEffect: getMoneyEffectSummary(),
     plan: computePlanFulfillment(detail),
     planStance: detail
       ? {
