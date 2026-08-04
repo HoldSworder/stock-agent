@@ -933,13 +933,16 @@ const indicatorCells = computed<IndCell[]>(() => {
     const v = ind.volume;
     const live = v.basis === 'realtime';
     const turnover = v.turnoverRate != null ? ` 换手 ${v.turnoverRate}%` : '';
+    const HINT: Record<typeof v.basis, string> = {
+      realtime: '盘中口径：东财实时量比（当前每分钟均量 ÷ 前 5 日每分钟均量，已按时间折算）',
+      amount_median20: '收盘口径：当日成交额 ÷ 前 20 日成交额中位数（分母不含当日）',
+      volume_median20: '收盘口径：当日成交量 ÷ 前 20 日成交量中位数（当前日线源不返回成交额，已退成交量口径）',
+    };
     cells.push({
       label: '量能',
       value: `${live ? '盘中 ' : ''}${v.ratio.toFixed(2)}×（${v.label}）${turnover}`,
       dir: volumeDir(v.state),
-      hint: live
-        ? '盘中口径：东财实时量比（当前每分钟均量 ÷ 前 5 日每分钟均量，已按时间折算）'
-        : '收盘口径：当日成交额 ÷ 前 20 日成交额中位数（分母不含当日）',
+      hint: HINT[v.basis],
     });
   }
   return cells;
@@ -1146,9 +1149,13 @@ watch([code, secid], () => {
 -->
 <style>
 .kline-dialog .el-dialog__body {
-  /* 图表放大后给 body 一个上限并允许内滚，避免标注多时把弹窗撑出视口 */
-  max-height: calc(94vh - 60px);
-  overflow-y: auto;
+  /*
+   * 定高 + 不滚：body 自己滚会把左右两栏当成一个整体带着走，
+   * 右侧对话/计划一长就把左边的 K 线顶出可视区。滚动交给两栏各自负责。
+   * 必须是定高而非 max-height，否则子级的 height:100% 无从解析，两栏拿不到可用高度。
+   */
+  height: calc(94vh - 60px);
+  overflow: hidden;
 }
 </style>
 
@@ -1158,19 +1165,32 @@ watch([code, secid], () => {
   display: flex;
   gap: 12px;
   align-items: stretch;
+  /* 撑满定高的 body，两栏据此各自算可用高度 */
+  height: 100%;
+  min-height: 0;
 }
 .kline-main {
   flex: 1;
   min-width: 0;
+  /*
+   * 左栏独立内滚：矮视口下图表被 clamp 到下限后，左栏自然高度会超过可用高度，
+   * 此时只滚左栏，不牵动右侧；反之右侧对话再长也带不动 K 线。
+   * padding-right 给滚动条留位，避免压住图表右缘的价格轴。
+   */
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 .kline-side {
   width: 440px;
   flex-shrink: 0;
-  /* 高度跟随左侧图表区（flex stretch），不再写死，避免图表变高后两栏错位 */
+  /* 高度跟满定高的 body（flex stretch），不再写死，避免图表变高后两栏错位 */
   display: flex;
   flex-direction: column;
   gap: 8px;
   min-height: 0;
+  /* 右栏自身不滚，滚动由内部面板（计划面板 tp__body / 对话列表）负责 */
+  overflow: hidden;
 }
 .kline-side__tabs {
   flex-shrink: 0;

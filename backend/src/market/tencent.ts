@@ -1,4 +1,11 @@
-import type { KlineBar, KlinePeriod, MarketIndex, TrendsResult, TrendPoint } from '@stock-agent/shared';
+import {
+  SHARES_PER_LOT,
+  type KlineBar,
+  type KlinePeriod,
+  type MarketIndex,
+  type TrendsResult,
+  type TrendPoint,
+} from '@stock-agent/shared';
 import { getJson as getJsonRaw, MarketError, type FetchJsonOptions } from './eastmoney';
 import { num } from '../datasource/codes';
 
@@ -75,7 +82,7 @@ export async function getTrendsTencent(code: string, secid?: string): Promise<Tr
     // 腾讯量额为累计值，分时点需要每分钟增量
     const volume = Math.max(cumVol - prevCumVol, 0);
     prevCumVol = cumVol;
-    const avg = isIndex || cumVol <= 0 ? price : cumAmt / (cumVol * 100);
+    const avg = isIndex || cumVol <= 0 ? price : cumAmt / (cumVol * SHARES_PER_LOT);
     return {
       time: t.length >= 4 ? `${t.slice(0, 2)}:${t.slice(2, 4)}` : t,
       price,
@@ -135,8 +142,11 @@ export async function getIndicesTencent(secids: string[]): Promise<MarketIndex[]
   return results.filter((x): x is MarketIndex => x != null && x.name !== '');
 }
 
-/** 腾讯 K 线行（[date/time, open, close, high, low, volume, ...amount?]）→ KlineBar */
-function toBar(row: unknown[], isMinute: boolean): KlineBar {
+/**
+ * 腾讯 K 线行（[date/time, open, close, high, low, volume, ...amount?]）→ KlineBar。
+ * 导出以便单位不变式自检（klineVolumeUnit.selfcheck）离线断言「腾讯给『手』，不许再除 100」。
+ */
+export function toTencentBar(row: unknown[], isMinute: boolean): KlineBar {
   const rawTime = String(row[0] ?? '');
   // 分钟级 time 为 "YYYYMMDDHHMM"，归一为 "YYYY-MM-DD HH:MM"；日/周/月已是 "YYYY-MM-DD"
   const time =
@@ -149,8 +159,14 @@ function toBar(row: unknown[], isMinute: boolean): KlineBar {
     close: num(row[2]),
     high: num(row[3]),
     low: num(row[4]),
+    // 腾讯 volume 单位为「手」，与本项目 KlineBar.volume 口径一致，无需换算。
+    // 注：新浪与 mootdx 返回的是「股」，已在各自解析层 /100 归一；此处若日后发现量级
+    // 比东财大 100 倍（同一交易日对账），说明腾讯也改口径了，同样补 /100。
     volume: num(row[5]),
-    // 分钟级第 8 列为成交额；日/周/月无成交额，置 0
+    // 分钟级第 8 列为成交额。日/周/月置 0 不是偷懒：2026-08-04 实测 fqkline/get 每行**只有 6 列**
+    // ["2026-08-04","1350.06","1328.36","1350.94","1328.36","37450"]，本源日线确实不返回成交额，
+    // 无第 7 列可补。腾讯又排日线链首位（比东财稳，见文件头），故量能侧由消费层解决：
+    // symbolPlans/volumePrice.ts 的 pickBasis 在「本源整窗口无成交额」时回退成交量口径并显式标注。
     amount: isMinute ? num(row[7]) : 0,
   } satisfies KlineBar;
 }
@@ -183,7 +199,7 @@ export async function getKlineTencent(
       },
     });
     const node = (json.data as Record<string, unknown>)[txcode] as Record<string, unknown[][]>;
-    return (node[mParam] ?? []).map((row) => toBar(row, true));
+    return (node[mParam] ?? []).map((row) => toTencentBar(row, true));
   }
 
   if (period !== 'day' && period !== 'week' && period !== 'month') {
@@ -203,5 +219,5 @@ export async function getKlineTencent(
   });
   const node = (json.data as Record<string, unknown>)[txcode] as Record<string, unknown[][]>;
   const rows = node[key] ?? node[period] ?? [];
-  return rows.map((row) => toBar(row, false));
+  return rows.map((row) => toTencentBar(row, false));
 }

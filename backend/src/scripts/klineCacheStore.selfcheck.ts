@@ -76,5 +76,39 @@ await cache.prewarmDaily(
 );
 assert.ok(askedLimit > 240, `全量重刷抓取根数应按 keepDays 折算，实际 ${askedLimit}`);
 
+// ---- 读缓存出口必须补一次幂等的连续性修正 ----
+// 写入路径已修正过，但收盘回填只覆盖最近 PREWARM_BARS 根：折算后更早的历史仍停在折算前价位，
+// 而 adj_base 没变、最新行又新鲜不触发回源，limit 超过预热深度的读取就会看到假跳空。
+{
+  const split = [bar('2026-08-01', 2), bar('2026-08-03', 1)]; // 相邻两日腰斩 = 1:2 折算
+  cache.writeCachedDaily('600003', '1.600003', split);
+  const out = await cache.getDailyCached('600003', '1.600003', 2, async () => {
+    throw new Error('不应触发回源：缓存已新鲜');
+  });
+  assert.equal(out.length, 2);
+  assert.equal(out[0].close, 1, '折算前的历史行必须被缩放到折算后口径');
+  assert.equal(out[1].close, 1, '折算后的行不应被改动');
+  assert.equal(out[0].volume, 200, '价格缩半则历史成交量同步放大一倍，与日线口径一致');
+}
+
+// ---- 无除权时读出口不得改动任何值（修正必须幂等、不能误伤正常序列）----
+{
+  const flat = [bar('2026-08-01', 10), bar('2026-08-03', 10.5)];
+  cache.writeCachedDaily('600004', '1.600004', flat);
+  const out = await cache.getDailyCached('600004', '1.600004', 2, async () => {
+    throw new Error('不应触发回源');
+  });
+  assert.deepEqual(
+    out.map((b) => [b.close, b.volume]),
+    [
+      [10, 100],
+      [10.5, 100],
+    ],
+    '正常序列经读出口后必须逐字不变',
+  );
+}
+
 rmSync(tmpDir, { recursive: true, force: true });
-console.log('✅ 日K缓存落库自检通过：secid 隔离 / 全量重刷失败标的保历史 / 重刷根数');
+console.log(
+  '✅ 日K缓存落库自检通过：secid 隔离 / 全量重刷失败标的保历史 / 重刷根数 / 读出口幂等补修正',
+);

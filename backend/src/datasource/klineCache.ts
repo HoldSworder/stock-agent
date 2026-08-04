@@ -1,9 +1,10 @@
 import { and, asc, desc, eq, inArray, sql } from 'drizzle-orm';
-import type { KlineBar, StockQuote } from '@stock-agent/shared';
+import { SHARES_PER_LOT, type KlineBar, type StockQuote } from '@stock-agent/shared';
 import { db, schema } from '../db/client';
 import { nowIso, shanghaiToday, isAShareTradingTime } from '../util';
 import { isTradingDay } from '../market/calendar';
 import { toSecid } from './codes';
+import { SPLIT_GAP, frontAdjustDaily } from './adjust';
 
 // 全市场日K本地缓存：盘前预热 + 盘中增量追加 + 每周全量重刷，替代「每次都实时回源」。
 // 解决两个老问题：一是 sidecar/东财慢或超时导致板块宽度、情绪、纪律体检等模块整块降级；
@@ -232,7 +233,7 @@ export async function getDailyCached(
   const cached = readCachedDaily(code, secid, limit);
   const newest = cached[cached.length - 1];
   if (cached.length >= limit && newest && isFresh(newest.updatedAt, new Date(), newest.provisional === 1)) {
-    return cached.map(stripMeta);
+    return adjustedFromCache(cached);
   }
   try {
     const fresh = await fetcher();
@@ -242,11 +243,24 @@ export async function getDailyCached(
     }
   } catch (e) {
     // 回源失败时，有旧缓存就先顶上（这正是本模块要消灭的整块降级），无缓存才继续抛
-    if (cached.length > 0) return cached.map(stripMeta);
+    if (cached.length > 0) return adjustedFromCache(cached);
     throw e;
   }
-  if (cached.length > 0) return cached.map(stripMeta);
+  if (cached.length > 0) return adjustedFromCache(cached);
   return [];
+}
+
+/**
+ * 缓存行 → KlineBar，并补一次静默的连续性修正。
+ *
+ * 写入路径（scheduler.fetchDailyAdjusted）已经修正过，但收盘回填只覆盖最近 PREWARM_BARS 根：
+ * 某标的折算后，更早的历史仍停在折算前价位，而 adj_base 没变、最新行又是新鲜的不触发回源，
+ * 于是 limit > PREWARM_BARS 的读取（getKline 默认 250、回测/MA120）会在 120 根处看到假跳空，
+ * 一直持续到周六全量重刷。frontAdjustDaily 幂等（无跳空时空转），这里兜一次只花一次 O(n) 扫描。
+ * 不传 label：这是每次读都会走的路径，打日志会随图表轮询刷屏。
+ */
+function adjustedFromCache(rows: CachedRow[]): KlineBar[] {
+  return frontAdjustDaily(rows.map(stripMeta));
 }
 
 function stripMeta(r: CachedRow): KlineBar {
@@ -390,11 +404,31 @@ export async function prewarmDaily(
  * 只在「当日已开盘、尚未收盘」的窗口内生效（见 isIntradayWindow）：每 10 分钟的定时表达式
  * 覆盖 9-14 点整段，会在 09:00/09:10/09:20 触发，那时报价的 price 就是昨收，写进去等于伪造一根当日 bar。
  *
- * ponytail: StockQuote 只有现价/昨收/成交额，没有当日 OHLC 与成交量。当日 bar 的 open 用昨收近似、
- * high/low 用 max/min(现价, 昨收) 近似，volume 由成交额反推，故临时 bar 的振幅被低估、
+ * ponytail: StockQuote 只有现价/昨收/成交额，没有当日 OHLC 与成交量。当日 bar 的 open 用昨收近似
+ * （除权日的未除权昨收会被弃用，见 intradayOpenRef）、high/low 用 max/min(现价, 参考价) 近似，
+ * volume 由成交额反推，故临时 bar 的振幅被低估、
  * 量能是估算值（不是撮合真实手数）。该行 provisional=1，收盘后预热会用真实日线整行覆盖。
  * 要精确盘中 OHLC/量能需换带这些字段的报价源。
  */
+/**
+ * 盘中临时 bar 的开盘参考价：正常取昨收；昨收相对现价高出 SPLIT_GAP 以上则弃用，改取现价。
+ *
+ * 除权/份额折算当日部分报价源给的仍是未除权昨收（159516 折算日 prevClose=1.945 / price=0.905），
+ * 直接当 open 会造出一根 open 1.945 / close 0.905 的假 K：当日振幅、ATR、摆动点全部失真，
+ * 且跳空被抹进 bar 内部——它落在 open 与 close 之间，frontAdjustDaily 的
+ * 「open_t / close_{t-1}」判据在折算当天恒等于 1，必然漏判，之后再修也救不回来。
+ * 改取现价后当日 bar 退化成一个点（振幅缺失，收盘回填时由真实日线整行覆盖），
+ * 但跳空回到 bar 边界上，折算当天即可被正常识别。
+ *
+ * 选这条而不是「给 frontAdjustDaily 加 provisional 判据」：后者要把 provisional 标记
+ * 一路带进纯函数，且只治检测、治不了那根假 K 本身。
+ * 只拦下跌方向，与 SPLIT_GAP 同理：向上的大跳空可能是无涨跌幅限制新股的真实暴涨。
+ */
+export function intradayOpenRef(prevClose: number, price: number): number {
+  if (!(prevClose > 0)) return price;
+  return price / prevClose < 1 - SPLIT_GAP ? price : prevClose;
+}
+
 export function appendIntradayBars(quotes: StockQuote[], now = new Date()): number {
   if (!isIntradayWindow(now)) return 0;
   const today = shanghaiToday(now);
@@ -408,7 +442,7 @@ export function appendIntradayBars(quotes: StockQuote[], now = new Date()): numb
     if (!(amountYuan > 0)) continue;
     const secid = toSecid(q.code);
     if (readCachedDaily(q.code, secid, 1).length === 0) continue; // 未预热过的标的不凭空建行
-    const ref = q.prevClose > 0 ? q.prevClose : q.price;
+    const ref = intradayOpenRef(q.prevClose, q.price);
     writeCachedDaily(
       q.code,
       secid,
@@ -419,7 +453,7 @@ export function appendIntradayBars(quotes: StockQuote[], now = new Date()): numb
           high: Math.max(ref, q.price),
           low: Math.min(ref, q.price),
           close: q.price,
-          volume: Math.round(amountYuan / q.price / 100), // 估算手数：成交额 ÷ 现价 ÷ 100
+          volume: Math.round(amountYuan / q.price / SHARES_PER_LOT), // 估算手数：成交额 ÷ 现价 ÷ 每手股数
           amount: amountYuan,
         },
       ],

@@ -179,6 +179,24 @@ assert.equal(
     null,
     '样本不足不得给出量能读数',
   );
+
+  // 成交额缺失（新浪等日线源 amount 恒为 0）时回退到成交量口径，而不是不给读数
+  const noAmount = barsWithRatio(1.4).map((b) => ({ ...b, amount: 0 }));
+  const fallback = buildVolumeReadout(noAmount, { completeBar: true });
+  assert.ok(fallback, '成交额缺失时应回退到成交量口径而非返回 null');
+  assert.equal(fallback.basis, 'volume_median20', '回退口径必须显式标注');
+  assert.equal(fallback.ratio, 1.4, '回退后取成交量比值');
+  assert.equal(fallback.state, 'clear_expand', '回退口径沿用收盘阈值');
+
+  // 成交额与成交量都不可用时才返回 null
+  assert.equal(
+    buildVolumeReadout(
+      barsWithRatio(1.4).map((b) => ({ ...b, amount: 0, volume: 0 })),
+      { completeBar: true },
+    ),
+    null,
+    '量额俱缺时不得编数',
+  );
 }
 
 // ===== 5. 道氏：四种状态 =====

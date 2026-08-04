@@ -1,6 +1,7 @@
 import type {
   KlineBar,
   KlinePeriod,
+  VolumeBasisReading,
   VolumePricePattern,
   VolumePriceReading,
   VolumeReadout,
@@ -103,6 +104,34 @@ const LOOKBACK = 20;
 const MIN_VALID_SAMPLES = 15;
 
 /**
+ * 选定形态判定所用的量能口径：成交额优先，本源根本不给成交额时回退成交量。
+ *
+ * 只在 `amountSampleCount === 0`（本源整个窗口都没有成交额，如腾讯 fqkline 日线、新浪）时回退。
+ * 若成交额有样本但不足 MIN_VALID_SAMPLES（疑似停牌），那是**该降级**的场景，
+ * 换成成交量口径等于把一条本应降级的结论复活，故此时返回 null。
+ */
+function pickBasis(
+  amountRatio: number | null,
+  amountSampleCount: number,
+  volumeRatio: number | null,
+): VolumeBasisReading | null {
+  if (amountRatio != null) {
+    const state = classifyRatio(amountRatio);
+    if (state) return { ratio: amountRatio, source: 'amount', state };
+  }
+  if (amountSampleCount > 0 || volumeRatio == null) return null;
+  const state = classifyRatio(volumeRatio);
+  return state ? { ratio: volumeRatio, source: 'volume', state } : null;
+}
+
+/** 口径标注文案：成交量口径必须显式写出来，否则使用者会误读成成交额 */
+function basisText(basis: VolumeBasisReading): string {
+  return basis.source === 'amount'
+    ? `成交额比 ${basis.ratio.toFixed(2)}（${VOLUME_STATE_LABEL[basis.state]}）`
+    : `成交量比 ${basis.ratio.toFixed(2)}（${VOLUME_STATE_LABEL[basis.state]}，本源无成交额，成交量口径）`;
+}
+
+/**
  * 量价读数。规则要点：
  * - 分母是前 LOOKBACK 根的中位数，且不含当根；
  * - 当根未收完时只给量比参考并写警告，不出放量/缩量确认结论；
@@ -119,6 +148,7 @@ export function computeVolumePrice(input: VolumePriceInput): VolumePriceReading 
       amountRatio20: null,
       volumeRatio20: null,
       amountState: null,
+      basis: null,
       closeLocation: null,
       turnoverRate: input.turnoverRate ?? null,
       pattern: null,
@@ -147,10 +177,17 @@ export function computeVolumePrice(input: VolumePriceInput): VolumePriceReading 
   if (!volumeComparable) {
     warnings.push('窗口内跨除权除息或份额拆分，成交量不可比，只用成交额与换手率');
   }
-  if (amountRatio20 == null && amountMed.count === 0) warnings.push('成交额数据缺失，量能结论降级');
 
   const closeLocation = closeLocationOf(last);
   const amountState = classifyRatio(amountRatio20);
+  const basis = pickBasis(amountRatio20, amountMed.count, volumeRatio20);
+  if (amountRatio20 == null && amountMed.count === 0) {
+    warnings.push(
+      basis != null
+        ? '本源不返回成交额（腾讯 fqkline 日线 / 新浪），量能判定已回退「成交量」口径'
+        : '成交额数据缺失且成交量口径也不可用，量能结论降级',
+    );
+  }
 
   // 未收完的 bar 只报参考量比，不出确认性结论（避免拿半天量对比整天中位数）
   if (!completeBar) {
@@ -160,20 +197,25 @@ export function computeVolumePrice(input: VolumePriceInput): VolumePriceReading 
       amountRatio20,
       volumeRatio20,
       amountState: null,
+      basis,
       closeLocation,
       turnoverRate: input.turnoverRate ?? null,
       pattern: null,
-      verdict: amountRatio20 != null ? `盘中成交额已达中位数 ${amountRatio20.toFixed(2)} 倍（未收盘）` : '盘中量能待确认',
+      verdict:
+        basis != null
+          ? `盘中${basis.source === 'amount' ? '成交额' : '成交量（本源无成交额）'}已达中位数 ${basis.ratio.toFixed(2)} 倍（未收盘）`
+          : '盘中量能待确认',
       warnings,
     };
   }
 
-  const { pattern, verdict } = buildVerdict(bars, amountRatio20, amountState, closeLocation);
+  const { pattern, verdict } = buildVerdict(bars, basis, closeLocation);
   return {
     period,
     amountRatio20,
     volumeRatio20,
     amountState,
+    basis,
     closeLocation,
     turnoverRate: input.turnoverRate ?? null,
     pattern,
@@ -192,7 +234,8 @@ export interface VolumeReadoutInput {
 }
 
 /**
- * 「是否放量」的单一显式读数：收盘后走 20 日成交额中位数口径，盘中走实时量比口径。
+ * 「是否放量」的单一显式读数：收盘后走 20 日成交额中位数口径（本源不给成交额时回退成交量口径，
+ * basis 与 warnings 会显式标注），盘中走实时量比口径。
  *
  * 盘中拿不到实时量比时返回 null 而不是退回半天成交额比整天中位数——
  * 那个数在 10:00 必然显示缩量，是会误导人的假读数。
@@ -204,14 +247,17 @@ export function buildVolumeReadout(
   const turnoverRate = input.turnoverRate ?? null;
   if (input.completeBar) {
     const vp = computeVolumePrice({ period: 'day', bars, completeBar: true, turnoverRate });
-    const state = vp.amountState;
-    if (vp.amountRatio20 == null || state == null) return null;
+    // 口径选择已收敛到 computeVolumePrice 的 basis（成交额优先、本源无成交额才回退成交量），
+    // 这里不再自行拼一套，避免读数与形态判定各用一个口径
+    const picked = vp.basis;
+    if (!picked) return null;
     return {
-      ratio: Math.round(vp.amountRatio20 * 100) / 100,
-      basis: 'amount_median20',
-      state,
-      label: VOLUME_STATE_LABEL[state],
+      ratio: Math.round(picked.ratio * 100) / 100,
+      basis: picked.source === 'amount' ? 'amount_median20' : 'volume_median20',
+      state: picked.state,
+      label: VOLUME_STATE_LABEL[picked.state],
       turnoverRate: vp.turnoverRate,
+      ...(vp.warnings.length > 0 ? { warnings: vp.warnings } : {}),
     };
   }
   const realtimeRatio = input.realtimeRatio ?? null;
@@ -231,18 +277,21 @@ export function buildVolumeReadout(
 /**
  * 量价定性结论（计划 4.2 四条判据）。
  * 「放量下跌」优先判为风险而非资金进场；「放量滞涨」需未突破前高且收盘位置偏低。
+ *
+ * 吃的是 pickBasis 选定的口径而非只吃成交额：腾讯日线（日线链首选源）恒不返回成交额，
+ * 只认成交额会让这四条判据长期恒为 null。文案里会标注实际口径。
  */
 function buildVerdict(
   bars: KlineBar[],
-  ratio: number | null,
-  state: VolumeState | null,
+  basis: VolumeBasisReading | null,
   closeLoc: number | null,
 ): { pattern: VolumePricePattern; verdict: string } {
   const last = bars[bars.length - 1];
   const prev = bars[bars.length - 2];
-  if (ratio == null || state == null) return { pattern: null, verdict: '量能数据不足' };
+  if (basis == null) return { pattern: null, verdict: '量能数据不足' };
+  const ratio = basis.ratio;
 
-  const ratioText = `成交额比 ${ratio.toFixed(2)}（${VOLUME_STATE_LABEL[state]}）`;
+  const ratioText = basisText(basis);
   const locText = closeLoc != null ? `，收盘位置 ${closeLoc.toFixed(2)}` : '';
   const expanded = ratio >= 1.35;
   const down = prev ? last.close < prev.close : false;

@@ -1,4 +1,4 @@
-import type { KlineBar, KlinePeriod } from '@stock-agent/shared';
+import { SHARES_PER_LOT, type KlineBar, type KlinePeriod } from '@stock-agent/shared';
 import { getJson as getJsonRaw, MarketError, type FetchJsonOptions } from './eastmoney';
 import { toTxCode } from './tencent';
 import { num } from '../datasource/codes';
@@ -33,6 +33,27 @@ interface SinaRow {
 }
 
 /**
+ * 新浪单行 → KlineBar。独立导出以便单位不变式自检（klineVolumeUnit.selfcheck）能离线断言换算。
+ * @param isMinute 分钟 day 形如 "2026-06-10 14:00:00"，截断为 "YYYY-MM-DD HH:MM"；日线本就 "YYYY-MM-DD"
+ */
+export function toSinaBar(r: SinaRow, isMinute: boolean): KlineBar {
+  const raw = String(r.day ?? '');
+  return {
+    time: isMinute && raw.length > 10 ? raw.slice(0, 16) : raw,
+    open: num(r.open),
+    close: num(r.close),
+    high: num(r.high),
+    low: num(r.low),
+    // 新浪 volume 单位是「股」，本项目 KlineBar.volume 统一用「手」（与东财 f56、mootdx vol、前端 fmtVol 一致）。
+    // 不归一会让同一张日线缓存表里混两种单位，量比/成交量中位数直接差 100 倍。
+    // 2026-08-04 对账：新浪 08-03 给 9301253966，mootdx 同日给 93012544 手，正好 100 倍。
+    volume: num(r.volume) / SHARES_PER_LOT,
+    // 新浪日线接口不返回成交额
+    amount: 0,
+  } satisfies KlineBar;
+}
+
+/**
  * 新浪 K 线（不复权），支持个股 / 指数的 日 + 5/15/30/60 分钟；
  * 周 / 月 / 120 分钟及板块不支持，抛错由编排回退/兜底。
  */
@@ -55,19 +76,6 @@ export async function getKlineSina(
     validate: (j) => Array.isArray(j as unknown) && (j as unknown as unknown[]).length > 0,
   })) as unknown as SinaRow[];
 
-  const isMinute = scale < 240;
-  return json.map((r) => {
-    const raw = String(r.day ?? '');
-    // 分钟 day 形如 "2026-06-10 14:00:00"，截断为 "YYYY-MM-DD HH:MM"；日线本就 "YYYY-MM-DD"
-    const time = isMinute && raw.length > 10 ? raw.slice(0, 16) : raw;
-    return {
-      time,
-      open: num(r.open),
-      close: num(r.close),
-      high: num(r.high),
-      low: num(r.low),
-      volume: num(r.volume),
-      amount: 0,
-    } satisfies KlineBar;
-  });
+  // 分钟与日线共用同一映射（含 /100 归一）：口径只写一处，才谈得上被自检钉住
+  return json.map((r) => toSinaBar(r, scale < 240));
 }

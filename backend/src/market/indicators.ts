@@ -191,7 +191,12 @@ export function formatIndicatorsForAgent(ind: StockIndicators): string {
     );
   }
   if (ind.volume) {
-    const basis = ind.volume.basis === 'realtime' ? '盘中实时量比' : '当日成交额/前20日中位数';
+    const BASIS_TEXT: Record<typeof ind.volume.basis, string> = {
+      realtime: '盘中实时量比',
+      amount_median20: '当日成交额/前20日中位数',
+      volume_median20: '当日成交量/前20日中位数（该源无成交额）',
+    };
+    const basis = BASIS_TEXT[ind.volume.basis];
     const turnover = ind.volume.turnoverRate != null ? `，换手 ${ind.volume.turnoverRate}%` : '';
     lines.push(`量能：${ind.volume.ratio} 倍（${ind.volume.label}，${basis}）${turnover}`);
   }

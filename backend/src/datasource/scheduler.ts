@@ -1,7 +1,7 @@
 import type { DataSourceRoute, KlineBar, KlinePeriod, StockQuote } from '@stock-agent/shared';
 import { QUOTE_PROVIDERS, KLINE_PROVIDERS_INTRADAY, KLINE_PROVIDERS_DAILY } from './providers';
 import { isSourceEnabled } from './registry';
-import { isMinutePeriod, frontAdjustMinute } from './adjust';
+import { isMinutePeriod, frontAdjustDaily, frontAdjustMinute } from './adjust';
 import { getDailyCached } from './klineCache';
 import { toSecid } from './codes';
 
@@ -26,7 +26,7 @@ export async function getQuotes(codes: string[]): Promise<StockQuote[]> {
   throw new Error(`报价取数全部数据源失败 → ${errors.join(' | ') || '无可用数据源'}`);
 }
 
-/** 原始取数：按 启用+优先级 依次尝试 provider，成功即返回（不做复权修正）。 */
+/** 原始取数：按 启用+优先级 依次尝试 provider，成功即返回（不做任何复权修正）。 */
 async function fetchKlineRaw(
   code: string,
   period: KlinePeriod,
@@ -54,6 +54,31 @@ async function fetchKlineRaw(
 }
 
 /**
+ * 日/周/月线的唯一取数出口：多源取数 + 连续性修正（frontAdjustDaily）。
+ * 名义上前复权的源也会漏除权（腾讯 qfq 不处理 ETF 份额折算），故一律补修正。
+ *
+ * 修正收在这里而不是读缓存出口：09:10 预热、15:10 收盘回填、周六全量重刷与按需回源
+ * 都经本函数，写进 kline_daily 的就已是修正后的数据，直接读 readCachedDaily 的模块
+ * 也不会拿到假跳空；读出口因此不再重复修正（省掉每次读的重算与重复告警）。
+ * ponytail: 代价是折算当日盘中那段（临时 bar 与历史行分处折算前后两套价格）要等 15:10
+ * 回填才彻底对齐；要盘中就对齐得按公告因子实时复权。
+ *
+ * @param secid 必须原样透传到 provider——它是缓存主键的一半（指数与同码个股靠它区分）
+ * @param opts.period 仅限日/周/月线；分钟线不走本函数（它的修正是 frontAdjustMinute）
+ * @param opts.quiet 不打印除权点日志。分钟线取日线锚点会随图表轮询反复调本函数，打了会刷屏。
+ */
+export async function fetchDailyAdjusted(
+  code: string,
+  secid: string | undefined,
+  limit: number,
+  opts: { period?: KlinePeriod; quiet?: boolean } = {},
+): Promise<KlineBar[]> {
+  const period = opts.period ?? 'day';
+  const bars = await fetchKlineRaw(code, period, limit, secid);
+  return frontAdjustDaily(bars, opts.quiet ? undefined : `${lastServed.kline ?? '未知源'} ${code}`);
+}
+
+/**
  * K 线（东财 → 腾讯 → 新浪 自动兜底，按周期能力降级）。
  * 分钟级额外做前复权修正：腾讯/新浪分钟接口返回不复权价，除权/份额折算日会造成假跳空→假死叉，
  * 故以日线前复权收盘为锚反推每日因子套到分钟线（已复权源 factor≈1，幂等安全）。日线取数失败则原样返回。
@@ -69,19 +94,22 @@ export async function getKline(
   if (period === 'day') {
     // 缓存身份必须带 secid：大盘指数与同码个股（如 1.000001 上证指数 / 0.000001 平安银行）
     // 若共用 code 做键会互相覆盖，读出来的可能根本不是这只标的的 K 线。
+    // 回源走 fetchDailyAdjusted，写进缓存的即修正后数据，故读出口不再重复修正
     return getDailyCached(code, secid ?? toSecid(code), limit, () =>
-      fetchKlineRaw(code, 'day', limit, secid),
+      fetchDailyAdjusted(code, secid, limit),
     );
   }
+  // 周/月线不缓存，取数后与日线共用同一条修正出口
+  if (!isMinutePeriod(period)) return fetchDailyAdjusted(code, secid, limit, { period });
   const bars = await fetchKlineRaw(code, period, limit, secid);
-  if (!isMinutePeriod(period) || bars.length === 0) return bars;
-  // 记录分钟命中源：下面取日线锚点会再走一次 fetchKlineRaw 覆盖 lastServed.kline，
+  if (bars.length === 0) return bars;
+  // 记录分钟命中源：下面取日线锚点会再走一次取数覆盖 lastServed.kline，
   // 故先存后还原，保证「数据源」页展示的是分钟实际命中源（如 astockdata），而非锚点源。
   const minuteServed = lastServed.kline;
   try {
     // 日线锚点需覆盖分钟序列的日历跨度：60m 约 limit/4 天、30m 约 limit/8 天，取 [300,800] 足够
     const dailyLimit = Math.min(800, Math.max(300, limit));
-    const daily = await fetchKlineRaw(code, 'day', dailyLimit, secid);
+    const daily = await fetchDailyAdjusted(code, secid, dailyLimit, { quiet: true });
     return frontAdjustMinute(bars, daily);
   } catch {
     return bars;

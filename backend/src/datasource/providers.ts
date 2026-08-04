@@ -40,14 +40,22 @@ export const KLINE_PROVIDERS_INTRADAY: KlineProvider[] = [
   { sourceId: 'sina', fn: getKlineSina },
 ];
 
-// 日/周/月线：必须前复权——既是日线指标本身(MA/MACD)的正确性，也是分钟前复权修正的「锚」。
-//   腾讯/东财为前复权(qfq)；mootdx(client.bars 默认不复权)仅作末位应急，避免除权日假跳空污染日线锚。
-//   东财 push2his 在 31 子网被封→快速失败转下一源；实测腾讯日线 100% 可用、~60ms。
+// 日/周/月线复权口径（2026-08-04 实测校正）：
+//   腾讯 qfq / 东财 fqt=1 名义上前复权，但腾讯的 qfq 不处理 ETF 份额折算；
+//   新浪与 mootdx 本身就是不复权。也就是说这条链上没有一个源能保证序列连续，
+//   故日/周/月线一律经 scheduler.fetchDailyAdjusted 这唯一出口跑 frontAdjustDaily 自修正
+//   （用价格自身重建复权因子）；日K缓存的预热/回填/重刷也走同一出口，故落库的已是修正后数据。
+//   有了这层兜底，排序不再以「是否复权」为准，而是看数据完整度与可用性。
+// 顺序理由：
+//   - 腾讯/东财优先，它们的复权已覆盖个股分红送股，自修正只需补 ETF 折算这类漏网；
+//   - mootdx 排第三而非末位：它是本链上唯一同时返回成交额(amount)的可用源，
+//     而成交额是量比/量能读数的分母；新浪日线 amount 恒为 0，只能退化到成交量口径；
+//   - 新浪末位兜底：无成交额、也不复权，仅保证「有价可用」。
 export const KLINE_PROVIDERS_DAILY: KlineProvider[] = [
   { sourceId: 'tencent', fn: getKlineTencent },
   { sourceId: 'eastmoney', fn: getKlineEastmoney },
-  { sourceId: 'sina', fn: getKlineSina },
   { sourceId: 'astockdata', fn: getKlineAstock },
+  { sourceId: 'sina', fn: getKlineSina },
 ];
 
 // 数据源页展示用（盯盘主路径为分钟线，故展示分钟链以体现 mootdx 首选）

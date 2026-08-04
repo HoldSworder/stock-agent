@@ -1,5 +1,6 @@
 import type { KlineBar, MarketRegimeHmm } from '@stock-agent/shared';
 import { callAstock } from '../astock/client';
+import { mapMootdxBars } from '../astock/market';
 
 // 大盘阶段·等权口径取数：全A等权指数（通达信 880008）经 a-stock-data sidecar 的 mootdx_index 端点取。
 // 880008 是「一股一权」的全A等权，能剥离市值加权大指数（上证/沪深300）被权重股护盘的失真，
@@ -40,18 +41,15 @@ export async function getAllAEqualWeight(limit = 260): Promise<EqualWeightSeries
   if (!Array.isArray(rows) || rows.length === 0) {
     throw new Error('全A等权(880008) K线为空');
   }
-  const bars: KlineBar[] = rows
-    .map((r) => ({
-      time: String(r.datetime ?? r.date ?? '').trim().slice(0, 10),
-      open: num(r.open),
-      high: num(r.high),
-      low: num(r.low),
-      close: num(r.close),
-      volume: num(r.vol ?? r.volume),
-      amount: num(r.amount),
-    }))
-    .sort((a, b) => a.time.localeCompare(b.time))
-    .slice(-limit);
+  // 复用 mootdx 统一映射（含 vol「股/手」自校准）：本文件与 astock/market 各写一套解析
+  // 正是单位口径分叉的入口——880008 这边曾把未归一的「股」直接当「手」用
+  const bars: KlineBar[] = mapMootdxBars(rows, {
+    intraday: false,
+    limit,
+    // 指数不做单位自校准：反推靠「amount ÷ 均价 ÷ vol」，而 880008 的 close 是点位不是每股价格。
+    // 该序列下游只取 close（regime/service 的等权均线），量的口径不参与判定。
+    calibrate: false,
+  });
   const last = rows[rows.length - 1] ?? {};
   const upRaw = last.up_count;
   const downRaw = last.down_count;

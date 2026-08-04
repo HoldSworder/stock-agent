@@ -166,6 +166,12 @@ export interface StockSuggest {
 /** K 线周期：日/周/月（东财 klt 101/102/103）+ 分钟级（5/15/30/60/120 分钟） */
 export type KlinePeriod = 'day' | 'week' | 'month' | '5m' | '15m' | '30m' | '60m' | '120m';
 
+/**
+ * 一手 = 100 股。各行情源 volume 口径不一（新浪/mootdx 给「股」、东财 f56/腾讯给「手」），
+ * 换算系数必须走这个常量，避免字面量 100 散落在各解析层后被单独改掉。
+ */
+export const SHARES_PER_LOT = 100;
+
 /** 单根 K 线（前复权） */
 export interface KlineBar {
   /** 交易日 YYYY-MM-DD */
@@ -174,9 +180,13 @@ export interface KlineBar {
   high: number;
   low: number;
   close: number;
-  /** 成交量（手） */
+  /**
+   * 成交量，单位固定为「手」（1 手 = SHARES_PER_LOT 股）。
+   * 返回「股」的源（新浪、mootdx）必须在自己的解析层除以 SHARES_PER_LOT 后再落库；
+   * 返回「手」的源（腾讯、东财 f56）不得再除。混单位会让量比与成交量中位数整体差 100 倍。
+   */
   volume: number;
-  /** 成交额（元） */
+  /** 成交额（元）；部分源日线不返回成交额（腾讯 fqkline、新浪），此时为 0 */
   amount: number;
 }
 
@@ -501,14 +511,19 @@ export interface BollReadout {
 export interface VolumeReadout {
   /** 量比数值 */
   ratio: number;
-  /** 口径来源 */
-  basis: 'amount_median20' | 'realtime';
+  /**
+   * 口径来源。`volume_median20` 仅在「本源根本不返回成交额」（腾讯 fqkline 日线、新浪）时启用；
+   * 若是窗口内成交额样本不足（疑似停牌），本读数直接为 null 而不换口径复活。
+   */
+  basis: 'amount_median20' | 'volume_median20' | 'realtime';
   /** 七档定性（两种口径各有一套阈值，标签字典共用） */
   state: VolumeState;
   /** 可直接渲染的中文标签，消费方无须自带阈值或字典 */
   label: string;
   /** 换手率 %，ETF 与缺失为 null */
   turnoverRate: number | null;
+  /** 口径回退/降级等提示，供前端显式展示；无提示时省略 */
+  warnings?: string[];
 }
 
 /** S9 技术指标库：个股技术指标快照（日线 MACD/KDJ/RSI/BOLL + 读数），喂技术分析师 / KlineDialog 副图读数条 */
@@ -6416,12 +6431,25 @@ export type VolumePricePattern =
   | 'healthy_pullback'
   | null;
 
+/**
+ * 形态判定实际采用的量能口径。成交额优先（不受复权影响），
+ * 本源根本不给成交额时才回退成交量；样本不足（疑似停牌）不回退，整体为 null。
+ */
+export interface VolumeBasisReading {
+  ratio: number;
+  source: 'amount' | 'volume';
+  state: VolumeState;
+}
+
 export interface VolumePriceReading {
   period: KlinePeriod;
   /** 当根成交额 / 前 20 完整根成交额中位数（分母不含当根） */
   amountRatio20: number | null;
   volumeRatio20: number | null;
+  /** 成交额口径的七档定性；成交额缺失时为 null（此时看 basis 字段） */
   amountState: VolumeState | null;
+  /** 实际喂给形态判定与文案的口径；量额俱不可用为 null。可选以兼容既有构造方 */
+  basis?: VolumeBasisReading | null;
   /** (close-low)/(high-low) */
   closeLocation: number | null;
   /** 个股换手率（%），ETF 通常为空 */

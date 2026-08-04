@@ -1,9 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import { db, schema } from '../db/client';
 import { defineModuleSchedules } from '../scheduling/defineModuleSchedules';
-import { getQuotes } from './scheduler';
-import { KLINE_PROVIDERS_DAILY } from './providers';
-import { isSourceEnabled } from './registry';
+import { fetchDailyAdjusted, getQuotes } from './scheduler';
 import {
   appendIntradayBars,
   getCacheStats,
@@ -34,31 +32,15 @@ export function cacheUniverse(): string[] {
   return [...codes].sort();
 }
 
-/** 原始日线取数（绕开缓存，避免预热时自己命中自己）；secid 透传，保证与缓存主键的来源身份一致 */
-async function fetchDailyRaw(
-  code: string,
-  secid: string,
-  limit: number,
-): Promise<import('@stock-agent/shared').KlineBar[]> {
-  const errors: string[] = [];
-  for (const p of KLINE_PROVIDERS_DAILY) {
-    if (!isSourceEnabled(p.sourceId)) continue;
-    try {
-      const bars = (await p.fn(code, 'day', limit, secid)).filter((b) => b.close > 0);
-      if (bars.length > 0) return bars;
-      errors.push(`${p.sourceId}: 全为无效(收盘<=0)`);
-    } catch (e) {
-      errors.push(`${p.sourceId}: ${e instanceof Error ? e.message : String(e)}`);
-    }
-  }
-  throw new Error(`日线取数全部数据源失败 → ${errors.join(' | ') || '无可用数据源'}`);
-}
-
-/** 盘前预热：把缓存宇宙的最近 PREWARM_BARS 根前复权日线刷到本地 */
+/**
+ * 盘前预热：把缓存宇宙的最近 PREWARM_BARS 根前复权日线刷到本地。
+ * 取数用 scheduler.fetchDailyAdjusted（不经缓存，避免预热时自己命中自己），
+ * 它已含连续性修正，故落库的就是修正后的数据——本模块不得再自建 provider 遍历绕过它。
+ */
 export async function runPrewarm(full = false): Promise<{ total: number; ok: number; failed: number }> {
   const codes = cacheUniverse();
   if (codes.length === 0) return { total: 0, ok: 0, failed: 0 };
-  const r = await prewarmDaily(codes, fetchDailyRaw, { full });
+  const r = await prewarmDaily(codes, fetchDailyAdjusted, { full });
   console.info(
     `[klineCache] ${full ? '全量重刷' : '盘前预热'}完成：${r.ok}/${r.total} 成功，复权基准 ${r.adjBase}`,
   );

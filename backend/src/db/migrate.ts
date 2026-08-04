@@ -879,9 +879,51 @@ function dropLegacyTables(): void {
   }
 }
 
+/**
+ * kline_daily 的数据口径版本。改动 bar 字段的口径（volume 单位、复权处理等）时递增，
+ * 旧行按新口径解读会算出错误的量比/指标，故整表清空由预热重建。
+ *
+ * v2（2026-08-04）：volume 统一为「手」。此前新浪与 mootdx 写入的是「股」，
+ * 与东财口径混在同一张表里，20 日成交量中位数会差 100 倍。
+ */
+const KLINE_CACHE_FORMAT_VERSION = 2;
+const KLINE_CACHE_FORMAT_KEY = 'kline_cache_format_version';
+
+/**
+ * 口径版本变更时清空日线缓存。
+ * 必须在 DDL 之后执行（要读 settings 表），且不能只依赖 adjBase——
+ * adjBase 只区分复权基准，同一基准内混着两种 volume 单位它识别不出来。
+ */
+function resetKlineCacheOnFormatChange(): void {
+  try {
+    const row = sqlite.prepare('SELECT value FROM settings WHERE key = ?').get(KLINE_CACHE_FORMAT_KEY) as
+      | { value?: string }
+      | undefined;
+    const stored = Number(row?.value ?? 0);
+    if (stored === KLINE_CACHE_FORMAT_VERSION) return;
+    const cnt = sqlite.prepare('SELECT count(*) AS n FROM kline_daily').get() as { n: number };
+    if (cnt.n > 0) {
+      sqlite.exec('DELETE FROM kline_daily');
+      console.warn(
+        `[migrate] kline_daily 口径版本 ${stored} → ${KLINE_CACHE_FORMAT_VERSION}，` +
+          `已清空 ${cnt.n} 行旧缓存等待预热重建（纯缓存表，无原始数据丢失）`,
+      );
+    }
+    sqlite
+      .prepare(
+        'INSERT INTO settings(key, value, updated_at) VALUES(?,?,?) ' +
+          'ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
+      )
+      .run(KLINE_CACHE_FORMAT_KEY, String(KLINE_CACHE_FORMAT_VERSION), new Date().toISOString());
+  } catch (e) {
+    console.warn('[migrate] kline_daily 口径版本检查失败:', e instanceof Error ? e.message : e);
+  }
+}
+
 export function ensureSchema(): void {
   dropLegacyTables();
   sqlite.exec(DDL);
+  resetKlineCacheOnFormatChange();
   // 选股留痕功能已下线，记录改由战法模拟承接：清理历史表与数据
   sqlite.exec('DROP TABLE IF EXISTS stock_picks');
   // 旧库增量补列（已存在则忽略）
