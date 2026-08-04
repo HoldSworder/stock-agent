@@ -3,6 +3,7 @@ import { db, schema } from '../db/client';
 import type { SkillDimension } from '@stock-agent/shared';
 import { createStrategy, listStrategies, updateStrategy } from '../strategy/sim';
 import { syncMiaoxiangStrategy } from '../strategy/miaoxiangSync';
+import { SHADOW_NAME, backfillShadow } from '../strategy/shadowReplay';
 import { setInitialSkills } from '../strategy/skill';
 import { listTasks, updateTask } from '../tasks';
 import { getValue, setValue } from '../settings';
@@ -35,6 +36,8 @@ const SEED_DESCRIPTIONS: Record<string, string> = {
     '本地虚拟盘。尾盘（14:30 后）筛选当日有持续动能、适合次日套利的主板/创业板强势主线标的（涨幅约 3%~7%、量能温和放大），小仓位试探买入，次日冲高或动能减弱即兑现，持有不超 1~2 个交易日。',
   [MIAOXIANG_NAME]:
     '妙想东财模拟盘镜像。量化筛选主板热门板块（涨幅 2%~7%、量比>1.2、成交额>3 亿、MACD>0 且站上 20 日线），开盘买入候选标的，盘中 10:15 / 14:43 两次卖点检查，严格 T+1 与涨跌停约束。',
+  [SHADOW_NAME]:
+    '研究性影子盘（不下真实单）。在「妙想东财模拟盘」实际成交上叠加 883994 首板赚钱效应择时：站上 MA5 且 MA5 向上→当日可跟随开新仓，否则空仓不开新仓；已有持仓一律走妙想真实卖点了结、不因信号强平。每日收盘后自动重放，仅供风控择时对照。',
 };
 
 /** 两个种子战法的 Skill 基线打法（三维度，提炼自各自的现行任务逻辑） */
@@ -72,6 +75,22 @@ const SKILL_BASELINE: Record<string, Record<SkillDimension, string>> = {
       '每条操作附依据，遵守 T+1 与跌停不可卖。',
   },
 };
+
+/**
+ * 首板择时影子战法（本地）：存在则复用，缺失则新建。
+ * 不启用 Skill 自迭代、不关联选股——它只按镜像成交 + 883994 门槛程序化重放。
+ */
+function ensureShadowStrategy() {
+  const existing = listStrategies(true).find((s) => s.name === SHADOW_NAME);
+  if (existing) return existing;
+  return createStrategy({
+    name: SHADOW_NAME,
+    kind: 'local',
+    description: SEED_DESCRIPTIONS[SHADOW_NAME] ?? null,
+    initialCapital: INITIAL_CAPITAL,
+    skillEnabled: false,
+  });
+}
 
 /** 按名取战法，存在则复用，避免重复创建；新建时启用 Skill 自迭代 */
 function ensureStrategy(name: string, kind: 'local' | 'miaoxiang') {
@@ -123,7 +142,7 @@ function backfillSeedDescriptions(): void {
  * 用于修复历史并发启动产生的重复战法卡片，幂等可重复执行。
  */
 function dedupeSeedStrategies(): void {
-  for (const name of [MIAOXIANG_NAME, LOCAL_NAME]) {
+  for (const name of [MIAOXIANG_NAME, LOCAL_NAME, SHADOW_NAME]) {
     const rows = db
       .select()
       .from(schema.strategies)
@@ -200,6 +219,16 @@ export async function seedStrategiesAndBind(): Promise<void> {
   // 0.3 自愈回填：把妙想对照影子任务绑定到妙想镜像战法（无视 flag、幂等）
   backfillShadowTaskBinding();
 
+  // 0.4 自愈：创建首板择时影子战法（若缺）并一次性回填历史 + 净值曲线（幂等 flag、best-effort）。
+  //     存量安装（已 seeded）在此获得影子战法与回填；全新安装此时镜像尚未创建，
+  //     backfillShadow 会自旋跳过、留待下方镜像首次同步后再回填。
+  try {
+    ensureShadowStrategy();
+    await backfillShadow();
+  } catch (e) {
+    console.warn(`[seed] 影子战法初始化/回填失败: ${e instanceof Error ? e.message : e}`);
+  }
+
   // 原子声明种子标志：INSERT ... ON CONFLICT DO NOTHING 跨进程原子，
   // 并发启动只有成功插入（changes===1）的赢家继续创建，其余直接返回，杜绝重复。
   const claim = db
@@ -238,6 +267,14 @@ export async function seedStrategiesAndBind(): Promise<void> {
     console.log('[seed] 妙想镜像账户首次同步成功');
   } catch (e) {
     console.warn(`[seed] 妙想镜像账户首次同步失败（可稍后在战法页手动同步）: ${e instanceof Error ? e.message : e}`);
+  }
+
+  // 5. 全新安装：镜像此时才就绪，回填首板择时影子战法（幂等，上方自愈调用因无镜像已跳过）
+  try {
+    ensureShadowStrategy();
+    await backfillShadow();
+  } catch (e) {
+    console.warn(`[seed] 影子战法回填失败（可稍后重启重试）: ${e instanceof Error ? e.message : e}`);
   }
 
   console.log(`[seed] 已创建并绑定两个战法：${MIAOXIANG_NAME} / ${LOCAL_NAME}`);

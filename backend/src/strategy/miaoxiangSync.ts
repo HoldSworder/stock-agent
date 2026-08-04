@@ -1,6 +1,7 @@
 import { and, eq } from 'drizzle-orm';
 import { db, schema } from '../db/client';
 import { miaoxiang } from '../miaoxiang/client';
+import { dataOf, num, scaled, normCode, parsePositions } from '../miaoxiang/format';
 import { newId, nowIso } from '../util';
 import { StrategyError, getStrategy, getTradeReason } from './sim';
 
@@ -28,36 +29,6 @@ interface ParsedTrade {
   createdAt: string;
 }
 
-/** 安全取嵌套 data 对象（妙想响应统一 { data: {...} } 结构） */
-function dataOf(resp: unknown): Record<string, unknown> {
-  if (resp && typeof resp === 'object') {
-    const obj = resp as Record<string, unknown>;
-    const d = obj.data;
-    if (d && typeof d === 'object') return d as Record<string, unknown>;
-    return obj;
-  }
-  return {};
-}
-
-function num(v: unknown): number {
-  const n = Number(v);
-  return Number.isFinite(n) ? n : 0;
-}
-
-/** 按 *Dec 小数位还原真实价格：rawValue / 10^dec */
-function scaled(value: unknown, dec: unknown): number {
-  const raw = num(value);
-  const d = num(dec);
-  return d > 0 ? raw / 10 ** d : raw;
-}
-
-/** secCode 可能带市场后缀/前缀，统一取 6 位数字代码 */
-function normCode(raw: unknown): string {
-  const s = String(raw ?? '');
-  const m = s.match(/\d{6}/);
-  return m ? m[0] : s;
-}
-
 /** unix 秒 → Asia/Shanghai YYYY-MM-DD */
 function shanghaiDateFromUnix(sec: number): string {
   const ms = sec > 1e12 ? sec : sec * 1000;
@@ -83,20 +54,13 @@ function parseAccount(resp: unknown): { cash: number; positions: ParsedPosition[
   if (!hasCash || !hasPosList) {
     throw new StrategyError('妙想持仓响应无效（缺 availBalance/posList），跳过本次同步');
   }
-  const list = d.posList as unknown[];
-  const positions: ParsedPosition[] = [];
-  for (const item of list) {
-    if (!item || typeof item !== 'object') continue;
-    const p = item as Record<string, unknown>;
-    const qty = num(p.count);
-    if (qty <= 0) continue; // 已清仓跳过
-    positions.push({
-      code: normCode(p.secCode),
-      name: String(p.secName ?? ''),
-      qty,
-      avgCost: scaled(p.costPrice, p.costPriceDec),
-    });
-  }
+  // 复用统一清洗口径（滤清仓 + 价格还原），写库仅取所需最小子集
+  const positions: ParsedPosition[] = parsePositions(resp).map((p) => ({
+    code: p.code,
+    name: p.name,
+    qty: p.qty,
+    avgCost: p.avgCost,
+  }));
   return { cash: num(d.availBalance), positions };
 }
 

@@ -1,8 +1,9 @@
-import { and, desc, eq, sql } from 'drizzle-orm';
+import { and, asc, desc, eq, sql } from 'drizzle-orm';
 import type {
   SimPosition,
   SimTrade,
   Strategy,
+  StrategyHistoryItem,
   StrategyInput,
   StrategyListItem,
   StrategySnapshot,
@@ -14,6 +15,9 @@ import { assertTradeAllowed } from '../safety/guard';
 import { broadcastWatch } from '../watch/bus';
 import { sendTelegram } from '../notify/telegram';
 import { syncMiaoxiangStrategy } from './miaoxiangSync';
+// shadowReplay 反向依赖本模块的 listStrategies，但两侧都只在函数体内使用对方，
+// ESM 循环引用在模块初始化完成后才被读取，安全。
+import { SHADOW_NAME } from './shadowReplay';
 
 // 战法模拟引擎：每个战法是一个独立的本地纸上交易账户。
 // 买卖只落本系统库（strategies / sim_positions / sim_trades），不触发任何真实/妙想下单。
@@ -407,6 +411,13 @@ export async function executeSimTrade(input: ExecuteSimTradeInput): Promise<Exec
   if (strategy.kind === 'miaoxiang') {
     throw new StrategyError('妙想镜像账户不支持本地下单，请在妙想模拟盘交易后同步');
   }
+  // 首板择时影子盘为程序化重放账户：只按镜像成交 + 883994 门槛自动重放，
+  // 手工/自动下单会污染重放结果，直接拒绝（重放本身不走本函数，直接写库）。
+  // 必须比对 SHADOW_NAME 常量而非硬编码字面量——战法名可经 PUT /api/strategies/:id 改，
+  // 硬编码时改个名这道守卫就形同虚设。
+  if (strategy.name === SHADOW_NAME) {
+    throw new StrategyError('首板择时影子盘为程序化重放账户，不支持手动/自动下单');
+  }
   // 安全守卫（代码层总闸）：kill switch / 自动开关 / 交易日 + 时段统一在此判定。
   // 手动 force 仅跳过交易日/时段校验，不绕过 kill switch。
   assertTradeAllowed({
@@ -647,6 +658,127 @@ export async function getStrategySnapshot(
     positions,
     trades,
   };
+}
+
+/**
+ * 历史持仓（按标的汇总复盘）：把该战法全部成交按 code 归并，算加权均买/卖价、
+ * 持有收益（已实现+持有中浮盈）、卖出后至今收益（已清仓：现价/均卖价-1，判卖飞/卖对）、首买/末卖时间。
+ * 现价经 getQuotes 批量取（best-effort，失败置 null 不阻断）；含持有中与已清仓标的。
+ */
+export async function getStrategyHistory(id: string): Promise<StrategyHistoryItem[]> {
+  const strategy = getStrategy(id);
+  if (!strategy) throw new StrategyError('战法不存在');
+
+  const rows = db
+    .select()
+    .from(schema.simTrades)
+    .where(eq(schema.simTrades.strategyId, id))
+    .orderBy(asc(schema.simTrades.createdAt))
+    .all();
+
+  interface Acc {
+    code: string;
+    name: string;
+    buyQty: number;
+    buyAmount: number;
+    sellQty: number;
+    sellAmount: number;
+    realized: number;
+    firstBuyDate: string | null;
+    lastBuyDate: string | null;
+    firstSellDate: string | null;
+    lastSellDate: string | null;
+  }
+  const byCode = new Map<string, Acc>();
+  for (const r of rows) {
+    let a = byCode.get(r.code);
+    if (!a) {
+      a = {
+        code: r.code,
+        name: r.name,
+        buyQty: 0,
+        buyAmount: 0,
+        sellQty: 0,
+        sellAmount: 0,
+        realized: 0,
+        firstBuyDate: null,
+        lastBuyDate: null,
+        firstSellDate: null,
+        lastSellDate: null,
+      };
+      byCode.set(r.code, a);
+    }
+    a.name = r.name || a.name; // 名称以最近一笔为准
+    if (r.side === 'buy') {
+      a.buyQty += r.qty;
+      a.buyAmount += r.amount;
+      a.firstBuyDate = a.firstBuyDate ?? r.tradeDate;
+      a.lastBuyDate = r.tradeDate;
+    } else {
+      a.sellQty += r.qty;
+      a.sellAmount += r.amount;
+      a.realized += r.realizedProfit ?? 0;
+      a.firstSellDate = a.firstSellDate ?? r.tradeDate;
+      a.lastSellDate = r.tradeDate;
+    }
+  }
+  if (byCode.size === 0) return [];
+
+  // 批量取现价（best-effort）
+  const codes = Array.from(byCode.keys());
+  let quoteMap = new Map<string, number>();
+  try {
+    const quotes = await getQuotes(codes);
+    quoteMap = new Map(quotes.filter((q) => q.price > 0).map((q) => [q.code, q.price]));
+  } catch {
+    /* 现价取不到：currentPrice 置 null，浮盈/卖出后收益降级 */
+  }
+
+  const items: StrategyHistoryItem[] = [];
+  for (const a of byCode.values()) {
+    const currentQty = Math.round((a.buyQty - a.sellQty) * 1000) / 1000;
+    const holding = currentQty > 1e-6;
+    const avgBuyPrice = a.buyQty > 0 ? a.buyAmount / a.buyQty : 0;
+    const avgSellPrice = a.sellQty > 0 ? a.sellAmount / a.sellQty : null;
+    const currentPrice = quoteMap.get(a.code) ?? null;
+    // 已实现盈亏按均价口径 (均卖价-均买价)×卖出量：源无关，兼容妙想镜像(逐笔 realizedProfit 为空)。
+    const realized = avgSellPrice != null ? (avgSellPrice - avgBuyPrice) * a.sellQty : 0;
+    // 持有中浮盈：仅当持仓>0 且有现价
+    const unrealized = holding && currentPrice != null ? currentQty * (currentPrice - avgBuyPrice) : 0;
+    const holdProfit = realized + unrealized;
+    const holdProfitRate = a.buyAmount > 0 ? holdProfit / a.buyAmount : null;
+    // 卖出后至今收益：已清仓 + 有均卖价 + 有现价
+    const postSellReturn =
+      !holding && avgSellPrice != null && avgSellPrice > 0 && currentPrice != null
+        ? (currentPrice / avgSellPrice - 1) * 100
+        : null;
+    items.push({
+      code: a.code,
+      name: a.name,
+      status: holding ? 'holding' : 'closed',
+      buyQty: a.buyQty,
+      avgBuyPrice: Math.round(avgBuyPrice * 1000) / 1000,
+      sellQty: a.sellQty,
+      avgSellPrice: avgSellPrice == null ? null : Math.round(avgSellPrice * 1000) / 1000,
+      currentQty,
+      currentPrice,
+      realizedProfit: Math.round(realized * 100) / 100,
+      holdProfit: Math.round(holdProfit * 100) / 100,
+      holdProfitRate: holdProfitRate == null ? null : Math.round(holdProfitRate * 10000) / 10000,
+      postSellReturn: postSellReturn == null ? null : Math.round(postSellReturn * 100) / 100,
+      firstBuyDate: a.firstBuyDate,
+      lastBuyDate: a.lastBuyDate,
+      firstSellDate: a.firstSellDate,
+      lastSellDate: a.lastSellDate,
+    });
+  }
+  // 持有中在前；其次按末次活动日期倒序
+  const lastActivity = (i: StrategyHistoryItem): string => i.lastSellDate ?? i.lastBuyDate ?? '';
+  items.sort((x, y) => {
+    if (x.status !== y.status) return x.status === 'holding' ? -1 : 1;
+    return lastActivity(y).localeCompare(lastActivity(x));
+  });
+  return items;
 }
 
 /** 战法列表（含账户汇总），用于列表页卡片 */

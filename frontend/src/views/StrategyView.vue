@@ -13,6 +13,7 @@ import type {
   ScreenNlStrategy,
   SkillDimension,
   StrategyForwardStats,
+  StrategyHistoryItem,
   StrategyKind,
   StrategyListItem,
   StrategySkill,
@@ -119,6 +120,24 @@ async function loadDaily() {
   }
 }
 
+// 历史持仓（按标的汇总复盘）
+const historyItems = ref<StrategyHistoryItem[]>([]);
+const historyLoading = ref(false);
+async function loadHistory() {
+  if (!selectedId.value) {
+    historyItems.value = [];
+    return;
+  }
+  historyLoading.value = true;
+  try {
+    historyItems.value = await api.getStrategyHistory(selectedId.value);
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : String(e));
+  } finally {
+    historyLoading.value = false;
+  }
+}
+
 // ===== 前向验证 + 自动模拟总闸 =====
 const forward = ref<StrategyForwardStats | null>(null);
 const forwardLoading = ref(false);
@@ -149,6 +168,21 @@ async function loadAutoSim() {
 
 async function toggleAutoSim(val: string | number | boolean) {
   const on = val === true;
+  // 未过晋级门就开自动模拟 = 拿没有统计支撑的规则去自动下单，必须让人显式确认一次
+  if (on && forward.value && !forward.value.gate.passed) {
+    const failed = forward.value.gate.checks.filter((c) => !c.passed).map((c) => c.label);
+    try {
+      await ElMessageBox.confirm(
+        `本战法尚未通过晋级门（未达标项：${failed.join('、')}）。\n` +
+          '开启后自动模拟将按尚无统计支撑的规则下单，仅建议在明确知道自己在做实验时开启。',
+        '晋级门未通过',
+        { type: 'warning', confirmButtonText: '我知道风险，仍然开启', cancelButtonText: '取消' },
+      );
+    } catch {
+      autoSimGlobal.value = false;
+      return;
+    }
+  }
   try {
     autoSimGlobal.value = (await api.setAutoSim(on)).enabled;
     ElMessage.success(autoSimGlobal.value ? '已开启自动模拟总闸' : '已关闭自动模拟总闸');
@@ -160,12 +194,20 @@ async function toggleAutoSim(val: string | number | boolean) {
 
 async function select(id: string) {
   selectedId.value = id;
-  await Promise.all([loadSnap(), loadTasks(), loadRuns(), loadDaily(), loadForward()]);
+  await Promise.all([loadSnap(), loadTasks(), loadRuns(), loadDaily(), loadForward(), loadHistory()]);
   await loadSkills();
 }
 
 async function refreshAll() {
-  await Promise.all([loadList(), loadSnap(), loadTasks(), loadRuns(), loadDaily(), loadForward()]);
+  await Promise.all([
+    loadList(),
+    loadSnap(),
+    loadTasks(),
+    loadRuns(),
+    loadDaily(),
+    loadForward(),
+    loadHistory(),
+  ]);
   await loadSkills();
   void loadVsSim();
 }
@@ -949,6 +991,25 @@ onUnmounted(() => ws?.close());
                 </span>
               </div>
             </div>
+            <!-- 晋级门体检：曲线好看不等于证据充分，逐条给出统计门槛 -->
+            <div v-if="forward" class="fwd-gate-box" :class="{ passed: forward.gate.passed }">
+              <div class="fgb-head">
+                <span class="fgb-title">晋级门体检</span>
+                <span class="fgb-verdict" :class="forward.gate.passed ? 'ok' : 'bad'">
+                  {{ forward.gate.passed ? '全部通过' : '证据不足' }}
+                </span>
+                <span class="fgb-note">{{ forward.gate.note }}</span>
+              </div>
+              <ul class="fgb-list">
+                <li v-for="c in forward.gate.checks" :key="c.key" :class="{ bad: !c.passed }">
+                  <span class="fgb-mark">{{ c.passed ? '✓' : '✗' }}</span>
+                  <span class="fgb-label">{{ c.label }}</span>
+                  <span class="fgb-actual num">{{ c.actual }}</span>
+                  <span class="fgb-req num">要求 {{ c.required }}</span>
+                  <span class="fgb-cnote">{{ c.note }}</span>
+                </li>
+              </ul>
+            </div>
             <div class="forward-gate">
               <span class="fwd-label">自动模拟总闸</span>
               <el-switch :model-value="autoSimGlobal" size="small" @change="toggleAutoSim" />
@@ -1066,6 +1127,91 @@ onUnmounted(() => ws?.close());
             </el-table-column>
             <template #empty>暂无成交</template>
           </el-table>
+          </el-tab-pane>
+
+          <el-tab-pane name="history">
+            <template #label>
+              历史持仓
+              <el-badge
+                :value="historyItems.length"
+                :hidden="!historyItems.length"
+                type="info"
+                class="tab-badge"
+              />
+            </template>
+            <el-table
+              v-loading="historyLoading"
+              :data="historyItems"
+              stripe
+              style="width: 100%"
+              max-height="480"
+            >
+              <el-table-column label="标的" min-width="120" fixed>
+                <template #default="{ row }">
+                  {{ row.name }}<span class="num sub"> {{ row.code }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="状态" width="82">
+                <template #default="{ row }">
+                  <el-tag :type="row.status === 'holding' ? 'warning' : 'info'" size="small" effect="plain">
+                    {{ row.status === 'holding' ? '持有中' : '已清仓' }}
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="均买价" min-width="84" align="right">
+                <template #default="{ row }"><span class="num">{{ row.avgBuyPrice }}</span></template>
+              </el-table-column>
+              <el-table-column label="均卖价" min-width="84" align="right">
+                <template #default="{ row }">
+                  <span v-if="row.avgSellPrice != null" class="num">{{ row.avgSellPrice }}</span>
+                  <span v-else class="sub">—</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="持仓/现价" min-width="110" align="right">
+                <template #default="{ row }">
+                  <span class="num">{{ row.status === 'holding' ? row.currentQty : 0 }}</span>
+                  <span class="num sub"> / {{ row.currentPrice != null ? row.currentPrice : '—' }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="持有收益" min-width="130" align="right">
+                <template #default="{ row }">
+                  <span class="num" :class="dir(row.holdProfit)">{{ signed(row.holdProfit) }}</span>
+                  <span
+                    v-if="row.holdProfitRate != null"
+                    class="num sub"
+                    :class="dir(row.holdProfitRate)"
+                  >
+                    ({{ (row.holdProfitRate * 100).toFixed(1) }}%)
+                  </span>
+                </template>
+              </el-table-column>
+              <el-table-column label="已实现" min-width="100" align="right">
+                <template #default="{ row }">
+                  <span class="num" :class="dir(row.realizedProfit)">{{ signed(row.realizedProfit) }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="卖出后至今" min-width="120" align="right">
+                <template #default="{ row }">
+                  <template v-if="row.postSellReturn != null">
+                    <span class="num" :class="dir(row.postSellReturn)">
+                      {{ (row.postSellReturn >= 0 ? '+' : '') + row.postSellReturn }}%
+                    </span>
+                    <span class="sub"> {{ row.postSellReturn > 0 ? '卖飞' : row.postSellReturn < 0 ? '卖对' : '' }}</span>
+                  </template>
+                  <span v-else class="sub">{{ row.status === 'holding' ? '持有中' : '—' }}</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="买入时间" min-width="100">
+                <template #default="{ row }"><span class="num sub">{{ row.firstBuyDate ?? '—' }}</span></template>
+              </el-table-column>
+              <el-table-column label="卖出时间" min-width="100">
+                <template #default="{ row }"><span class="num sub">{{ row.lastSellDate ?? '—' }}</span></template>
+              </el-table-column>
+              <template #empty>暂无历史持仓</template>
+            </el-table>
+            <p class="hist-note">
+              「卖出后至今」= 现价/均卖价-1：正=卖出后仍涨（卖飞少赚）、负=卖出后下跌（躲跌卖对）。确定性统计，仅供复盘参考。
+            </p>
           </el-tab-pane>
 
           <el-tab-pane name="tasks">
@@ -1655,6 +1801,79 @@ onUnmounted(() => ws?.close());
   padding-top: 8px;
   border-top: 1px dashed var(--border-soft);
 }
+.fwd-gate-box {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.fwd-gate-box.passed {
+  border-color: #67c23a55;
+}
+.fgb-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.fgb-title {
+  font-weight: 600;
+  font-size: 13px;
+}
+.fgb-verdict {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 0 5px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+}
+.fgb-verdict.ok {
+  color: #67c23a;
+}
+.fgb-verdict.bad {
+  color: #909399;
+}
+.fgb-note {
+  flex: 1 1 100%;
+  font-size: 11.5px;
+  color: var(--text-2);
+  line-height: 1.5;
+}
+.fgb-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.fgb-list li {
+  display: grid;
+  grid-template-columns: 16px 130px 150px 110px 1fr;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+.fgb-mark {
+  color: #67c23a;
+  font-weight: 700;
+}
+.fgb-list li.bad .fgb-mark {
+  color: #f56c6c;
+}
+.fgb-req,
+.fgb-cnote {
+  color: var(--text-2);
+}
+.fgb-cnote {
+  font-size: 11.5px;
+}
+@media (max-width: 900px) {
+  .fgb-list li {
+    grid-template-columns: 16px 1fr;
+  }
+}
 .card {
   background: var(--bg-2);
   border: 1px solid var(--border);
@@ -1703,6 +1922,11 @@ onUnmounted(() => ws?.close());
 .sub {
   font-size: 11.5px;
   opacity: 0.85;
+}
+.hist-note {
+  margin: 8px 4px 0;
+  font-size: 11px;
+  color: var(--el-text-color-placeholder);
 }
 .run-result {
   margin-top: 12px;
