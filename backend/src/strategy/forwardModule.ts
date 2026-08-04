@@ -8,6 +8,7 @@ import {
 } from './forward';
 import { rebalanceStrategy, runRebalanceAll } from './rebalance';
 import { getStrategy } from './sim';
+import { runShadowDaily } from './shadowReplay';
 
 // 挂载战法前向验证：收盘后记录各本地战法权益样本（只读），并暴露前向统计 + 自动模拟总闸读写。
 // 自动买入默认关闭：仅当全局总闸 + 单战法白名单同时开启才允许（白名单经 PUT /api/strategies/:id 设置）。
@@ -26,6 +27,17 @@ export function registerStrategyForward(app: FastifyInstance): void {
         defaultEnabled: true,
         run: async () => {
           await recordDailySamples();
+        },
+      },
+      {
+        // 首板择时影子盘：收盘后（mx 1505 复盘之后、1550 净值采样之前）把当天镜像成交
+        // 按 883994 首板赚钱效应门槛重放进影子战法。只读镜像 + 只写本地，绝不触真实盘。
+        id: 'strategy.shadowReplay',
+        label: '首板择时影子盘·当日重放（1540）',
+        defaultCron: '40 15 * * 1-5',
+        defaultEnabled: true,
+        run: async () => {
+          await runShadowDaily();
         },
       },
       {

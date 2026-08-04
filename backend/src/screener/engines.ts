@@ -3,6 +3,7 @@ import type {
   ScreenPick,
   RunTrigger,
   ScreenProgressEvent,
+  ScreenFunnelDiagnostics,
   Horizon,
 } from '@stock-agent/shared';
 import {
@@ -13,6 +14,7 @@ import {
   type SnapshotRow,
 } from './snapshot';
 import { hardFilter, type HardFilterMode } from './filter';
+import { buildFunnelDiagnostics } from './diagnostics';
 import { buildThemeContext, scoreCandidates, type ScoredRow } from './scorer';
 import { rankCandidates } from './ranker';
 import { diversifyByIndustry, ruleRiskTags } from './risk';
@@ -31,6 +33,8 @@ export interface EngineOutput {
   strategyName: string;
   marketCount: number;
   filteredCount: number;
+  /** 漏斗诊断（被硬筛刷掉的那部分去哪了；仅 multifactor 产出） */
+  diagnostics?: ScreenFunnelDiagnostics | null;
   context: string | null;
   marketView: string | null;
   selectionLogic: string | null;
@@ -246,6 +250,8 @@ const multifactor: ScreenEngine = {
       strategyName: def.name,
       marketCount: snapshot.length,
       filteredCount: filtered.length,
+      // 漏斗诊断：把被硬筛刷掉的那部分留痕（只读研究统计，不自动放宽生产门槛）
+      diagnostics: buildFunnelDiagnostics(snapshot, def.hardFilters, filtered.length),
       context: input.context || null,
       marketView: withModeNote(runMode, rank?.marketView ?? null),
       selectionLogic: withModeNote(runMode, rank?.selectionLogic ?? null),

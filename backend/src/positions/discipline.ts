@@ -1,4 +1,4 @@
-import { and, desc, eq } from 'drizzle-orm';
+import { and, desc, eq, gte, lt } from 'drizzle-orm';
 import type {
   DisciplineAccountCheck,
   DisciplineConfig,
@@ -10,13 +10,20 @@ import type {
   DisciplineReport,
   DisciplineStatus,
   EtfSignal,
+  KlineBar,
+  MarketRegimePhase,
+  PositionSizing,
   RealPortfolio,
+  RiskBudgetTier,
 } from '@stock-agent/shared';
 import { db, schema } from '../db/client';
 import { getMeta, setMeta } from '../settings';
 import { fetchRealPositions } from '../realPositions';
 import { shanghaiDateStr } from '../market/calendar';
 import { newId, nowIso } from '../util';
+import { budgetForPhase, computeSizing } from './riskBudget';
+import { getRegimeSummaryForCockpit as regimeSummary } from '../regime/service';
+import { getKline } from '../datasource/scheduler';
 
 // 真实持仓纪律层：纯确定性体检（不调用 LLM、不下单）。真实账户无法自动交易，
 // 此层只把「该止损 / 该止盈 / 超期 / 超配 / 总仓过重」这些规则在代码层算清楚，
@@ -223,6 +230,8 @@ function resolveRule(
 function evalPosition(
   p: RealPortfolio['positions'][number],
   rule: DisciplinePositionItem['rule'],
+  sizing: PositionSizing | null,
+  stopPendingSince: string | null,
 ): { status: DisciplineStatus; flags: DisciplineFlag[]; advice: string } {
   const flags: DisciplineFlag[] = [];
   const holdPct = p.holdRate * 100;
@@ -262,8 +271,23 @@ function evalPosition(
     });
   }
 
-  // 超配
-  if (posPct > rule.singleMaxWeightPct) {
+  // 超配：以风险预算反推的允许权重为准，该权重已把 rule.singleMaxWeightPct 作为额外 cap 折进去
+  // （与账户级同口径：两个上限取更严的一个，阶段档只收紧不放宽）。
+  // 后一分支不再要求 sizing 为空——否则只要 computeSizing 返回了非 null 且 reduceShares=0，
+  // 用户配置的固定上限就永远不会被检查。
+  if (sizing && sizing.reduceShares > 0) {
+    flags.push({
+      kind: 'overweight',
+      severity: 'medium',
+      detail:
+        `本档风险预算下该票上限 ${sizing.allowedShares} 股（占 ${sizing.allowedWeightPct}%），` +
+        `当前 ${sizing.currentShares} 股（占 ${posPct.toFixed(1)}%），建议减 ${sizing.reduceShares} 股。` +
+        `有效损失距离 ${sizing.effectiveLossPct}%（结构止损 ${sizing.stopDistancePct}%` +
+        `${sizing.atrDistancePct != null ? ` / ATR距离 ${sizing.atrDistancePct}%` : ''}` +
+        `${sizing.gapBufferPct > 0 ? ` + 跳空缓冲 ${sizing.gapBufferPct}%` : ''}` +
+        ` + 费用 ${sizing.costBufferPct}%）`,
+    });
+  } else if (posPct > rule.singleMaxWeightPct) {
     flags.push({
       kind: 'overweight',
       severity: 'medium',
@@ -271,9 +295,22 @@ function evalPosition(
     });
   }
 
-  // 主状态：按严重度优先 stop_loss > take_profit > over_hold > overweight > near_stop
+  // 止损未执行：风险预算的全部前提是止损真的会被执行。真实账户是手动清单，
+  // 若前几日已提示止损而至今仍持有，这笔的实际风险已经超出预算，必须显式点名。
+  if (stopPendingSince) {
+    flags.push({
+      kind: 'stop_not_executed',
+      severity: 'high',
+      detail:
+        `${stopPendingSince} 已提示止损，至今仍持有（当前 ${holdPct.toFixed(2)}%）。` +
+        '止损不执行时，风险预算反推出的仓位上限不再成立，该票实际风险敞口不可控。',
+    });
+  }
+
+  // 主状态：按严重度优先 stop_loss > stop_not_executed > take_profit > over_hold > overweight > near_stop
   const priority: DisciplineStatus[] = [
     'stop_loss',
+    'stop_not_executed',
     'take_profit',
     'over_hold',
     'overweight',
@@ -293,14 +330,36 @@ export async function evaluateDiscipline(portfolio?: RealPortfolio): Promise<Dis
   const cfg = getDisciplineConfig();
   const overrides = getOverrideMap();
 
+  // 风险预算档随市场阶段切换：主升最松、退潮最紧。读收盘快照，不触发重算与网络请求
+  const regimePhase = readRegimePhase();
+  const budget = budgetForPhase(regimePhase);
+
   // 仅当存在 ETF 持仓时才拉取 ETF 信号，避免纯个股账户多打一次行情接口
   const hasEtf = pf.positions.some((p) => isEtfPosition(p.code, p.name));
   const etfSignals = hasEtf ? await loadEtfSignals() : new Map<string, EtfSignal>();
 
+  // 日线用于 ATR 与跳空分位；走 W1 的本地缓存，命中即秒回，取不到就退化为「只按结构止损」
+  const barsByCode = await loadBars(pf.positions.map((p) => p.code));
+  const stopPending = getPendingStopMap(
+    pf.positions.map((p) => ({ code: p.code, holdDays: p.holdDays })),
+  );
+
   const items: DisciplinePositionItem[] = pf.positions.map((p) => {
     const assetType: 'stock' | 'etf' = isEtfPosition(p.code, p.name) ? 'etf' : 'stock';
     const rule = resolveRule(p, assetType, cfg, overrides, etfSignals.get(p.code));
-    const { status, flags, advice } = evalPosition(p, rule);
+    const sizing = computeSizing(
+      {
+        assetType,
+        price: p.price,
+        stopDistancePct: rule.stopLossPct,
+        totalEquity: pf.totalAsset,
+        currentShares: p.qty,
+        bars: barsByCode.get(p.code),
+        fixedCapPct: rule.singleMaxWeightPct,
+      },
+      budget,
+    );
+    const { status, flags, advice } = evalPosition(p, rule, sizing, stopPending.get(p.code) ?? null);
     return {
       code: p.code,
       name: p.name,
@@ -311,31 +370,35 @@ export async function evaluateDiscipline(portfolio?: RealPortfolio): Promise<Dis
       positionRate: p.positionRate,
       holdDays: p.holdDays,
       rule,
+      sizing,
       status,
       flags,
       advice,
     };
   });
 
-  // 账户级：总持仓占比、现金占比、最大集中度
+  // 账户级：总持仓占比、现金占比、最大集中度。总仓上限取「配置」与「本阶段预算」中更严的一个——
+  // 阶段只收紧不放宽，配置更严时不因为阶段档宽松而放大。
   const totalPositionRate = pf.totalAsset > 0 ? pf.totalMarketValue / pf.totalAsset : 0;
   const cashRate = pf.totalAsset > 0 ? pf.cash / pf.totalAsset : 0;
   const top = [...pf.positions].sort((a, b) => b.positionRate - a.positionRate)[0];
   const warnings: string[] = [];
-  const overTotal = totalPositionRate * 100 > cfg.totalMaxPositionPct;
+  const totalCap = Math.min(cfg.totalMaxPositionPct, budget.totalMaxPositionPct);
+  const overTotal = totalPositionRate * 100 > totalCap;
   if (overTotal) {
     warnings.push(
-      `总持仓 ${(totalPositionRate * 100).toFixed(1)}% 超过上限 ${cfg.totalMaxPositionPct}%，现金缓冲不足`,
+      `总持仓 ${(totalPositionRate * 100).toFixed(1)}% 超过${regimePhase ?? '震荡'}档上限 ${totalCap}%，现金缓冲不足`,
     );
   }
-  if (top && top.positionRate * 100 > cfg.singleMaxWeightPct) {
+  const topSizing = top ? items.find((i) => i.code === top.code)?.sizing ?? null : null;
+  if (top && topSizing && topSizing.reduceShares > 0) {
     warnings.push(
-      `最大持仓 ${top.name} 占 ${(top.positionRate * 100).toFixed(1)}%，集中度偏高`,
+      `最大持仓 ${top.name} 占 ${(top.positionRate * 100).toFixed(1)}%，超出本档允许的 ${topSizing.allowedWeightPct}%`,
     );
   }
   const account: DisciplineAccountCheck = {
     totalPositionRate,
-    totalMaxPositionPct: cfg.totalMaxPositionPct,
+    totalMaxPositionPct: totalCap,
     overTotal,
     cashRate,
     topConcentration: top ? { code: top.code, name: top.name, rate: top.positionRate } : null,
@@ -348,9 +411,75 @@ export async function evaluateDiscipline(portfolio?: RealPortfolio): Promise<Dis
     overweight: items.filter((i) => i.flags.some((f) => f.kind === 'overweight')).length,
     overHold: items.filter((i) => i.flags.some((f) => f.kind === 'over_hold')).length,
     healthy: items.filter((i) => i.status === 'healthy').length,
+    stopNotExecuted: items.filter((i) => i.flags.some((f) => f.kind === 'stop_not_executed')).length,
   };
 
-  return { asOf: pf.asOf, config: cfg, items, account, counts };
+  return { asOf: pf.asOf, config: cfg, regimePhase, budget, items, account, counts };
+}
+
+/** 读大盘阶段快照（只读，不触发重算）；无快照返回 null → 风险预算回落到偏紧的震荡档 */
+function readRegimePhase(): MarketRegimePhase | null {
+  try {
+    return regimeSummary()?.phase ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** 批量取日线（走本地缓存）；单只失败不影响其他 */
+async function loadBars(codes: string[]): Promise<Map<string, KlineBar[]>> {
+  const map = new Map<string, KlineBar[]>();
+  await Promise.all(
+    codes.map(async (code) => {
+      try {
+        const bars = await getKline(code, 'day', 120);
+        if (bars.length > 0) map.set(code, bars);
+      } catch {
+        /* 取不到就不算 ATR / 跳空，仅用结构止损距离 */
+      }
+    }),
+  );
+  return map;
+}
+
+/**
+ * 找出「本轮持仓期间已提示止损、今天仍在持仓列表里」的标的 → code -> 该期间首次提示日期。
+ *
+ * 必须以「本轮建仓日」为下界：不设下界时，三个月前触发止损、已卖出、上周重新建仓的标的
+ * 会被翻出旧事件报成「至今仍持有」，并以 high 级别抢占主状态。建仓日由 holdDays（交易日）
+ * 折算成自然日近似（×7/5 并留 1 天余量），宁可略微保守也不要把上一轮的事件算进来。
+ * 只看早于今天的事件：当天刚触发的止损属于正常待执行，不算未执行。
+ */
+export function getPendingStopMap(
+  positions: Array<{ code: string; holdDays: number }>,
+): Map<string, string> {
+  if (positions.length === 0) return new Map();
+  const today = shanghaiDateStr(new Date());
+  const sinceByCode = new Map<string, string>();
+  for (const p of positions) {
+    const calendarDays = Math.ceil(Math.max(p.holdDays, 0) * 1.4) + 1;
+    sinceByCode.set(p.code, shanghaiDateStr(new Date(Date.now() - calendarDays * 86_400_000)));
+  }
+  const globalSince = [...sinceByCode.values()].sort()[0];
+  const rows = db
+    .select({ code: schema.disciplineEvents.code, date: schema.disciplineEvents.eventDate })
+    .from(schema.disciplineEvents)
+    .where(
+      and(
+        eq(schema.disciplineEvents.kind, 'stop_loss'),
+        gte(schema.disciplineEvents.eventDate, globalSince),
+        lt(schema.disciplineEvents.eventDate, today),
+      ),
+    )
+    .all();
+  const map = new Map<string, string>();
+  for (const r of rows) {
+    const since = sinceByCode.get(r.code);
+    if (since == null || r.date < since) continue; // 非持仓标的、或上一轮持仓期的旧事件
+    const prev = map.get(r.code);
+    if (!prev || r.date < prev) map.set(r.code, r.date); // 取本轮内最早一次提示，体现拖了多久
+  }
+  return map;
 }
 
 // ===== 事件流（落库 + 按日去重）=====

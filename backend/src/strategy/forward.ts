@@ -6,6 +6,7 @@ import { listStrategies as listScreenStrategies } from '../screener/strategy';
 import { getMeta, setMeta } from '../settings';
 import { newId, nowIso } from '../util';
 import { getStrategy, getStrategySnapshot, listStrategies, shanghaiDate } from './sim';
+import { evaluatePromotionGate, type GateTrade } from './promotionGate';
 
 /** 全局自动模拟总闸的内部 meta 键（不进用户设置视图，属高级实验开关） */
 const AUTO_SIM_META = 'sim_auto_enabled';
@@ -92,6 +93,24 @@ function listSamples(strategyId: string): StrategySample[] {
 }
 
 /** 已实现交易统计：卖出笔数与胜率（realizedProfit>0 占比） */
+/**
+ * 取该战法的已平仓交易，喂给晋级门。
+ * ponytail: 聚类键的板块维度暂缺——sim_trades 没有落行业字段，这里退化为「按成交日聚类」。
+ * 按日期聚类比按日期×板块更严（簇更少），方向上偏保守，不会放行本该被拦下的策略。
+ * 升级路径：下单时把标的所属板块一并落库，再把 sector 传进来。
+ */
+function gateTrades(strategyId: string): GateTrade[] {
+  return db
+    .select({
+      tradeDate: schema.simTrades.tradeDate,
+      realizedProfit: schema.simTrades.realizedProfit,
+    })
+    .from(schema.simTrades)
+    .where(and(eq(schema.simTrades.strategyId, strategyId), eq(schema.simTrades.side, 'sell')))
+    .all()
+    .map((t) => ({ entryDate: t.tradeDate, sector: null, netPnl: t.realizedProfit ?? 0 }));
+}
+
 function realizedStats(strategyId: string): { closedTrades: number; winRate: number | null } {
   const sells = db
     .select({ realizedProfit: schema.simTrades.realizedProfit })
@@ -172,6 +191,8 @@ export async function computeForwardStats(strategyId: string): Promise<StrategyF
     screenStrategyName: resolveScreenStrategyName(screenStrategyId),
     autoSimEnabled: strategy?.autoSimEnabled ?? false,
     globalAutoEnabled: isGlobalAutoSimEnabled(),
+    // 战法没有「从 N 个变体里挑」的搜索过程（规则由人写死），故不计多重检验惩罚
+    gate: evaluatePromotionGate(gateTrades(strategyId), 0),
     samples,
   };
 }

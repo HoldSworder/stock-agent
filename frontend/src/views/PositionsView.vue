@@ -40,10 +40,11 @@ const DISC_LABEL: Record<DisciplineStatus, string> = {
   take_profit: '达止盈',
   over_hold: '超期',
   overweight: '超配',
+  stop_not_executed: '止损未执行',
 };
 const discTagType = (s: DisciplineStatus): 'success' | 'danger' | 'warning' | 'info' => {
   if (s === 'healthy') return 'success';
-  if (s === 'stop_loss') return 'danger';
+  if (s === 'stop_loss' || s === 'stop_not_executed') return 'danger';
   if (s === 'take_profit') return 'warning';
   return 'info';
 };
@@ -280,15 +281,22 @@ onMounted(load);
             <div class="disc-head">
               <span class="disc-title">纪律体检</span>
               <span class="disc-sub">
-                确定性硬规则 · 只读不下单 · 止损线 -{{ discipline.config.stopLossPct }}% / 止盈
-                +{{ discipline.config.takeProfitPct }}% / 单票上限
-                {{ discipline.config.singleMaxWeightPct }}%
+                确定性硬规则 · 只读不下单 · 当前
+                <b>{{ discipline.regimePhase ?? '震荡（无快照，按偏紧档）' }}</b> 档：单笔风险预算
+                {{ discipline.budget.singleTradeRiskPct }}% · 总仓上限
+                {{ discipline.account.totalMaxPositionPct }}% · 单票绝对上限 个股
+                {{ discipline.budget.singleMaxStockPct }}% / ETF {{ discipline.budget.singleMaxEtfPct }}%
+                · 止损线 -{{ discipline.config.stopLossPct }}% / 止盈 +{{ discipline.config.takeProfitPct }}%
               </span>
             </div>
             <div class="disc-account" :class="{ warn: discipline.account.warnings.length }">
               <span>
                 总仓 {{ (discipline.account.totalPositionRate * 100).toFixed(1) }}% · 现金
                 {{ (discipline.account.cashRate * 100).toFixed(1) }}%
+              </span>
+              <span v-if="discipline.counts.stopNotExecuted > 0" class="disc-warn">
+                ⚠ {{ discipline.counts.stopNotExecuted }} 笔已提示止损但仍持有——止损不执行时，
+                风险预算反推的仓位上限不再成立
               </span>
               <template v-if="discipline.account.warnings.length">
                 <span v-for="w in discipline.account.warnings" :key="w" class="disc-warn">
@@ -308,6 +316,10 @@ onMounted(load);
                   {{ DISC_LABEL[it.status] }}
                 </el-tag>
                 <StockLink :code="it.code" :name="it.name" />
+                <span v-if="it.sizing" class="disc-sizing num">
+                  允许 {{ it.sizing.allowedShares }} 股（{{ it.sizing.allowedWeightPct }}%）· 有效损失距离
+                  {{ it.sizing.effectiveLossPct }}%
+                </span>
                 <span class="disc-advice">{{ it.advice }}</span>
               </div>
             </div>
@@ -737,6 +749,11 @@ onMounted(load);
 .disc-advice {
   color: var(--text-2);
   font-size: 12.5px;
+}
+.disc-sizing {
+  font-size: 12px;
+  color: var(--text-1);
+  white-space: nowrap;
 }
 .trend-panel {
   background: var(--bg-2);

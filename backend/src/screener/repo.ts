@@ -1,5 +1,11 @@
 import { desc, eq } from 'drizzle-orm';
-import type { ScreenPick, ScreenRun, ScreenRunDetail, ScreenFactorScore } from '@stock-agent/shared';
+import type {
+  ScreenPick,
+  ScreenRun,
+  ScreenRunDetail,
+  ScreenFactorScore,
+  ScreenFunnelDiagnostics,
+} from '@stock-agent/shared';
 import { db } from '../db/client';
 import { screenPicks, screenRuns } from '../db/schema';
 import { newId, nowIso } from '../util';
@@ -62,10 +68,11 @@ function toPick(r: PickRow): ScreenPick {
   };
 }
 
-/** 持久化一次选股运行（元信息 + 候选明细），返回落库的 run id */
+/** 持久化一次选股运行（元信息 + 候选明细 + 漏斗诊断），返回落库的 run id */
 export function saveRun(
   meta: Omit<ScreenRun, 'id' | 'createdAt'>,
   picks: ScreenPick[],
+  diagnostics?: ScreenFunnelDiagnostics | null,
 ): string {
   const id = newId();
   const createdAt = nowIso();
@@ -87,6 +94,7 @@ export function saveRun(
         runId: meta.runId,
         horizon: meta.horizon ?? 'short',
         universeNote: meta.universeNote ?? null,
+        diagnostics: diagnostics ? JSON.stringify(diagnostics) : null,
         createdAt,
       })
       .run();
@@ -141,7 +149,15 @@ export function getRunDetail(id: string): ScreenRunDetail | null {
     .all()
     .map(toPick)
     .sort((a, b) => a.rank - b.rank);
-  return { ...toRun(run), picks };
+  let diagnostics: ScreenFunnelDiagnostics | null = null;
+  if (run.diagnostics) {
+    try {
+      diagnostics = JSON.parse(run.diagnostics) as ScreenFunnelDiagnostics;
+    } catch {
+      diagnostics = null;
+    }
+  }
+  return { ...toRun(run), picks, diagnostics };
 }
 
 /** 取一次运行的全部候选行（含 id，供 T+N 复盘回填） */

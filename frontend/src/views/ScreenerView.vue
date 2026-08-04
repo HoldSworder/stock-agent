@@ -7,6 +7,7 @@ import { api, openWs } from '@/api';
 import ModuleScheduleDialog from '@/components/ModuleScheduleDialog.vue';
 import ScoreBreakdownPopover from '@/components/ScoreBreakdownPopover.vue';
 import ScreenerProgress from '@/components/ScreenerProgress.vue';
+import StockLink from '@/components/StockLink.vue';
 import StrengthMethodologyDrawer from '@/components/StrengthMethodologyDrawer.vue';
 import { useKlineStore } from '@/stores/kline';
 import { SCREEN_FACTOR_LABELS, SCREEN_FACTOR_DESC } from '@stock-agent/shared';
@@ -96,6 +97,11 @@ function selectEngine(e: ScreenEngineInfo) {
 const detail = ref<ScreenRunDetail | null>(null);
 const recentRuns = ref<ScreenRun[]>([]);
 const evaluating = ref(false);
+
+// 漏斗诊断抽屉：被硬筛刷掉的那部分去哪了（只读研究统计，不自动放宽生产门槛）
+const funnelOpen = ref(false);
+/** 与后端 diagnostics.ts 的 DELTAS 一致，用于渲染敏感性表头 */
+const sensitivityDeltas = [-0.5, -0.25, 0, 0.25, 0.5, 1];
 
 // A 股红涨绿跌
 const dir = (v: number | null | undefined) => (v == null ? '' : v > 0 ? 'up' : v < 0 ? 'down' : '');
@@ -405,6 +411,15 @@ onMounted(loadStatus);
                   </div>
                 </el-popover>
                 <span v-else>硬筛 {{ detail.filteredCount }}</span>
+                <el-button
+                  v-if="detail.diagnostics"
+                  link
+                  type="primary"
+                  class="funnel-btn"
+                  @click="funnelOpen = true"
+                >
+                  漏斗诊断
+                </el-button>
                 · {{ fmtTime(detail.createdAt) }}
                 <span v-if="detail.context"> · 题材：{{ detail.context }}</span>
               </p>
@@ -522,6 +537,76 @@ onMounted(loadStatus);
         <el-empty v-if="!recentRuns.length" description="暂无记录" :image-size="60" />
       </el-card>
     </div>
+
+    <!-- 漏斗诊断：被硬筛刷掉的那部分去哪了（只读研究统计，不自动放宽生产门槛） -->
+    <el-drawer v-model="funnelOpen" title="漏斗诊断" size="720px">
+      <div v-if="detail?.diagnostics" class="funnel">
+        <el-alert type="warning" :closable="false" show-icon class="funnel-warn">
+          <template #title>只读研究统计</template>
+          {{ detail.diagnostics.note }}
+        </el-alert>
+
+        <div class="funnel-flow">
+          <span>全市场 <b class="num">{{ detail.diagnostics.marketCount }}</b></span>
+          <span class="arrow">→</span>
+          <span>可交易 <b class="num">{{ detail.diagnostics.tradableCount }}</b></span>
+          <span class="arrow">→</span>
+          <span>硬筛通过 <b class="num">{{ detail.diagnostics.filteredCount }}</b></span>
+        </div>
+
+        <h4>各门槛拦截</h4>
+        <el-table :data="detail.diagnostics.filters" size="small" stripe>
+          <el-table-column prop="label" label="条件" min-width="110" />
+          <el-table-column prop="threshold" label="门槛" min-width="130" />
+          <el-table-column label="拦掉" width="80" align="right">
+            <template #default="{ row }"><span class="num">{{ row.rejected }}</span></template>
+          </el-table-column>
+          <el-table-column label="仅此条拦住" width="110" align="right">
+            <template #default="{ row }">
+              <span class="num" :class="{ hot: row.soleRejected > 0 }">{{ row.soleRejected }}</span>
+            </template>
+          </el-table-column>
+        </el-table>
+        <p class="funnel-hint">「仅此条拦住」= 放宽这一条最多能救回多少只，其余条件已全部通过。</p>
+
+        <h4>阈值敏感性</h4>
+        <el-table :data="detail.diagnostics.sensitivity" size="small" stripe>
+          <el-table-column prop="label" label="条件" min-width="110" />
+          <el-table-column
+            v-for="(d, i) in sensitivityDeltas"
+            :key="d"
+            :label="d === 0 ? '当前' : `${d > 0 ? '放宽' : '收紧'}${Math.abs(d) * 100}%`"
+            width="86"
+            align="right"
+          >
+            <template #default="{ row }">
+              <span class="num" :class="{ cur: d === 0 }">{{ row.points[i]?.count ?? '—' }}</span>
+            </template>
+          </el-table-column>
+        </el-table>
+
+        <h4>差一点入选（只被一条门槛拦住，按差距升序）</h4>
+        <el-table :data="detail.diagnostics.nearMisses" size="small" stripe>
+          <el-table-column label="标的" min-width="130">
+            <template #default="{ row }"><StockLink :code="row.code" :name="row.name" /></template>
+          </el-table-column>
+          <el-table-column prop="failedLabel" label="卡在" min-width="100" />
+          <el-table-column label="实际 / 门槛" min-width="120" align="right">
+            <template #default="{ row }">
+              <span class="num">{{ row.actual }} / {{ row.threshold }}</span>
+            </template>
+          </el-table-column>
+          <el-table-column label="差距" width="80" align="right">
+            <template #default="{ row }"><span class="num">{{ row.gapPct }}%</span></template>
+          </el-table-column>
+        </el-table>
+        <el-empty
+          v-if="!detail.diagnostics.nearMisses.length"
+          description="没有「只差一条」的标的"
+          :image-size="60"
+        />
+      </div>
+    </el-drawer>
   </div>
 </template>
 
@@ -725,6 +810,39 @@ onMounted(loadStatus);
 .filter-trigger {
   cursor: help;
   border-bottom: 1px dashed var(--el-border-color);
+}
+.funnel-btn {
+  margin-left: 6px;
+  font-size: 12px;
+}
+.funnel-warn {
+  margin-bottom: 12px;
+}
+.funnel-flow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  margin-bottom: 14px;
+}
+.funnel-flow .arrow {
+  color: var(--el-text-color-secondary);
+}
+.funnel h4 {
+  margin: 16px 0 8px;
+  font-size: 13.5px;
+}
+.funnel-hint {
+  margin: 6px 0 0;
+  font-size: 11.5px;
+  color: var(--el-text-color-secondary);
+}
+.funnel .num.hot {
+  color: #e6a23c;
+  font-weight: 600;
+}
+.funnel .num.cur {
+  font-weight: 600;
 }
 .crit-pop-title {
   font-size: 12.5px;

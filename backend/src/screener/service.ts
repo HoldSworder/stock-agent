@@ -141,6 +141,7 @@ export async function runScreen(opts: RunScreenOptions): Promise<ScreenRunDetail
       universeNote: universe ? opts.universeNote ?? null : null,
     },
     out.picks,
+    out.diagnostics ?? null,
   );
 
   const detail = getRunDetail(id);
