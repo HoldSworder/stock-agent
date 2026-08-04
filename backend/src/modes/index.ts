@@ -10,7 +10,7 @@ import { defineModuleSchedules } from '../scheduling/defineModuleSchedules';
 import { reseedResearchModes } from '../seeds/researchModes';
 import * as repo from './repo';
 import * as uni from './universeRepo';
-import { getModeDetail, runAllFollowedTracking } from './service';
+import { getModeDetail, listModesWithGate, runAllFollowedTracking } from './service';
 import { runModeBacktest, runModeTracking } from './tracker';
 
 // 量化研究模式库模块：读供 WebUI，写供 codex/cursor 登记模式/回测/外部跟踪快照；
@@ -18,7 +18,7 @@ import { runModeBacktest, runModeTracking } from './tracker';
 // 不下单、不调 LLM；回测/发掘仍在外部 python，系统只存储/展示 + 声明式自跟踪。
 export function registerModesModule(app: FastifyInstance): void {
   // ---- 读 ----
-  app.get('/api/modes', () => ({ ok: true, data: repo.listModes() }));
+  app.get('/api/modes', () => ({ ok: true, data: listModesWithGate() }));
 
   app.get<{ Params: { id: string } }>('/api/modes/:id', (req, reply) => {
     const d = getModeDetail(req.params.id);
@@ -138,6 +138,7 @@ export function registerModesModule(app: FastifyInstance): void {
         id: 'modes.dailyTrack',
         label: '关注模式收盘跟踪（15:10）',
         defaultCron: '10 15 * * 1-5',
+        defaultEnabled: true,
         run: async () => {
           await runAllFollowedTracking();
         },

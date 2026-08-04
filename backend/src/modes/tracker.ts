@@ -1,22 +1,28 @@
 import type {
+  CrossSectionSpec,
   ModeExit,
   ModeHolding,
   ModeSignalAction,
   ModeSpec,
   ModeTrackResult,
   ResearchModeBacktestInput,
+  ThemeFirstSpec,
 } from '@stock-agent/shared';
-import { getKline } from '../market/eastmoney';
-import { listUniverse } from './universeRepo';
+import { listPool } from '../etf/repo';
+import { mapLimit } from '../datasource/klineCache';
+import type { Bar } from './factors';
+import { computeRows, fetchBars } from './factors';
+import { annotateThemes, replayThemeFirst, shortName, type UniverseSeries } from './themeFirst';
 import { addEvents, clearEventsOn, getMode, orderedDaily, upsertDaily } from './repo';
 
-// 站内声明式跟踪引擎（trackingMode=system）：纯 TS、纯只读取数（getKline），不下单、不调 python。
-// 给定模式 spec + 研究标的库，按横截面加权 z-score 选 TopN（可主题去重 + 退出规则过滤），
-// 每个交易日算出当日应持仓、与上一快照比对生成 enter/exit 事件，并按关注以来累计收益/回撤前向跟踪。
-// 仅支持站内可计算因子白名单（rs/动量/趋势质量/横截面排名）；白名单外策略走 external 推送。
+// 站内声明式跟踪引擎（trackingMode=system）：纯 TS、纯只读取数，不下单、不调 python。
+// 两种 spec：
+//   - crossSection（默认）：横截面加权 z-score 选 TopN（可主题去重 + 退出规则过滤）；
+//   - themeFirst：先选主线主题再买主题内代表标的，从 anchorDate 全量回放（见 themeFirst.ts）。
+// 取数统一走 a-stock-data 的 mootdx 日线 + ETF 跟踪池，与 mode/ 下 python 回测同源，
+// 否则站内复算的持仓/收益与回测口径对不上。白名单外策略仍走 external 推送。
 
-const BENCH = { code: '000300', secid: '1.000300' };
-const HISTORY = 320;
+const BENCH_CODE = '510300';
 
 interface Series {
   code: string;
@@ -27,21 +33,49 @@ interface Series {
   idx: Map<string, number>;
 }
 
-async function loadSeries(code: string, secid?: string): Promise<{ dates: string[]; closes: number[] } | null> {
-  try {
-    const bars = await getKline(code, 'day', HISTORY, secid);
-    const dates: string[] = [];
-    const closes: number[] = [];
-    for (const b of bars) {
-      if (Number.isFinite(b.close) && b.close > 0) {
-        dates.push(b.time);
-        closes.push(b.close);
+interface PoolBars {
+  code: string;
+  /** 已按 python load_pool 的 short() 截断，供 family() 归主题 */
+  name: string;
+  theme: string;
+  bars: Bar[];
+}
+
+/** 取 ETF 跟踪池 + 基准 510300 的 mootdx 日线，并对齐到基准交易日轴（python 同款口径） */
+async function loadPoolBars(): Promise<{
+  pool: PoolBars[];
+  benchClose: Map<string, number>;
+  dates: string[];
+}> {
+  const benchBars = await fetchBars(BENCH_CODE);
+  if (!benchBars.length) throw new Error(`基准 ${BENCH_CODE} 行情取数失败`);
+  const benchClose = new Map(benchBars.map((b) => [b.d, b.c]));
+  const dates = [...benchClose.keys()].sort();
+
+  // 并发 4：池子几十只、每只一趟 sidecar 拿 800 根，串行往返太慢；
+  // 并发再高会撞 sidecar 上游限流，得不偿失
+  const items = listPool();
+  const barsByIdx: Bar[][] = items.map(() => []);
+  await mapLimit(
+    items.map((_, i) => i),
+    4,
+    async (i) => {
+      try {
+        barsByIdx[i] = (await fetchBars(items[i].code)).filter((b) => benchClose.has(b.d));
+      } catch {
+        /* 单只取数失败按无数据处理，不打断整池 */
       }
-    }
-    return dates.length ? { dates, closes } : null;
-  } catch {
-    return null;
+    },
+  );
+  const pool: PoolBars[] = [];
+  for (const [i, item] of items.entries()) {
+    const bars = barsByIdx[i];
+    if (bars.length < 130) continue;
+    const name = shortName(item.name);
+    pool.push({ code: item.code, name, theme: (item.tags ?? '').split(',')[0] || name, bars });
   }
+  if (!pool.length) throw new Error('ETF 跟踪池行情全部取数失败');
+  return { pool, benchClose, dates };
 }
 
 function mean(a: number[]): number {
@@ -122,7 +156,7 @@ function supertrendDown(s: Series, i: number, period: number, mult: number): boo
 }
 
 /** 在某交易日计算应持仓（横截面加权 z-score 选 TopN，主题去重 + 退出过滤） */
-function holdingsAt(spec: ModeSpec, all: Series[], date: string, benchOf: BenchOf): ModeHolding[] {
+function holdingsAt(spec: CrossSectionSpec, all: Series[], date: string, benchOf: BenchOf): ModeHolding[] {
   const scored: Array<{ s: Series; score: number }> = [];
   // 先算各因子在全池的原始值，便于 z-score
   const rawByFactor = new Map<string, Map<string, number>>();
@@ -179,35 +213,31 @@ interface TrackContext {
   goodDates: string[];
 }
 
-/** 加载研究标的库行情 + 基准 + 覆盖度足够的交易日轴（供每日跟踪与历史重跑共用） */
+/** 加载 ETF 跟踪池行情 + 基准 + 覆盖度足够的交易日轴（供每日跟踪与历史重跑共用） */
 async function loadContext(): Promise<TrackContext> {
-  const universe = listUniverse();
-  if (!universe.length) throw new Error('研究标的库为空，无法跟踪');
+  const { pool, benchClose, dates: benchDates } = await loadPoolBars();
   const all: Series[] = [];
   const map = new Map<string, Series>();
-  for (const u of universe) {
-    const ser = await loadSeries(u.code);
-    if (!ser) continue;
+  for (const p of pool) {
     const s: Series = {
-      code: u.code,
-      name: u.name,
-      theme: (u.tags ?? '').split(',')[0] || u.code,
-      dates: ser.dates,
-      closes: ser.closes,
-      idx: new Map(ser.dates.map((d, i) => [d, i])),
+      code: p.code,
+      name: p.name,
+      theme: p.theme,
+      dates: p.bars.map((b) => b.d),
+      closes: p.bars.map((b) => b.c),
+      idx: new Map(p.bars.map((b, i) => [b.d, i])),
     };
     all.push(s);
     map.set(s.code, s);
   }
-  if (!all.length) throw new Error('标的行情全部取数失败');
 
-  const benchSer = await loadSeries(BENCH.code, BENCH.secid);
-  const benchIdx = benchSer ? new Map(benchSer.dates.map((d, i) => [d, i])) : new Map<string, number>();
+  const benchIdx = new Map(benchDates.map((d, i) => [d, i]));
   const benchOf: BenchOf = (date) => (n) => {
-    if (!benchSer) return null;
     const i = benchIdx.get(date);
-    if (i === undefined || i - n < 0 || benchSer.closes[i - n] <= 0) return null;
-    return benchSer.closes[i] / benchSer.closes[i - n] - 1;
+    if (i === undefined || i - n < 0) return null;
+    const prev = benchClose.get(benchDates[i - n]) ?? 0;
+    const cur = benchClose.get(benchDates[i]) ?? 0;
+    return prev > 0 ? cur / prev - 1 : null;
   };
 
   const coverage = new Map<string, number>();
@@ -239,14 +269,67 @@ function realizedReturn(
   return wsum > 0 ? acc / wsum : 0;
 }
 
-/** 跑一只 system 模式的当日跟踪并落库；返回结果（无数据/无 spec 抛错由调用方兜底） */
-export async function runModeTracking(modeId: string): Promise<ModeTrackResult> {
+/** 取 system 模式的 spec，非 system / 缺 spec 直接抛错 */
+function requireSpec(modeId: string): ModeSpec {
   const mode = getMode(modeId);
   if (!mode) throw new Error(`模式不存在：${modeId}`);
   if (mode.trackingMode !== 'system' || !mode.spec) {
     throw new Error(`模式 ${modeId} 非 system 跟踪或缺少 spec`);
   }
-  const spec = mode.spec;
+  return mode.spec;
+}
+
+/** 加载 themeFirst 引擎所需的因子序列与交易日轴（自 anchorDate 起算，保证调仓相位可复现） */
+export async function loadThemeFirstContext(
+  spec: ThemeFirstSpec,
+): Promise<{ universe: UniverseSeries[]; dates: string[] }> {
+  const { pool, benchClose, dates: benchDates } = await loadPoolBars();
+  const universe: UniverseSeries[] = pool.map((p) => ({
+    code: p.code,
+    name: p.name,
+    rows: computeRows(p.bars, benchClose),
+  }));
+  const dates = benchDates.filter((d) => d >= spec.anchorDate);
+  if (dates.length < 2) throw new Error(`anchorDate ${spec.anchorDate} 之后无足够交易日`);
+  annotateThemes(universe, dates);
+  return { universe, dates };
+}
+
+/** themeFirst 的当日跟踪：从 anchorDate 全量回放，取末日切片作为今日快照 */
+async function trackThemeFirst(modeId: string, spec: ThemeFirstSpec): Promise<ModeTrackResult> {
+  const { universe, dates } = await loadThemeFirstContext(spec);
+  const r = replayThemeFirst(spec, universe, dates);
+  const last = r.days[r.days.length - 1];
+  const prevEquity = r.days.length > 1 ? r.days[r.days.length - 2].equity : 1;
+
+  const holdings: ModeHolding[] = last.holding
+    ? [{ code: last.holding.code, name: last.holding.name, weight: 1 }]
+    : [];
+  const dayReturn = prevEquity > 0 ? last.equity / prevEquity - 1 : 0;
+  const cumReturn = last.equity - 1;
+  const peak = Math.max(...r.days.map((d) => d.equity), 1);
+  const drawdown = peak > 0 ? last.equity / peak - 1 : 0;
+  const events = last.events;
+
+  const signal: ModeSignalAction[] = events.map((e) => ({ kind: e.kind, code: '', note: e.detail }));
+  upsertDaily(modeId, 'system', {
+    date: last.date,
+    holdings,
+    signal,
+    dayReturn: Math.round(dayReturn * 10000) / 10000,
+    cumReturn: Math.round(cumReturn * 10000) / 10000,
+    drawdown: Math.round(drawdown * 10000) / 10000,
+  });
+  clearEventsOn(modeId, last.date);
+  addEvents(modeId, last.date, events);
+
+  return { date: last.date, holdings, events, dayReturn, cumReturn, drawdown };
+}
+
+/** 跑一只 system 模式的当日跟踪并落库；返回结果（无数据/无 spec 抛错由调用方兜底） */
+export async function runModeTracking(modeId: string): Promise<ModeTrackResult> {
+  const spec = requireSpec(modeId);
+  if (spec.kind === 'themeFirst') return trackThemeFirst(modeId, spec);
   const { all, map, benchOf, goodDates } = await loadContext();
   const today = goodDates[goodDates.length - 1];
 
@@ -290,12 +373,40 @@ export async function runModeTracking(modeId: string): Promise<ModeTrackResult> 
   return { date: today, holdings, events, dayReturn, cumReturn, drawdown };
 }
 
+/** themeFirst 的历史重跑：与每日跟踪共用同一条回放路径，只是取全程指标 */
+async function backtestThemeFirst(spec: ThemeFirstSpec): Promise<ResearchModeBacktestInput> {
+  const { universe, dates } = await loadThemeFirstContext(spec);
+  const r = replayThemeFirst(spec, universe, dates);
+  const pct = (v: number): number => Math.round(v * 1000) / 10;
+  // 非复利（等权）累计收益：逐日收益等权求和，去掉复利的路径依赖偏差
+  let flat = 0;
+  for (let i = 1; i < r.days.length; i++) {
+    const prev = r.days[i - 1].equity;
+    if (prev > 0) flat += r.days[i].equity / prev - 1;
+  }
+  const years = r.days.length / 244;
+  const annualized = years > 0 ? Math.pow(Math.max(r.equity, 1e-9), 1 / years) - 1 : null;
+  return {
+    label: `系统重跑 ${dates[dates.length - 1]}`,
+    range: `${dates[0]} ~ ${dates[dates.length - 1]}`,
+    poolSize: universe.length,
+    metrics: {
+      return: pct(r.equity - 1),
+      flatReturn: pct(flat),
+      annualized: annualized === null ? undefined : pct(annualized),
+      maxDrawdown: pct(r.maxDrawdown),
+      trades: r.tradeCount,
+      avgPositions: Math.round(r.heldRatio * 100) / 100,
+      maxPositions: 1,
+    },
+    isRecommended: false,
+  };
+}
+
 /** 按 spec 历史重跑回测，返回可写库的指标摘要（纯 TS，不依赖 python）。收益以百分比表达，与 README 口径一致。 */
 export async function runModeBacktest(modeId: string): Promise<ResearchModeBacktestInput> {
-  const mode = getMode(modeId);
-  if (!mode) throw new Error(`模式不存在：${modeId}`);
-  if (mode.trackingMode !== 'system' || !mode.spec) throw new Error(`模式 ${modeId} 非 system 跟踪或缺少 spec`);
-  const spec = mode.spec;
+  const spec = requireSpec(modeId);
+  if (spec.kind === 'themeFirst') return backtestThemeFirst(spec);
   const { all, map, benchOf, goodDates } = await loadContext();
   const axis = goodDates.slice(120); // 跳过前段，保证因子可算
   if (axis.length < 30) throw new Error('可回测交易日不足');

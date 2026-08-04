@@ -89,6 +89,15 @@ const selectedBt = computed(
   () => selectedDetail.value?.backtests.find((b) => b.id === selectedBtId.value) ?? null,
 );
 
+/**
+ * 当前协议号 = 该模式最新一次回测所带的协议号。规则一改就换号，
+ * 旧协议的版本仍留在下拉里供追溯，但会显式标注「不再作为当前证据」，避免新旧口径混着看。
+ */
+const currentProtocol = computed(() => {
+  const list = selectedDetail.value?.backtests ?? [];
+  return list.find((b) => b.protocol)?.protocol ?? '';
+});
+
 // ---- 关注 / 站内自跟踪动作 ----
 async function toggleFollow(m: ResearchModeListItem, next: boolean): Promise<void> {
   try {
@@ -372,6 +381,13 @@ function tagsArr(tags?: string | null): string[] {
                 <el-tag size="small" :type="statusMeta[m.status].type" effect="dark">
                   {{ statusMeta[m.status].label }}
                 </el-tag>
+                <span
+                  v-if="m.gatePassed === false"
+                  class="gate-chip"
+                  title="跟踪样本未通过晋级门（笔数/置信下界/有效簇数/费后收益），收益曲线好看不代表证据充分"
+                >
+                  证据不足
+                </span>
               </div>
               <div class="mc-metrics">
                 <span
@@ -444,13 +460,22 @@ function tagsArr(tags?: string | null): string[] {
                     <el-option
                       v-for="b in selectedDetail.backtests"
                       :key="b.id"
-                      :label="`${b.label}${b.isRecommended ? ' ★推荐' : ''}`"
+                      :label="`${b.label}${b.protocol ? ` [${b.protocol}]` : ''}${b.isRecommended ? ' ★推荐' : ''}`"
                       :value="b.id"
                     />
                   </el-select>
                 </div>
                 <div v-if="!selectedBt" class="empty sm">暂无回测数据。</div>
                 <template v-else>
+                  <div class="proto-line" :class="{ stale: !selectedBt.protocol || selectedBt.protocol !== currentProtocol }">
+                    <template v-if="!selectedBt.protocol">
+                      协议号缺失：该结果产出于协议号机制之前，规则口径未知，不能作为当前策略的证据。
+                    </template>
+                    <template v-else-if="selectedBt.protocol !== currentProtocol">
+                      旧协议 {{ selectedBt.protocol }}（当前 {{ currentProtocol }}）：规则已改动，该结果不再作为当前证据。
+                    </template>
+                    <template v-else>当前协议 {{ selectedBt.protocol }}</template>
+                  </div>
                   <div class="kpis">
                     <div class="kpi">
                       <span class="k">非复利收益<span class="mut sm">等权</span></span>
@@ -619,6 +644,26 @@ function tagsArr(tags?: string | null): string[] {
                   <span class="k">最新跟踪日</span>
                   <span class="v mono mut">{{ latestDaily?.date ?? '-' }}</span>
                 </div>
+              </div>
+
+              <!-- 晋级门体检：收益曲线好看 ≠ 证据充分。逐条给出统计门槛的实测与要求 -->
+              <div class="gate-box" :class="{ passed: trackingDetail.gate.passed }">
+                <div class="gate-head">
+                  <span class="gate-title">晋级门体检</span>
+                  <span class="gate-verdict" :class="trackingDetail.gate.passed ? 'ok' : 'bad'">
+                    {{ trackingDetail.gate.passed ? '全部通过' : '证据不足' }}
+                  </span>
+                  <span class="gate-note">{{ trackingDetail.gate.note }}</span>
+                </div>
+                <ul class="gate-list">
+                  <li v-for="c in trackingDetail.gate.checks" :key="c.key" :class="{ bad: !c.passed }">
+                    <span class="gc-mark">{{ c.passed ? '✓' : '✗' }}</span>
+                    <span class="gc-label">{{ c.label }}</span>
+                    <span class="gc-actual mono">{{ c.actual }}</span>
+                    <span class="gc-req mono">要求 {{ c.required }}</span>
+                    <span class="gc-note">{{ c.note }}</span>
+                  </li>
+                </ul>
               </div>
 
               <div v-if="trackingDetail.recentDaily.length" class="track-chart-wrap">
@@ -1044,6 +1089,94 @@ table.mini th { color: var(--text-2); font-weight: 500; }
   margin-bottom: 18px;
 }
 .track-chart-wrap { margin-bottom: 18px; }
+.gate-box {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  margin-bottom: 18px;
+  background: var(--bg-2);
+}
+.gate-box.passed {
+  border-color: #67c23a55;
+}
+.gate-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.gate-title {
+  font-weight: 600;
+}
+.gate-verdict {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+}
+.gate-verdict.ok {
+  color: #67c23a;
+}
+.gate-verdict.bad {
+  color: #909399;
+}
+.gate-note {
+  flex: 1 1 100%;
+  font-size: 11.5px;
+  color: var(--text-2);
+  line-height: 1.5;
+}
+.gate-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.gate-list li {
+  display: grid;
+  grid-template-columns: 16px 130px 150px 110px 1fr;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+.gc-mark {
+  color: #67c23a;
+  font-weight: 700;
+}
+.gate-list li.bad .gc-mark {
+  color: #f56c6c;
+}
+.gc-req,
+.gc-note {
+  color: var(--text-2);
+}
+.gc-note {
+  font-size: 11.5px;
+}
+.gate-chip {
+  font-size: 11px;
+  color: #909399;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  padding: 0 4px;
+}
+.proto-line {
+  font-size: 11.5px;
+  color: var(--text-2);
+  margin-bottom: 8px;
+}
+.proto-line.stale {
+  color: #e6a23c;
+}
+@media (max-width: 900px) {
+  .gate-list li {
+    grid-template-columns: 16px 1fr;
+  }
+}
 .track-cols {
   display: grid;
   grid-template-columns: 1fr 1.2fr;

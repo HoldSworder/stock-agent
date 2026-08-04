@@ -65,6 +65,34 @@ TAGS = {
     "etf-mainline-theme-first-flat-leader": "ETF,非复利收益,主题优先,主线映射,同主题去重,实验",
 }
 
+# 声明式 spec：填了的模式走站内 system 自跟踪（backend/src/modes 的 TS 引擎按 spec 复算），
+# 未填的仍是 external，需外部每日推快照。spec 参数须与该模式 README 的推荐候选逐项对齐，
+# 否则站内跟踪结果与回测口径不一致。
+SPECS = {
+    # theme=mainline_quality_score|leader=mainline_quality_score|mainline_persist>=0.15|
+    # theme_breadth_above120>=0.50|theme_amount_power>=0.10|members>=1|4d|min8|themeTop3|
+    # pg15%|dd6%|exit=ma120
+    "etf-mainline-theme-first-flat-leader": {
+        "kind": "themeFirst",
+        "themeKey": "mainline_quality_score",
+        "leaderKey": "mainline_quality_score",
+        "gates": {
+            "mainlinePersist": 0.15,
+            "themeBreadthAbove120": 0.50,
+            "themeAmountPower": 0.10,
+            "minThemeMembers": 1,
+        },
+        "rebalanceDays": 4,
+        "minHoldDays": 8,
+        "themeTopExit": 3,
+        "protectGain": 0.15,
+        "protectDrawdown": 0.06,
+        "exitMa": 120,
+        # 回测 WIN 起点对应的首个交易日，决定复核相位，改动会让持仓路径整体错位
+        "anchorDate": "2025-01-02",
+    },
+}
+
 
 def num(s: str):
     """'+266.0%' / '-22.2%' / '-' -> float(百分比数值) / None"""
@@ -421,9 +449,11 @@ def build_mode(d: Path):
         "buySellMd": buy_sell,
         "analysisMd": analysis,
         "risksMd": risks,
-        "trackingMode": "external",
+        "trackingMode": "system" if d.name in SPECS else "external",
         "source": "codex",
     }
+    if d.name in SPECS:
+        mode["spec"] = SPECS[d.name]
     return {"mode": mode, "backtests": backtests}
 
 

@@ -51,6 +51,7 @@ function modeToApi(row: ModeRow): ResearchMode {
     trackingMode: row.trackingMode as TrackingMode,
     spec: parse<ModeSpec | null>(row.spec, null),
     source: row.source,
+    variantCount: row.variantCount,
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -68,6 +69,7 @@ function backtestToApi(row: BacktestRow): ResearchModeBacktestListItem {
     segments: parse<ModeSegmentRow[]>(row.segments, []),
     concentrationMd: row.concentrationMd,
     isRecommended: row.isRecommended,
+    protocol: row.protocol,
     createdAt: row.createdAt,
   };
 }
@@ -133,6 +135,7 @@ export function listModes(): ResearchModeListItem[] {
       headlineFlatReturn: hm.flatReturn ?? null,
       headlineDrawdown: hm.maxDrawdown ?? null,
       backtestCount: list.length,
+      variantCount: m.variantCount,
       updatedAt: m.updatedAt,
     };
   });
@@ -156,6 +159,7 @@ export function upsertMode(input: ResearchModeUpsert): ResearchMode {
     trackingMode: input.trackingMode ?? 'external',
     spec: input.spec === undefined ? null : JSON.stringify(input.spec),
     source: input.source ?? null,
+    variantCount: input.variantCount ?? existing?.variantCount ?? 0,
     createdAt: existing?.createdAt ?? at,
     updatedAt: at,
   };
@@ -178,6 +182,7 @@ export function upsertMode(input: ResearchModeUpsert): ResearchMode {
         trackingMode: values.trackingMode,
         spec: values.spec,
         source: values.source,
+        variantCount: values.variantCount,
         updatedAt: values.updatedAt,
       },
     })
@@ -250,6 +255,7 @@ export function addBacktest(modeId: string, input: ResearchModeBacktestInput): R
       concentrationMd: input.concentrationMd ?? null,
       tradesMd: input.tradesMd ?? null,
       isRecommended: input.isRecommended ?? false,
+      protocol: input.protocol ?? '',
       createdAt: nowIso(),
     })
     .run();
@@ -353,6 +359,25 @@ export function clearEventsOn(modeId: string, date: string): void {
   db.delete(schema.researchModeEvents)
     .where(and(eq(schema.researchModeEvents.modeId, modeId), eq(schema.researchModeEvents.date, date)))
     .run();
+}
+
+/**
+ * 一次取出所有模式的全部日跟踪并按 modeId 分组。
+ * 列表页要对每个模式算晋级门，逐个 orderedDaily 是 N+1 全表读；这里一趟查完在内存分组。
+ */
+export function allOrderedDaily(): Map<string, ResearchModeDaily[]> {
+  const rows = db
+    .select()
+    .from(schema.researchModeDaily)
+    .orderBy(asc(schema.researchModeDaily.date))
+    .all();
+  const byMode = new Map<string, ResearchModeDaily[]>();
+  for (const r of rows) {
+    const arr = byMode.get(r.modeId) ?? [];
+    arr.push(dailyToApi(r));
+    byMode.set(r.modeId, arr);
+  }
+  return byMode;
 }
 
 export function orderedDaily(modeId: string): ResearchModeDaily[] {
