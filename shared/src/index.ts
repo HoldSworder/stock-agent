@@ -243,6 +243,23 @@ export interface WatchlistInput {
   note?: string;
 }
 
+/** 驾驶舱关注标的（用户自维护，独立于自选股；含实时报价） */
+export interface CockpitFocusItem {
+  code: string;
+  name: string;
+  note: string | null;
+  /** 手动排序位，越小越靠前 */
+  sortOrder: number;
+  createdAt: string;
+  quote: StockQuote | null;
+}
+
+/** 新增驾驶舱关注标的入参 */
+export interface CockpitFocusInput {
+  code: string;
+  note?: string;
+}
+
 /** 批量添加关注标的入参（codes 为混合分隔的代码串） */
 export interface WatchlistBulkInput {
   codes: string;
@@ -475,6 +492,25 @@ export interface BollReadout {
   pos: '上轨上方' | '中上轨' | '中下轨' | '下轨下方';
 }
 
+/**
+ * S9 技术指标库：量能读数（「这只标的今天是不是放量」的显式数值）。
+ *
+ * 两套口径不可混用：收盘后用「当日成交额 ÷ 前 20 日成交额中位数」，
+ * 盘中日 K 未收完时该比值会系统性偏低，改用东财实时量比（已按时间折算，本身可比）。
+ */
+export interface VolumeReadout {
+  /** 量比数值 */
+  ratio: number;
+  /** 口径来源 */
+  basis: 'amount_median20' | 'realtime';
+  /** 七档定性（两种口径各有一套阈值，标签字典共用） */
+  state: VolumeState;
+  /** 可直接渲染的中文标签，消费方无须自带阈值或字典 */
+  label: string;
+  /** 换手率 %，ETF 与缺失为 null */
+  turnoverRate: number | null;
+}
+
 /** S9 技术指标库：个股技术指标快照（日线 MACD/KDJ/RSI/BOLL + 读数），喂技术分析师 / KlineDialog 副图读数条 */
 export interface StockIndicators {
   code: string;
@@ -487,6 +523,8 @@ export interface StockIndicators {
   kdj: KdjReadout | null;
   rsi: RsiReadout | null;
   boll: BollReadout | null;
+  /** 量能读数；数据不足或盘中取不到实时量比时为 null */
+  volume: VolumeReadout | null;
   note: string;
 }
 
@@ -610,6 +648,32 @@ export interface MarketOverview {
   stale?: boolean;
   /** 最近一次「全部区块均新鲜」的时间 ISO，stale 时用于提示缓存时效 */
   dataAsOf?: string;
+}
+
+/** 股指主力资金流：单日读数（主力净流入单位「亿」，红涨绿跌） */
+export interface IndexFundFlowDay {
+  /** 交易日 YYYY-MM-DD */
+  date: string;
+  /** 主力净流入额（亿，正为净流入） */
+  main: number;
+  /** 当日指数涨跌幅 % */
+  pct: number;
+}
+
+/** 股指主力资金流：单个指数的多日序列（升序 旧→新，取数失败 days 为空数组） */
+export interface IndexFundFlow {
+  code: string;
+  name: string;
+  /** 东财 secid（市场前缀.代码），用于开 K 线 */
+  secid: string;
+  days: IndexFundFlowDay[];
+}
+
+/** 股指主力资金流：大盘页面板数据（7 个主要股指近 N 日主力净流入趋势） */
+export interface IndexFundFlowResult {
+  /** 数据时间 ISO */
+  asOf: string;
+  items: IndexFundFlow[];
 }
 
 // ===== 宏观·资金面底稿（低频全局指标：日频/EOD，与实时盘面分离）=====
@@ -1514,6 +1578,8 @@ export interface StrategyForwardStats {
   autoSimEnabled: boolean;
   /** 全局自动模拟总闸是否开启 */
   globalAutoEnabled: boolean;
+  /** 晋级门体检（统计显著性；只体检不自动晋级） */
+  gate: PromotionGateResult;
   samples: StrategySample[];
 }
 
@@ -1635,6 +1701,43 @@ export interface StrategySnapshot {
   trades: SimTrade[];
 }
 
+/**
+ * 历史持仓（按标的汇总复盘）：每个曾持有的标的一行，全历史加权均价 + 首买/末卖时间。
+ * 用于「卖飞/卖对」复盘：卖出后至今收益 = 现价/均卖价-1（正=卖飞少赚、负=躲跌卖对）。
+ */
+export interface StrategyHistoryItem {
+  code: string;
+  name: string;
+  /** holding 持有中 / closed 已清仓 */
+  status: 'holding' | 'closed';
+  /** 累计买入股数 */
+  buyQty: number;
+  /** 加权平均买入价 */
+  avgBuyPrice: number;
+  /** 累计卖出股数 */
+  sellQty: number;
+  /** 加权平均卖出价（从未卖出为 null） */
+  avgSellPrice: number | null;
+  /** 当前持有数量（买-卖） */
+  currentQty: number;
+  /** 现价（取数失败为 null） */
+  currentPrice: number | null;
+  /** 已实现盈亏（卖出笔 realizedProfit 合计） */
+  realizedProfit: number;
+  /** 持有收益 = 已实现 + 持有中浮盈（持有量×(现价-均买价)） */
+  holdProfit: number;
+  /** 持有收益率（对累计买入额），无买入为 null */
+  holdProfitRate: number | null;
+  /** 卖出后至今收益 %（已清仓且有现价：现价/均卖价-1），否则 null */
+  postSellReturn: number | null;
+  /** 首买 / 末买 交易日 YYYY-MM-DD */
+  firstBuyDate: string | null;
+  lastBuyDate: string | null;
+  /** 首卖 / 末卖 交易日 YYYY-MM-DD */
+  firstSellDate: string | null;
+  lastSellDate: string | null;
+}
+
 /** 战法列表项：基础信息 + 账户汇总 */
 export interface StrategyListItem {
   strategy: Strategy;
@@ -1650,6 +1753,10 @@ export interface ChatSession {
   title: string;
   createdAt: string;
   updatedAt: string;
+  /** 绑定标的代码：非空表示这是某标的的专属长期跟踪会话（K 线详情弹窗内的对话栏） */
+  refCode?: string | null;
+  /** 绑定标的名称 */
+  refName?: string | null;
 }
 
 export interface ChatMessage {
@@ -1658,6 +1765,64 @@ export interface ChatMessage {
   role: MessageRole;
   content: string;
   createdAt: string;
+}
+
+// ===== 标的 K 线标注（agent 在对话中打点，长期留存供跟踪复核）=====
+
+/**
+ * 标注形态：
+ * - `price_line` 水平价位线或价格带（支撑/压力/目标价/止损位），仅需 price：
+ *   1 个点画一条线，2 个点画下沿到上沿的价格带（计划里的区间型关键位走这条）
+ * - `point` 单 K 线点位标记（某日买卖点/关键事件），1 个点，需 time + price
+ * - `range` 时间区间（主升浪/横盘区），2 个点，各需 time + price
+ * - `trend_line` 趋势线/线段，2 个点，各需 time + price
+ */
+export type SymbolMarkKind = 'price_line' | 'point' | 'range' | 'trend_line';
+
+/** 标注点位：日/周/月 K 用 `YYYY-MM-DD`，分钟级用 `YYYY-MM-DD HH:mm` */
+export interface SymbolMarkPoint {
+  time?: string | null;
+  price?: number | null;
+}
+
+/** 标注有效状态：active 当前有效 / invalid 已失效（变灰保留） / historical 历史版本 */
+export type SymbolMarkStatus = 'active' | 'invalid' | 'historical';
+
+export interface SymbolMark {
+  id: string;
+  code: string;
+  kind: SymbolMarkKind;
+  /** 图上显示的短标签 */
+  label: string;
+  /** 详细理由，鼠标悬浮与标注清单展示 */
+  note?: string | null;
+  points: SymbolMarkPoint[];
+  /** 覆盖默认配色（十六进制），留空按 kind 取默认色 */
+  color?: string | null;
+  sessionId?: string | null;
+  runId?: string | null;
+  createdAt: string;
+  /** 计划标注的语义键（如 plan.support.0），手工标注为空 */
+  semanticKey?: string | null;
+  /** 所属周期；price_line 可跨周期展示，其余只在所属周期展示 */
+  timeframe?: KlinePeriod | null;
+  /** support/resistance/entry/stop/target/structure */
+  role?: string | null;
+  planId?: string | null;
+  planVersion?: number | null;
+  status?: SymbolMarkStatus | null;
+  invalidatedAt?: string | null;
+}
+
+export interface SymbolMarkInput {
+  code: string;
+  kind: SymbolMarkKind;
+  label: string;
+  note?: string | null;
+  points: SymbolMarkPoint[];
+  color?: string | null;
+  sessionId?: string | null;
+  runId?: string | null;
 }
 
 // ===== TrendRadar 热点雷达模块 =====
@@ -1746,6 +1911,95 @@ export interface ClsTelegraph {
   important: boolean;
   /** 原文链接（部分源提供） */
   url?: string | null;
+}
+
+/** 大V观点支持的平台 */
+export type KolPlatform = 'weibo' | 'xiaohongshu';
+
+/** 关注的大V账号（名单在「大V观点」页维护） */
+export interface KolAccount {
+  /** 微博 UID（纯数字）/ 小红书 userId（24 位 hex），两个 ID 空间不重叠 */
+  uid: string;
+  platform: KolPlatform;
+  /** 昵称 */
+  screenName: string;
+  /** 小红书号（与 userId 是两套 ID），仅小红书有，用于和 App 里的账号核对 */
+  redId?: string;
+  /** 头像 URL */
+  avatar: string;
+  /** 微博认证信息（如「深圳东方港湾投资管理股份有限公司董事长」）/ 小红书个人简介，无则空串 */
+  verifiedReason: string;
+  /** 粉丝数展示串（微博「1313.3万」、小红书「1万+」，原样透传） */
+  followersCount: string;
+  /** 是否参与定时抓取 */
+  enabled: boolean;
+  addedAt: string;
+}
+
+/** 博文配图（已下载到本地，src 为站内地址） */
+export interface KolImage {
+  /** 站内可直接访问的地址，形如 /media/kol/202607/<file>.jpg */
+  src: string;
+  /** 原图宽高，供前端预留位置避免加载时抖动；未知为 0 */
+  width: number;
+  height: number;
+}
+
+/** 单条大V博文 / 小红书笔记 */
+export interface KolPost {
+  /** 微博 bid / 小红书 noteId（业务主键，前端 key 与去重用） */
+  bid: string;
+  /** 作者 UID */
+  uid: string;
+  platform: KolPlatform;
+  screenName: string;
+  avatar: string;
+  /** 已清洗的正文（微博长文为补拉后的全文；小红书为「标题\n\n正文」） */
+  text: string;
+  /** 发布时间（ISO 字符串）；小红书降级记录为首次入库时间 */
+  createdAt: string;
+  /** 原文链接 */
+  url: string;
+  /** 是否转发他人博文（小红书恒 false） */
+  isRetweet: boolean;
+  /** 被转发的原文（含原作者），非转发为 null */
+  retweetText: string | null;
+  reposts: number;
+  comments: number;
+  attitudes: number;
+  /** 笔记配图（已缓存到本地）。小红书大量信息画在图里，正文往往只是引子 */
+  images?: KolImage[];
+  /** 仅有标题的降级记录（小红书未配置 Cookie 时，拿不到正文与发布时间） */
+  titleOnly?: boolean;
+  /** 正文是否为长文（截断后需补拉全文），落库后不再关心 */
+  isLongText?: boolean;
+  /** 是否置顶帖（置顶时间可能是很久以前，抓取时按此过滤旧帖） */
+  isTop?: boolean;
+}
+
+/** 大V候选项（微博为搜索结果，小红书为主页链接/分享短链解析结果） */
+export interface KolSearchResult {
+  uid: string;
+  /** 省略时按微博处理，保持旧调用方兼容 */
+  platform?: KolPlatform;
+  /** 小红书号，仅小红书候选项有 */
+  redId?: string;
+  screenName: string;
+  avatar: string;
+  /** 粉丝数展示串 */
+  followersCount: string;
+  /** 认证信息 / 个人简介，用于辨别真身与同名号 */
+  verifiedReason: string;
+}
+
+/** 大V观点抓取结果概要 */
+export interface KolRefreshResult {
+  /** 本轮扫描的大V数 */
+  accounts: number;
+  /** 新增入库的博文数 */
+  inserted: number;
+  /** 抓取失败的大V昵称（单个失败不阻断整轮） */
+  failed: string[];
 }
 
 /** AI 热点研判（按需经本系统自有 LLM 基于 MCP 原始数据现场生成） */
@@ -2484,6 +2738,36 @@ export type BoardKind = 'industry' | 'concept';
  */
 export type BoardBreadthVerdict = 'none' | 'candidate' | 'confirmed' | 'fading';
 
+/**
+ * 主线生命周期阶段（ETF 中线口径的四阶段；与 verdict 一一对应但语义面向操作）：
+ *  - none 未入场景（未达数量级地板）
+ *  - brewing 酝酿（已达标，但跨日确认未完成：居首天数不够或核心股换了一批）
+ *  - advancing 主升（跨日确认成立：确认门槛 + 稳居榜首 + 核心股延续）
+ *  - diverging 分歧（曾确认，现掉了部分条件但仍达地板）
+ *  - fading 退幕（曾主线，现掉地板 / 跌出榜首 / 新高数腰斩）
+ *
+ * ETF 层面不单列「高潮」阶段：ETF 波动与换手远低于个股，题材分冲高那套个股口径搬过来没有意义，
+ * 过热应由个股/ETF 自身的超买与成交额分位判断，不由板块宽度阶段承担。
+ */
+export type BoardMainlineStage = 'none' | 'brewing' | 'advancing' | 'diverging' | 'fading';
+
+/**
+ * 阶段允许的开仓动作（硬路由）。
+ * 关键约束：阶段只用于「收紧」——禁止开新仓、强制只减不加，绝不用于放大仓位。
+ * 因为阶段判定天然滞后（主升/分歧只能事后确认），拿滞后信号去加码会系统性地在高位加仓。
+ */
+export type BoardStageAction = 'none' | 'probe' | 'lead' | 'hold_only' | 'exit_only';
+
+/** 核心股延续度：今日与上一交易日「板块内创新高个股集合」的重叠情况 */
+export interface CoreContinuity {
+  /** 重叠只数 */
+  kept: number;
+  /** 上一交易日核心股只数（无历史为 0） */
+  prevCount: number;
+  /** 重叠率 = kept / min(今日, 上日)，无历史或历史无该字段为 null（未知不阻断确认） */
+  overlap: number | null;
+}
+
 /** 单个板块的新高宽度评估项 */
 export interface BoardBreadthItem {
   boardCode: string;
@@ -2505,6 +2789,12 @@ export interface BoardBreadthItem {
   delta: number | null;
   /** 主线判定 */
   verdict: BoardBreadthVerdict;
+  /** 生命周期阶段（与 verdict 同源，面向操作语义） */
+  stage: BoardMainlineStage;
+  /** 该阶段允许的开仓动作（硬路由，只收紧不放大） */
+  stageAction: BoardStageAction;
+  /** 核心股延续度（跨日确认要看「还是不是同一批股」） */
+  continuity: CoreContinuity;
   /** 映射到的代表 ETF（无映射为 null） */
   etf: { code: string; name: string } | null;
   /** 一句话说明 */
@@ -2642,6 +2932,12 @@ export interface MainlineConsensusItem {
   etf: { code: string; name: string } | null;
   // —— breadth（确定性硬证据，权重最高）——
   breadthVerdict: BoardBreadthVerdict | null;
+  /** 生命周期阶段（来自 breadth 锚，决定允许动作） */
+  breadthStage: BoardMainlineStage | null;
+  /** 阶段允许的开仓动作（硬路由） */
+  breadthAction: BoardStageAction | null;
+  /** 核心股跨日延续度（overlap=null 表示历史快照尚无该字段） */
+  continuity: CoreContinuity | null;
   newHighCount: number | null;
   topDays: number | null;
   // —— themes（多源协同度）——
@@ -2688,9 +2984,13 @@ export interface BoardWorkbenchItem {
   strengthTrend: 'rising' | 'flat' | 'falling' | null;
   /** 三方共识档 */
   consensus: MainlineConsensusLevel;
+  /** 主线生命周期阶段（来自 breadth 确定性锚，决定 actionTag 的许可上限） */
+  stage: BoardMainlineStage | null;
+  /** 阶段允许的开仓动作（硬路由） */
+  stageAction: BoardStageAction | null;
   /** 代表 ETF（无映射为 null） */
   etf: { code: string; name: string } | null;
-  /** 派生操盘动作标签 */
+  /** 派生操盘动作标签（不得越出 stageAction 的许可） */
   actionTag: BoardActionTag;
   /** 适配交易周期（派生自共识 + 趋势） */
   cycleFit: BoardCycleFit;
@@ -2867,6 +3167,18 @@ export interface AppSettings {
   astockBaseUrl: string;
   /** a-stock-data 数据源启停，默认开启 */
   astockEnabled: string;
+  /** 微博大V博文数据源启停，默认开启 */
+  weiboEnabled: string;
+  /** 微博 Cookie（选填）：默认走免登录访客态，填入登录态 Cookie 可提升配额与抓取稳定性 */
+  weiboCookie: string;
+  /** 小红书博主笔记数据源启停，默认开启 */
+  xhsEnabled: string;
+  /** 小红书 Cookie（选填）：不填只能抓到标题，填了才有正文与发布时间 */
+  xhsCookie: string;
+  /** 微博抓取窗口（天）：只收这个天数内发布的博文，默认 2 */
+  weiboFetchDays: string;
+  /** 小红书抓取窗口（天）：越小请求越少、越不易触发风控，默认 2 */
+  xhsFetchDays: string;
 }
 
 // ===== 数据源中心（统一管理所有外部取数）=====
@@ -2921,6 +3233,25 @@ export interface DataSourceRoute {
   providers: string[];
   /** 最近一次成功命中的数据源 id */
   lastServed: string | null;
+}
+
+/** 日K本地缓存覆盖情况（数据源页展示；盘前预热 + 盘中增量 + 每周全量重刷） */
+export interface KlineCacheStats {
+  /** 当前生效的复权基准日（每周全量重刷时推进） */
+  adjBase: string;
+  lastPrewarmAt: string | null;
+  lastPrewarmCodes: number;
+  lastFullRefreshAt: string | null;
+  lastIntradayAt: string | null;
+  lastError: string | null;
+  /** 已缓存的标的数 */
+  codeCount: number;
+  /** 总行数 */
+  rowCount: number;
+  /** 缓存中的最新交易日 */
+  latestDate: string | null;
+  /** 覆盖到最新交易日的标的数 */
+  freshCodeCount: number;
 }
 
 /** 数据源元信息 + 当前状态（列表项） */
@@ -4073,6 +4404,349 @@ export interface SafetyUpdate {
   allowManualForceTrade?: boolean;
 }
 
+// ===== 驾驶舱「今日全景」统一读模型 =====
+// 所有总览数字统一从这里投影，避免同一指标在驾驶舱 / 大盘页 / 计划页各算各的而对不上。
+// 每个区块自带 status：ok 正常 / empty 无数据 / error 取数失败——失败必须显式说明，不能整块消失。
+
+export type PanoramaBlockStatus = 'ok' | 'empty' | 'error';
+
+/** 区块信封：数据 + 状态 + 失败原因 */
+export interface PanoramaBlock<T> {
+  status: PanoramaBlockStatus;
+  /** status=ok 时有值 */
+  data: T | null;
+  /** status≠ok 时的人话说明（直接展示给用户，不再让区块凭空消失） */
+  note: string;
+}
+
+/** 结论带·能不能做（秒开层：只用本地快照，实际仓位由实时层的 account 块补位） */
+export interface PanoramaCanTrade {
+  phase: MarketRegimePhase | null;
+  score: number | null;
+  /** 当前档的单笔风险预算 % */
+  singleTradeRiskPct: number;
+  /** 当前档的总仓上限 % */
+  totalMaxPositionPct: number;
+  conclusion: string;
+}
+
+/** 结论带·做什么 */
+export interface PanoramaFocus {
+  board: string | null;
+  stage: BoardMainlineStage | null;
+  action: BoardStageAction | null;
+  etf: { code: string; name: string } | null;
+  conclusion: string;
+}
+
+/** 结论带·该动谁（秒开层只给计划侧；持仓侧由实时层的 discipline 块补位） */
+export interface PanoramaTodo {
+  /** 今日计划待触发数 */
+  planPending: number;
+  /** 今日计划已失效数 */
+  planInvalid: number;
+  conclusion: string;
+}
+
+/** 第1层·情绪当前读数（读收盘快照，不重算） */
+export interface PanoramaSentimentNow {
+  tradeDate: string;
+  index: number;
+  level: string;
+  phase: string;
+  /** 较上一交易日变动 */
+  delta: number | null;
+  /** 白话仓位倾向建议 */
+  advice: string;
+}
+
+/** 第2层·今日计划的一条具体操作 */
+export interface PanoramaPlanAction {
+  code: string;
+  name: string;
+  /** buy/add/reduce/sell/hold */
+  direction: string;
+  /** 触发条件文本（价位/形态） */
+  trigger: string;
+  status: PlanItemStatus;
+  confidence: number | null;
+  assetType: string;
+}
+
+/** 第3层·ETF 多周期盯盘（层级 + 最近动作建议） */
+export interface PanoramaEtfWatchItem {
+  code: string;
+  name: string;
+  /** 已建层（如 [1,2]） */
+  heldLayers: number[];
+  /** 趋势阶段（无则 null） */
+  trendStage: string | null;
+  /** 最近一条告警的动作建议（无则 null） */
+  lastAction: string | null;
+  lastAt: string | null;
+}
+
+export interface PanoramaEtfWatch {
+  /** 引擎是否在跑 */
+  running: boolean;
+  alertsToday: number;
+  items: PanoramaEtfWatchItem[];
+}
+
+/** 第3层·个股盯盘 */
+export interface PanoramaStockWatchAlert {
+  code: string;
+  name: string;
+  severity: string;
+  advice: string;
+  at: string;
+}
+
+export interface PanoramaStockWatch {
+  running: boolean;
+  inSession: boolean;
+  alertsToday: number;
+  lastSignalCount: number;
+  alerts: PanoramaStockWatchAlert[];
+}
+
+// ===== 实时层（需网络取数，前端并行加载后补位）=====
+
+/** 真实账户当前状态 */
+export interface PanoramaAccount {
+  totalAsset: number;
+  cash: number;
+  /** 总仓位率 % */
+  positionPct: number;
+  /** 今日盈亏额 */
+  todayProfit: number;
+  /** 今日盈亏率 % */
+  todayRate: number;
+  positionCount: number;
+}
+
+/** 持仓纪律汇总（逐票明细仍在持仓页） */
+export interface PanoramaDisciplineItem {
+  code: string;
+  name: string;
+  status: DisciplineStatus;
+  /** 一句话动作（含建议减仓股数时优先给股数） */
+  action: string;
+}
+
+export interface PanoramaDisciplineSummary {
+  stopLoss: number;
+  takeProfit: number;
+  overweight: number;
+  stopNotExecuted: number;
+  healthy: number;
+  /** 实际总仓 % */
+  totalPositionPct: number;
+  /** 本档总仓上限 % */
+  totalMaxPositionPct: number;
+  warnings: string[];
+  /** 需要处理的前若干票 */
+  items: PanoramaDisciplineItem[];
+}
+
+/** ETF 轮动榜条目（赛道层结论） */
+export interface PanoramaRotationItem {
+  code: string;
+  name: string;
+  track: string | null;
+  state: string;
+  score: number;
+  rs: number | null;
+}
+
+/** 情绪硬读数（判断敢不敢追的最直接依据） */
+export interface PanoramaDragonRead {
+  maxStreak: number;
+  limitUpCount: number;
+  brokenRate: number;
+  topDragon: string | null;
+}
+
+/** 驾驶舱实时层（需网络；各块独立降级，失败不影响秒开层） */
+export interface CockpitPanoramaLive {
+  asOf: string;
+  account: PanoramaBlock<PanoramaAccount>;
+  discipline: PanoramaBlock<PanoramaDisciplineSummary>;
+  rotation: PanoramaBlock<PanoramaRotationItem[]>;
+  dragon: PanoramaBlock<PanoramaDragonRead>;
+}
+
+/** 情绪与阶段的逐日读数（一个点 = 一个交易日） */
+export interface PanoramaSentimentPoint {
+  date: string;
+  /** 情绪指数 0-100 */
+  sentiment: number | null;
+  /** 大盘强度分 0-100 */
+  regimeScore: number | null;
+  phase: MarketRegimePhase | null;
+  /** 涨停家数 */
+  limitUp: number | null;
+  /** 跌停家数 */
+  limitDown: number | null;
+  /** 炸板率 % */
+  brokenRate: number | null;
+  /** 上涨家数 */
+  advancers: number | null;
+  /** 下跌家数 */
+  decliners: number | null;
+}
+
+/** 主线生命周期泳道的一格 */
+export interface PanoramaLaneItem {
+  board: string;
+  boardCode: string;
+  newHighCount: number;
+  topDays: number;
+  etf: { code: string; name: string } | null;
+}
+
+/** 按阶段分组的泳道 */
+export interface PanoramaLane {
+  stage: BoardMainlineStage;
+  action: BoardStageAction;
+  items: PanoramaLaneItem[];
+}
+
+/** 账户逐日表现（净值曲线 + 日历热力共用） */
+export interface PanoramaEquityPoint {
+  date: string;
+  /** 当日账户收益率 %（各持仓贡献之和） */
+  dayPct: number;
+  /** 累计净值（起点 1） */
+  nav: number;
+}
+
+/** 系统健康矩阵的一格 */
+export interface PanoramaHealthCell {
+  key: string;
+  label: string;
+  status: 'ok' | 'warn' | 'down';
+  /** 一句话读数，如「覆盖 128 只 · 至 2026-08-01」 */
+  detail: string;
+}
+
+/** 驾驶舱今日全景·秒开层（纯本地 DB/内存读取，不含任何网络调用） */
+export interface CockpitPanorama {
+  asOf: string;
+  tradeDate: string;
+  canTrade: PanoramaBlock<PanoramaCanTrade>;
+  focus: PanoramaBlock<PanoramaFocus>;
+  todo: PanoramaBlock<PanoramaTodo>;
+  /** 第1层：情绪当前读数 */
+  sentimentNow: PanoramaBlock<PanoramaSentimentNow>;
+  sentimentTrend: PanoramaBlock<PanoramaSentimentPoint[]>;
+  lanes: PanoramaBlock<PanoramaLane[]>;
+  /** 第2层：今日计划的具体操作清单 */
+  planActions: PanoramaBlock<PanoramaPlanAction[]>;
+  /** 第3层：ETF 多周期盯盘层级与动作 */
+  etfWatch: PanoramaBlock<PanoramaEtfWatch>;
+  /** 第3层：个股盯盘告警 */
+  stockWatch: PanoramaBlock<PanoramaStockWatch>;
+  equity: PanoramaBlock<PanoramaEquityPoint[]>;
+  health: PanoramaBlock<PanoramaHealthCell[]>;
+}
+
+// ===== 选股漏斗诊断（只读研究统计，不自动放宽生产门槛）=====
+
+/** 单个硬筛条件的拦截统计 */
+export interface ScreenFilterStat {
+  key: string;
+  label: string;
+  /** 门槛的可读描述，如「成交额 ≥ 2 亿」 */
+  threshold: string;
+  /** 单独看这一条会拦掉多少只（各条独立统计，会相互重叠） */
+  rejected: number;
+  /** 仅被这一条拦住的只数——放宽它最多能救回这么多 */
+  soleRejected: number;
+}
+
+/** 阈值敏感性：该条件按比例放宽/收紧后的候选数 */
+export interface ScreenSensitivityRow {
+  key: string;
+  label: string;
+  /** delta 为门槛的相对变动（+0.25 = 放宽 25%），count 为对应的候选数；不可扫描时为空数组 */
+  points: Array<{ delta: number; count: number }>;
+  /** points 为空时说明为什么无法扫描（如门槛为 0，相对缩放无意义） */
+  note?: string;
+}
+
+/** 差一点入选的标的（恰好只被一条门槛拦住） */
+export interface ScreenNearMiss {
+  code: string;
+  name: string;
+  failedKey: string;
+  failedLabel: string;
+  /** 实际值 */
+  actual: number | null;
+  /** 门槛值 */
+  threshold: number;
+  /** 距门槛的相对差距 %（正数表示还差多少） */
+  gapPct: number;
+}
+
+/** 选股漏斗诊断：被硬筛刷掉的那部分去了哪里 */
+export interface ScreenFunnelDiagnostics {
+  marketCount: number;
+  /** 通过可交易性过滤（剔科创/北交/ST）后的只数 */
+  tradableCount: number;
+  filteredCount: number;
+  filters: ScreenFilterStat[];
+  sensitivity: ScreenSensitivityRow[];
+  nearMisses: ScreenNearMiss[];
+  note: string;
+}
+
+// ===== 前向晋级门（统计显著性体检，只读不自动晋级）=====
+
+/** 单条门槛的体检结果 */
+export interface PromotionCheck {
+  key: string;
+  label: string;
+  /** 实测值（已格式化） */
+  actual: string;
+  /** 门槛要求（已格式化） */
+  required: string;
+  passed: boolean;
+  /** 为什么要有这条门槛 */
+  note: string;
+}
+
+/**
+ * 晋级门体检：一个策略要被认可为「可上仓位」，光看累计收益曲线不够。
+ * 小样本胜率要看置信下界；同日同板块的批量交易不是独立样本；从 N 个变体里挑最优会系统性高估。
+ * 本结构只做体检与展示，永不自动晋级。
+ */
+export interface PromotionGateResult {
+  passed: boolean;
+  /** 完整可归因的交易笔数（已平仓） */
+  trades: number;
+  /** 点胜率 % */
+  winRate: number | null;
+  /** Wilson 95% 胜率下界 % */
+  wilsonLowerPct: number | null;
+  /** 日期(×板块)聚类后的有效簇数（Herfindahl 口径，同日批量交易不重复计数） */
+  effectiveClusters: number;
+  /** 簇等权胜率 % */
+  clusterWinRatePct: number | null;
+  /** 簇等权胜率 95% 正态下界 % */
+  clusterWinLowerPct: number | null;
+  /** 费后平均每笔净收益 */
+  avgNetPnl: number | null;
+  /** 累计已实现盈亏 */
+  totalNetPnl: number;
+  /** 申报的变体数（从多少个参数/规则变体里挑出来的；0=未申报） */
+  variantCount: number;
+  /** 多重检验惩罚后的胜率下界要求 % */
+  requiredWinLowerPct: number;
+  checks: PromotionCheck[];
+  note: string;
+}
+
 // ===== 真实持仓纪律（确定性体检，只读不下单）=====
 
 /** 纪律命中类型 */
@@ -4081,7 +4755,55 @@ export type DisciplineKind =
   | 'take_profit'
   | 'overweight'
   | 'over_hold'
-  | 'near_stop';
+  | 'near_stop'
+  /** 曾触发止损但至今仍持有：风险预算反推仓位的前提是止损真的会执行，不追踪这条整套口径就是自欺 */
+  | 'stop_not_executed';
+
+/**
+ * 市场阶段对应的风险预算档（ETF 中线口径，按本项目标的自行标定）。
+ *
+ * 不照搬个股短线系统那套 1.5%/1.0%/0.6%/0.3%：那是按 3-6% 的个股结构止损距离标的，
+ * 而 ETF 的有效损失距离在 12% 量级，同样的风险预算除以更大的分母会把仓位压到毫无意义的水平；
+ * 反过来把个股风险预算配上 ETF 的宽止损，又会反推出超过 100% 的仓位。故这里按本项目实际止损距离重标。
+ */
+export interface RiskBudgetTier {
+  /** 单笔权益风险预算 %：这笔交易走到止损时，最多亏掉总权益的百分之多少 */
+  singleTradeRiskPct: number;
+  /** 总仓上限 % */
+  totalMaxPositionPct: number;
+  /** 单票绝对上限 %（个股） */
+  singleMaxStockPct: number;
+  /** 单票绝对上限 %（ETF，可比个股宽：一篮子本身已分散） */
+  singleMaxEtfPct: number;
+  /** 单板块敞口上限 % */
+  boardMaxExposurePct: number;
+}
+
+/** 单票的仓位反推明细（风险预算 ÷ 有效损失距离 → 允许权重，再与绝对上限取小） */
+export interface PositionSizing {
+  /** 结构止损距离 %（相对成本） */
+  stopDistancePct: number;
+  /** ATR 波动距离 %（取 atrMult × ATR14/价格；无日线数据为 null） */
+  atrDistancePct: number | null;
+  /** 跳空缓冲 %（个股取近 60 日向下跳空 P95；ETF 几乎不跳空故为 0） */
+  gapBufferPct: number;
+  /** 费用滑点缓冲 % */
+  costBufferPct: number;
+  /** 有效损失距离 % = max(结构止损, ATR距离) + 跳空缓冲 + 费用缓冲 */
+  effectiveLossPct: number;
+  /** 风险预算反推的权重上限 % */
+  riskCapPct: number;
+  /** 该阶段该资产类型的绝对权重上限 % */
+  absoluteCapPct: number;
+  /** 最终允许权重 % = min(风险反推, 绝对上限) */
+  allowedWeightPct: number;
+  /** 按当前总权益与价格折算的允许股数（已向下取整到 100 股） */
+  allowedShares: number;
+  /** 当前实际持股数 */
+  currentShares: number;
+  /** 需减仓股数（当前 - 允许，≤0 表示无需减仓） */
+  reduceShares: number;
+}
 
 /** 单票纪律主状态：healthy 或某一命中类型 */
 export type DisciplineStatus = 'healthy' | DisciplineKind;
@@ -4150,6 +4872,8 @@ export interface DisciplinePositionItem {
     singleMaxWeightPct: number;
     source: 'default' | 'override';
   };
+  /** 风险预算反推的仓位明细（无价格/成本时为 null） */
+  sizing: PositionSizing | null;
   status: DisciplineStatus;
   flags: DisciplineFlag[];
   /** 直白可执行建议（中文） */
@@ -4173,6 +4897,10 @@ export interface DisciplineAccountCheck {
 export interface DisciplineReport {
   asOf: string;
   config: DisciplineConfig;
+  /** 当前市场阶段（风险预算档由它决定；取不到快照为 null，此时回落到震荡档） */
+  regimePhase: MarketRegimePhase | null;
+  /** 当前生效的风险预算档 */
+  budget: RiskBudgetTier;
   items: DisciplinePositionItem[];
   account: DisciplineAccountCheck;
   counts: {
@@ -4181,6 +4909,8 @@ export interface DisciplineReport {
     overweight: number;
     overHold: number;
     healthy: number;
+    /** 曾触发止损但仍持有的笔数 */
+    stopNotExecuted: number;
   };
 }
 
@@ -4549,6 +5279,8 @@ export interface ScreenRun {
 /** 选股运行详情：元信息 + 候选清单 */
 export interface ScreenRunDetail extends ScreenRun {
   picks: ScreenPick[];
+  /** 漏斗诊断（被硬筛刷掉的那部分去哪了；老运行或非 multifactor 链路为 null） */
+  diagnostics?: ScreenFunnelDiagnostics | null;
 }
 
 /** 选股链路实时进度阶段（快照→硬筛→打分→二段增强→LLM 横排） */
@@ -4772,12 +5504,52 @@ export interface CockpitScreenerPick {
   thesis: string | null;
 }
 
+/** 首板赚钱效应指数（同花顺 883994「昨日打首板表现」）单根日线（趋势图用） */
+export interface MoneyEffectPoint {
+  /** YYYY-MM-DD */
+  date: string;
+  close: number;
+}
+
+/**
+ * 首板赚钱效应总览（同花顺 883994「昨日打首板表现」= 首板隔日溢价累积指数）。
+ * 信号口径与影子战法一致：站上 MA5 且 MA5 向上 → 升温(满)，否则退潮(空)，无未来函数。
+ */
+export interface MoneyEffectOverview {
+  asOf: string;
+  /** 最新一根日线日期 YYYY-MM-DD */
+  tradeDate: string;
+  /** 最新收盘（指数点位） */
+  close: number;
+  /** MA5（截至最新一日） */
+  ma5: number;
+  /** MA10（截至最新一日） */
+  ma10: number;
+  /** 前一日收盘 */
+  prevClose: number;
+  /** 收盘是否站上 MA5 */
+  aboveMa5: boolean;
+  /** MA5 是否向上（较前一日 MA5 抬升） */
+  ma5SlopeUp: boolean;
+  /** 择时信号：升温(满) / 退潮(空) */
+  signal: '升温' | '退潮';
+  /** 最新收盘较前一日涨跌幅 %（缺失为 null） */
+  delta: number | null;
+  /** 近 ~60 根日线（升序），供趋势图 */
+  series: MoneyEffectPoint[];
+  /** 数据降级标记 */
+  stale: boolean;
+  note: string;
+}
+
 /** 驾驶舱一屏概览：安全状态 + 当日计划兑现 + 强势主线 + 模块总结 + 选股候选 + 事件时间线 */
 export interface CockpitOverview {
   asOf: string;
   safety: SafetyState;
   /** 大盘阶段研判（确定性，best-effort；取数失败为 null） */
   regime: MarketRegimeOverview | null;
+  /** 首板赚钱效应(883994)最近一次快照（本地 meta，秒开；无快照为 null） */
+  moneyEffect: MoneyEffectOverview | null;
   /** 当日计划兑现（无当日计划时为 null） */
   plan: PlanFulfillment | null;
   /** 当日计划定调（无当日计划时为 null），供驾驶舱直达计划全文 */
@@ -5052,8 +5824,9 @@ export type ModeExit =
   | { type: 'belowMaDrawdown'; ma: number; drawdownPct: number }
   | { type: 'supertrend'; period: number; mult: number };
 
-/** 声明式策略规格：system 跟踪模式必填，引擎据此每日算持仓/信号 */
-export interface ModeSpec {
+/** 横截面加权 z-score 选 TopN 的 spec（原默认形态，无 kind 字段即视为此类） */
+export interface CrossSectionSpec {
+  kind?: 'crossSection';
   /** 选股因子（可加权组合），名称取站内可计算白名单：rs90 / momN / trendQuality / crossRank 等 */
   selectorFactors: Array<{ name: string; weight: number }>;
   /** 持仓数 */
@@ -5067,6 +5840,46 @@ export interface ModeSpec {
   /** 退出规则集 */
   exits?: ModeExit[];
 }
+
+/** 主题优先单仓 spec 的入场门槛（缺省即不设该门槛） */
+export interface ThemeFirstGates {
+  /** 标的 mainline_persist 下限 */
+  mainlinePersist?: number;
+  /** 主题内 MA120 上方占比下限 */
+  themeBreadthAbove120?: number;
+  /** 主题 theme_amount_power 下限 */
+  themeAmountPower?: number;
+  /** 主题最少成员数 */
+  minThemeMembers?: number;
+}
+
+/** 主题优先单仓 spec：先选主线主题，再买主题内代表标的 */
+export interface ThemeFirstSpec {
+  kind: 'themeFirst';
+  /** 主题聚合打分因子，如 mainline_quality_score */
+  themeKey: string;
+  /** 主题内选代表的因子 */
+  leaderKey: string;
+  /** 入场门槛 */
+  gates: ThemeFirstGates;
+  /** 复核周期（交易日） */
+  rebalanceDays: number;
+  /** 最短持有交易日，未满不因排名类原因换手 */
+  minHoldDays: number;
+  /** 主题跌出前 N 名即退出 */
+  themeTopExit: number;
+  /** 盈利保护触发的浮盈阈值（小数，如 0.15） */
+  protectGain: number;
+  /** 盈利保护触发的峰值回撤阈值（小数，如 0.06） */
+  protectDrawdown: number;
+  /** 跌破该均线即退出 */
+  exitMa: 20 | 30 | 60 | 120;
+  /** 调仓相位锚点（python 的 active_days[0]），保证复现 */
+  anchorDate: string;
+}
+
+/** 声明式策略规格：system 跟踪模式必填，引擎据此每日算持仓/信号 */
+export type ModeSpec = CrossSectionSpec | ThemeFirstSpec;
 
 /** 回测核心指标（均为可选，缺失即不展示） */
 export interface ModeBacktestMetrics {
@@ -5106,6 +5919,8 @@ export interface ResearchModeBacktestListItem {
   segments: ModeSegmentRow[];
   concentrationMd?: string | null;
   isRecommended: boolean;
+  /** 回测协议号（规则一改就换号；空串=改造前的历史结果，口径未知） */
+  protocol: string;
   createdAt: string;
 }
 export interface ResearchModeBacktestInput {
@@ -5118,6 +5933,8 @@ export interface ResearchModeBacktestInput {
   concentrationMd?: string;
   tradesMd?: string;
   isRecommended?: boolean;
+  /** 回测协议号：规则/阈值有任何改动都必须换号，旧协议结果不再作为当前证据 */
+  protocol?: string;
 }
 
 /** 当日应持仓 */
@@ -5179,6 +5996,8 @@ export interface ResearchMode {
   trackingMode: TrackingMode;
   spec?: ModeSpec | null;
   source?: string | null;
+  /** 该模式从多少个参数/规则变体中挑出（0=未申报，不计多重检验惩罚） */
+  variantCount: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -5199,6 +6018,10 @@ export interface ResearchModeListItem {
   headlineFlatReturn?: number | null;
   headlineDrawdown?: number | null;
   backtestCount: number;
+  /** 申报变体数（多重检验折扣用；列表页据此算晋级门，免得再回查模式主体） */
+  variantCount: number;
+  /** 晋级门是否通过；null = 尚无跟踪样本，无从体检 */
+  gatePassed?: boolean | null;
   updatedAt: string;
 }
 
@@ -5208,6 +6031,8 @@ export interface ResearchModeDetail {
   backtests: ResearchModeBacktestListItem[];
   recentDaily: ResearchModeDaily[];
   events: ResearchModeEvent[];
+  /** 晋级门体检（跟踪样本的统计显著性；只体检不自动晋级） */
+  gate: PromotionGateResult;
 }
 
 /** 站内自跟踪即时触发结果 */
@@ -5236,4 +6061,791 @@ export interface ResearchModeUpsert {
   trackingMode?: TrackingMode;
   spec?: ModeSpec | null;
   source?: string;
+  /** 从多少个变体中挑出（研究脚本登记时申报） */
+  variantCount?: number;
+}
+
+// ===== 战法库（手工收录外部收集的战法）=====
+
+/** collected 已收集 / testing 验证中 / adopted 已采用 / retired 已弃用 */
+export type PlaybookStatus = 'collected' | 'testing' | 'adopted' | 'retired';
+
+/** 持有周期：短线 / 中线 / 长线 */
+export type PlaybookHorizon = 'short' | 'mid' | 'long';
+
+/** 战法条目 */
+export interface Playbook {
+  id: string;
+  name: string;
+  /** 一句话核心 */
+  summary?: string | null;
+  /** 类型：打板 / 低吸 / 趋势 / 套利 / 中线… */
+  category?: string | null;
+  /** 逗号分隔标签 */
+  tags?: string | null;
+  horizon?: PlaybookHorizon | null;
+  /** 适用环境逗号串：主升 / 反弹 / 退潮 / 震荡 */
+  marketEnv?: string | null;
+  /** 出处：书名 / 公众号 / 大V */
+  source?: string | null;
+  sourceUrl?: string | null;
+  pickMd?: string | null;
+  buyMd?: string | null;
+  sellMd?: string | null;
+  riskMd?: string | null;
+  /** 个人心得 */
+  notesMd?: string | null;
+  /** 0-5 星 */
+  rating: number;
+  status: PlaybookStatus;
+  /** 可执行回测规则；未配置则该战法只能导入外部回测结果 */
+  spec?: PlaybookSpec | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 新建 / 编辑战法入参 */
+export type PlaybookUpsert = Omit<Playbook, 'id' | 'createdAt' | 'updatedAt'>;
+
+// ---- 战法可执行规则 DSL（站内回测严格按此逐 bar 求值，不做近似替代）----
+
+/** 数值比较符 */
+export type PlaybookOp = 'gte' | 'lte' | 'gt' | 'lt';
+
+/**
+ * 单条规则条件。每条都能由日/周线严格算出，不含主观判断。
+ * 除 pnlPct（仅卖出可用）外，买入/卖出条件通用。
+ */
+export type PlaybookRule =
+  /** 价格或均线与另一条均线的关系：上方/下方/上穿/下穿 */
+  | {
+      kind: 'ma';
+      maType: 'sma' | 'ema';
+      /** 比较左侧：收盘价，或另一条均线 */
+      left: 'close' | 'ma';
+      /** left='ma' 时的均线周期 */
+      leftPeriod?: number;
+      /** 比较右侧均线周期 */
+      period: number;
+      relation: 'above' | 'below' | 'crossUp' | 'crossDown';
+    }
+  /** 均线多头/空头排列，如 [5,10,20] 依次递减为多头 */
+  | { kind: 'maAlign'; maType: 'sma' | 'ema'; periods: number[]; dir: 'up' | 'down' }
+  /** 近 days 根的涨跌幅（%） */
+  | { kind: 'pctChange'; days: number; op: PlaybookOp; value: number }
+  /** 创 days 日新高 / 新低（收盘口径） */
+  | { kind: 'extreme'; extreme: 'newHigh' | 'newLow'; days: number }
+  /** 量比：当根成交量 / 前 days 根均量 */
+  | { kind: 'volRatio'; days: number; op: PlaybookOp; value: number }
+  /** MACD(12,26,9) 状态 */
+  | { kind: 'macd'; signal: 'goldCross' | 'deadCross' | 'barAbove0' | 'barBelow0' }
+  /** KDJ(9,3,3) 状态；kAbove/kBelow 需给 value */
+  | { kind: 'kdj'; signal: 'goldCross' | 'deadCross' | 'kAbove' | 'kBelow'; value?: number }
+  /** RSI 阈值 */
+  | { kind: 'rsi'; period: number; op: PlaybookOp; value: number }
+  /** BOLL(20,2) 相对位置 */
+  | { kind: 'boll'; pos: 'aboveUpper' | 'belowLower' | 'aboveMid' | 'belowMid' }
+  /** 距近 days 根最高收盘的回撤（%，正数表示回撤幅度） */
+  | { kind: 'drawdown'; days: number; op: PlaybookOp; value: number }
+  /** 连续 bars 根阳线 / 阴线 */
+  | { kind: 'consecutive'; dir: 'up' | 'down'; bars: number }
+  /** 当根涨停 / 跌停（按代码段涨跌幅上限判定） */
+  | { kind: 'limit'; dir: 'up' | 'down' }
+  /** 持仓浮动盈亏（%），仅卖出规则可用 */
+  | { kind: 'pnlPct'; op: PlaybookOp; value: number }
+  /** 已持有 bars 根，仅卖出规则可用 */
+  | { kind: 'heldBars'; op: PlaybookOp; value: number }
+  // ---- 以下为标的交易计划新增规则（纯追加，旧 spec 不受影响）----
+  /** 成交额比：当根成交额 / 前 days 根成交额中位数（分母不含当根） */
+  | { kind: 'amountRatio'; days: number; op: PlaybookOp; value: number }
+  /** 收盘位置 (close-low)/(high-low)，0=收在最低，1=收在最高 */
+  | { kind: 'closeLocation'; op: PlaybookOp; value: number }
+  /**
+   * 绝对价位关系：计划把候选价位编译成具体数字后使用。
+   * crossUp/crossDown 需前一根在另一侧；holdAbove/holdBelow 只看当根收盘；touch 看当根高低是否触及。
+   */
+  | {
+      kind: 'priceLevel';
+      level: number;
+      relation: 'crossUp' | 'crossDown' | 'holdAbove' | 'holdBelow' | 'touch';
+    }
+  /** 计划生效以来经过的完整 bar 数（时间止损/有效期）；回测语境无计划锚点，故为 live_only */
+  | { kind: 'barsSincePlan'; op: PlaybookOp; value: number };
+
+/**
+ * 规则可回测能力（R18）。
+ * `backtest` 可在历史 bar 上严格求值；`live_only` 依赖实时/计划上下文，
+ * `assertRunnableSpec` 遇到它必须明确拒绝，不得静默判 false。
+ */
+export type PlaybookRuleCapability = 'backtest' | 'live_only';
+
+/** 规则 kind → 可回测能力。未列出的 kind 视为未注册，同样被拒绝。 */
+export const PLAYBOOK_RULE_CAPABILITY: Record<string, PlaybookRuleCapability> = {
+  ma: 'backtest',
+  maAlign: 'backtest',
+  pctChange: 'backtest',
+  extreme: 'backtest',
+  volRatio: 'backtest',
+  macd: 'backtest',
+  kdj: 'backtest',
+  rsi: 'backtest',
+  boll: 'backtest',
+  drawdown: 'backtest',
+  consecutive: 'backtest',
+  limit: 'backtest',
+  pnlPct: 'backtest',
+  heldBars: 'backtest',
+  amountRatio: 'backtest',
+  closeLocation: 'backtest',
+  priceLevel: 'backtest',
+  barsSincePlan: 'live_only',
+};
+
+/**
+ * 规则组：all=全部满足，any=任一满足。
+ * MVP 不改这个 JSON 形状，已落库的 PlaybookSpec 无需迁移即可继续读取与回测（R18）。
+ */
+export interface PlaybookRuleGroup {
+  mode: 'all' | 'any';
+  rules: PlaybookRule[];
+}
+
+/** 回测标的池来源 */
+export type PlaybookUniverseKind = 'codes' | 'watchlist' | 'etfPool' | 'researchUniverse';
+
+/** 成交口径：信号在收盘确认，次日开盘 / 次日收盘成交（均无前视） */
+export type PlaybookFill = 'nextOpen' | 'nextClose';
+
+/** 战法可执行回测配置 */
+export interface PlaybookSpec {
+  universe: { kind: PlaybookUniverseKind; codes?: string[] };
+  /** 仅日线 / 周线 */
+  period: 'day' | 'week';
+  /** 每只标的取多少根 K 线 */
+  barLimit: number;
+  entry: PlaybookRuleGroup;
+  /** 卖出规则（任一满足即卖）；与下方硬止损/止盈/持有上限取先触发者 */
+  exit: PlaybookRuleGroup;
+  /** 硬止损（%，正数），留空不启用 */
+  stopLossPct?: number | null;
+  /** 硬止盈（%，正数），留空不启用 */
+  takeProfitPct?: number | null;
+  /** 最长持有 bar 数，留空不限 */
+  maxHoldBars?: number | null;
+  fill: PlaybookFill;
+  /** 交易成本，留空用 A 股默认档 */
+  costs?: Partial<BacktestCosts>;
+}
+
+/** 回测核心指标（站内跑与外部导入共用） */
+export interface PlaybookBacktestMetrics {
+  /** 累计收益（%） */
+  returnPct?: number;
+  annualizedPct?: number;
+  maxDrawdownPct?: number;
+  /** 完整交易笔数 */
+  trades?: number;
+  winRatePct?: number;
+  /** 盈亏比（总盈利 / 总亏损） */
+  profitFactor?: number;
+  /** 单笔平均收益（%） */
+  avgReturnPct?: number;
+  /** 平均持有 bar 数 */
+  avgHoldBars?: number;
+  /** 最大连续亏损笔数 */
+  maxConsecutiveLosses?: number;
+}
+
+/** 逐笔成交（含成本后净收益） */
+export interface PlaybookTrade {
+  code: string;
+  name?: string;
+  entryDate: string;
+  entryPrice: number;
+  exitDate: string;
+  exitPrice: number;
+  /** 扣除成本后的收益率（%） */
+  returnPct: number;
+  holdBars: number;
+  /** 触发卖出的原因：规则 / 止损 / 止盈 / 持有上限 / 数据结束 */
+  exitReason: string;
+}
+
+/** 权益曲线点（等权组合口径） */
+export interface PlaybookEquityPoint {
+  date: string;
+  equity: number;
+}
+
+/** 一条回测记录 */
+export interface PlaybookBacktest {
+  id: string;
+  playbookId: string;
+  label: string;
+  /** system=站内引擎跑；external=外部导入 / 手工填 */
+  source: 'system' | 'external';
+  /** 数据区间描述 */
+  range?: string | null;
+  /** 参与回测的标的数 */
+  poolSize?: number | null;
+  metrics: PlaybookBacktestMetrics;
+  trades: PlaybookTrade[];
+  equity: PlaybookEquityPoint[];
+  /** 口径说明（成交/成本/数据边界） */
+  notes: string[];
+  /** 跑这次回测用的规则快照（external 可空） */
+  spec?: PlaybookSpec | null;
+  createdAt: string;
+}
+
+/** 列表项：省去逐笔与权益曲线 */
+export type PlaybookBacktestListItem = Omit<PlaybookBacktest, 'trades' | 'equity' | 'spec'>;
+
+/** 外部导入回测结果入参 */
+export interface PlaybookBacktestImport {
+  label: string;
+  range?: string;
+  poolSize?: number;
+  metrics: PlaybookBacktestMetrics;
+  trades?: PlaybookTrade[];
+  equity?: PlaybookEquityPoint[];
+  notes?: string[];
+}
+
+// ===== 标的技术交易计划（个股/ETF 通用，K 线弹窗内的持续跟踪计划）=====
+
+/** 每组证据的来源与时效元信息，缺数据一律显式降级而非静默 */
+export interface EvidenceMeta {
+  asOf: string;
+  source: string;
+  period: KlinePeriod;
+  /** 是否前复权。周线降级到不复权源时为 false 并写入 warnings */
+  adjusted: boolean;
+  /** 最后一根 bar 是否已收完。盘中日 K 为 false，此时禁止用完整日量能口径下结论 */
+  completeBar: boolean;
+  stale: boolean;
+  warnings: string[];
+}
+
+/** 道氏趋势状态 */
+export type DowTrendState = 'uptrend' | 'downtrend' | 'range' | 'transition';
+
+/** 确认后的摆动高低点。结构结论必须引用其 id，不能只给文字 */
+export interface SwingPoint {
+  id: string;
+  period: KlinePeriod;
+  kind: 'high' | 'low';
+  time: string;
+  price: number;
+  /** 是否已被后续走势确认（未确认的点不得用于结构失效位） */
+  confirmed: boolean;
+}
+
+/** 过渡态细分：低点抬高（待突破前高）/ 突破前高（待回踩确认） */
+export type DowTransitionKind = 'higher_low' | 'breakout_pending' | null;
+
+/** 道氏结构读数 */
+export interface DowStructure {
+  period: KlinePeriod;
+  state: DowTrendState;
+  /** state='transition' 时的细分；其余状态为 null。下游据此判定，不得靠匹配 rationale 文案 */
+  transitionKind: DowTransitionKind;
+  swings: SwingPoint[];
+  /** 最近一个已确认高点/低点的 id，供计划引用 */
+  lastConfirmedHighId: string | null;
+  lastConfirmedLowId: string | null;
+  /** 判定依据的人类可读说明，逐条对应引用到的 swing id */
+  rationale: string[];
+}
+
+/** 缠论简化结构状态；一律保留 candidate 语义，证据不足返回 insufficient */
+export type ChanSetup =
+  | 'none'
+  | 'first_buy_candidate'
+  | 'second_buy_candidate'
+  | 'third_buy_candidate'
+  | 'first_sell_candidate'
+  | 'second_sell_candidate'
+  | 'third_sell_candidate'
+  | 'insufficient';
+
+/** 顶/底分型 */
+export interface ChanFractal {
+  id: string;
+  kind: 'top' | 'bottom';
+  time: string;
+  price: number;
+}
+
+/** 候选中枢（三个次级别摆动的共同重叠区） */
+export interface ChanPivotZone {
+  id: string;
+  low: number;
+  high: number;
+  startTime: string;
+  endTime: string;
+  /** 价格当前是否仍在中枢内 */
+  active: boolean;
+}
+
+export interface ChanStructure {
+  period: KlinePeriod;
+  setup: ChanSetup;
+  fractals: ChanFractal[];
+  /** 简化笔：交替分型连线，只存端点 id 对 */
+  strokes: Array<{ id: string; fromFractalId: string; toFractalId: string; dir: 'up' | 'down' }>;
+  pivots: ChanPivotZone[];
+  rationale: string[];
+}
+
+/** 量价状态分级（阈值见计划 4.2） */
+export type VolumeState =
+  | 'extreme_shrink'
+  | 'clear_shrink'
+  | 'mild_shrink'
+  | 'normal'
+  | 'mild_expand'
+  | 'clear_expand'
+  | 'extreme_expand';
+
+/** 量价形态：下游据此判定，不得靠匹配 verdict 中文文案 */
+export type VolumePricePattern =
+  | 'heavy_down'
+  | 'stall_on_volume'
+  | 'breakout_confirmed'
+  | 'healthy_pullback'
+  | null;
+
+export interface VolumePriceReading {
+  period: KlinePeriod;
+  /** 当根成交额 / 前 20 完整根成交额中位数（分母不含当根） */
+  amountRatio20: number | null;
+  volumeRatio20: number | null;
+  amountState: VolumeState | null;
+  /** (close-low)/(high-low) */
+  closeLocation: number | null;
+  /** 个股换手率（%），ETF 通常为空 */
+  turnoverRate: number | null;
+  /** 结构化形态标志，供阶段状态机判定 */
+  pattern: VolumePricePattern;
+  /** 量价定性结论，如「放量突破确认」「放量滞涨」「放量下跌」 */
+  verdict: string;
+  warnings: string[];
+}
+
+/** 结构化相对强弱（相对各基准的超额收益 %） */
+export interface RelativeStrengthReading {
+  benchmarkCode: string;
+  benchmarkName: string;
+  role: SymbolBenchmarkRole;
+  rs5: number | null;
+  rs20: number | null;
+  rs60: number | null;
+  /** 超额收益趋势：改善 / 走平 / 恶化 */
+  trend: 'improving' | 'flat' | 'deteriorating' | 'unknown';
+}
+
+/** 板块/成分股广度证据（只读日频快照，禁止实时遍历） */
+export interface BreadthEvidence {
+  /** 快照所属板块或指数 */
+  scopeCode: string;
+  scopeName: string;
+  scopeKind: 'board' | 'index';
+  tradeDate: string;
+  newHighCount: number;
+  total: number;
+  ratio: number;
+  rank: number | null;
+  /** 相比上一快照的变化方向 */
+  trend: 'improving' | 'flat' | 'deteriorating' | 'unknown';
+  /** 快照过期或无映射时为 true，页面须显示未覆盖 */
+  missing: boolean;
+  note: string;
+}
+
+/** 统一市场阶段（面向用户的唯一阶段，不暴露各模型分别投票） */
+export type SymbolMarketPhase =
+  | 'decline'
+  | 'bottoming'
+  | 'recovery'
+  | 'uptrend'
+  | 'acceleration'
+  | 'distribution'
+  | 'uncertain';
+
+/** 阶段判定结果，含滞回所需的连续计数与迁移证据 */
+export interface SymbolPhaseReading {
+  phase: SymbolMarketPhase;
+  /** 候选阶段：已满足条件但尚未达到滞回确认次数时与 phase 不同 */
+  pendingPhase: SymbolMarketPhase | null;
+  /** 候选阶段已连续满足的完整 bar 数 */
+  pendingBars: number;
+  /** 累计到哪一根 bar。持久化后回传，保证同一根 bar 内重复生成不重复累计 */
+  lastBarTime: string | null;
+  /** 该阶段是否为盘中未收完 bar 猜出的暂定值，收盘后第一根 K 即可直接推翻 */
+  tentative?: boolean;
+  /** 迁移所需的连续满足次数 */
+  requiredBars: number;
+  /** 盘中预警状态，不改写日线阶段 */
+  intradayAlert: string | null;
+  /** 迁移证据，须引用 swing/fractal id */
+  evidence: string[];
+  phaseModelVersion: string;
+}
+
+/** 计划期限：下一交易日 / 1-4 周波段 */
+export type SymbolPlanHorizon = 'next_session' | 'swing';
+
+export type SymbolPlanAction = 'wait' | 'probe' | 'add' | 'hold' | 'reduce' | 'exit';
+
+export type SymbolPlanStatus =
+  | 'draft'
+  | 'active'
+  | 'triggered'
+  | 'invalid'
+  | 'completed'
+  | 'expired'
+  | 'superseded';
+
+export type TradeLevelRole =
+  | 'support'
+  | 'resistance'
+  | 'entry_trigger'
+  | 'add_trigger'
+  | 'invalidation'
+  | 'stop'
+  | 'target';
+
+export interface TradeLevel {
+  id: string;
+  role: TradeLevelRole;
+  timeframe: KlinePeriod;
+  price?: number;
+  zoneLow?: number;
+  zoneHigh?: number;
+  label: string;
+  rationale: string;
+  evidenceIds: string[];
+}
+
+/** 计划条件直接包装并扩展现有 PlaybookRule，不发明第二套 DSL */
+export interface PlanCondition {
+  id: string;
+  rule: PlaybookRule;
+  timeframe: KlinePeriod;
+  description: string;
+  required: boolean;
+  evidenceIds: string[];
+}
+
+export interface TradeScenario {
+  id: string;
+  rank: 'primary' | 'alternative' | 'risk';
+  name: string;
+  conditions: PlanCondition[];
+  action: SymbolPlanAction;
+  invalidConditions: PlanCondition[];
+  targetLevelIds: string[];
+}
+
+/** 基准角色 */
+export type SymbolBenchmarkRole =
+  | 'underlying_index'
+  | 'sector'
+  | 'peer'
+  | 'broad_market'
+  | 'relative_strength';
+
+export interface SymbolBenchmark {
+  code: string;
+  name: string;
+  role: SymbolBenchmarkRole;
+  /** 东财 secid。指数与个股撞码，取 K 线必须显式传；无行情源的基准留空并跳过相对强弱 */
+  secid?: string | null;
+}
+
+/** 账户侧持仓上下文：市场判断不受它影响，账户动作必须考虑它 */
+export interface SymbolPositionContext {
+  state: 'none' | 'holding';
+  quantity: number;
+  availableQuantity: number;
+  avgCost: number | null;
+  currentWeightPct: number;
+  unrealizedPnlPct: number | null;
+  allowedWeightPct: number | null;
+  concentrationWarnings: string[];
+}
+
+// ---- 候选目录（计划 4.11）：LLM 只能从这里挑，不得自由填价 ----
+
+/** 候选价位来源 */
+export type CandidateLevelSource =
+  | 'swing'
+  | 'pivot_zone'
+  | 'prev_extreme'
+  | 'ma'
+  | 'classic_pivot'
+  | 'fibonacci'
+  | 'adapter';
+
+export interface CandidateLevel {
+  candidateId: string;
+  contextId: string;
+  candidateModelVersion: string;
+  timeframe: KlinePeriod;
+  /** 聚类后的价格区，单一价位时 low===high */
+  low: number;
+  high: number;
+  /** 代表价（区间中值） */
+  price: number;
+  sources: CandidateLevelSource[];
+  /** 该价位可承担的语义角色，LLM 从中选一个 */
+  compatibleRoles: TradeLevelRole[];
+  score: number;
+  /** 评分分项，供证据抽屉展示 */
+  scoreParts: {
+    structureImportance: number;
+    historicalTouch: number;
+    distance: number;
+    confluence: number;
+    recency: number;
+  };
+  /** 距现价的 ATR 倍数（正=上方，负=下方） */
+  atrDistance: number | null;
+  label: string;
+  description: string;
+  sourceEvidenceIds: string[];
+  /** 保底候选（结构失效位、最近摆动点）不因总分低被裁掉 */
+  guaranteed: boolean;
+}
+
+/** 候选条件用途分组，用于分组限量 */
+export type CandidateConditionPurpose =
+  | 'price_level'
+  | 'volume_confirm'
+  | 'structure_confirm'
+  | 'time_window'
+  | 'gate';
+
+export interface CandidateCondition {
+  candidateId: string;
+  contextId: string;
+  candidateModelVersion: string;
+  purpose: CandidateConditionPurpose;
+  rule: PlaybookRule;
+  timeframe: KlinePeriod;
+  description: string;
+  /** 由哪个候选价位展开而来（非价位类条件为 null） */
+  fromLevelCandidateId: string | null;
+  /** 该条件适合承担的角色（触发 / 失效 / 目标） */
+  suitableFor: Array<'trigger' | 'invalidation' | 'target'>;
+  evidenceIds: string[];
+  capability: PlaybookRuleCapability;
+}
+
+export interface CandidateCatalog {
+  contextId: string;
+  candidateModelVersion: string;
+  /** 目录内容哈希，用于检测跨快照混用 */
+  catalogHash: string;
+  horizon: SymbolPlanHorizon;
+  levels: CandidateLevel[];
+  conditions: CandidateCondition[];
+  /** 各来源被裁掉的数量，禁止静默截断 */
+  omittedCounts: Record<string, number>;
+  warnings: string[];
+  createdAt: string;
+  expiresAt: string;
+}
+
+/** 技术上下文：只回摘要与 contextId，候选目录另用独立工具取 */
+export interface SymbolTechnicalContext {
+  contextId: string;
+  candidateModelVersion: string;
+  evidenceVersion: string;
+  code: string;
+  name: string;
+  assetType: SymbolAssetType;
+  horizon: SymbolPlanHorizon;
+  asOf: string;
+  dataStatus: 'complete' | 'provisional' | 'degraded';
+  /** 每周期一行读数，不含原始 K 线数组 */
+  periods: Array<{
+    meta: EvidenceMeta;
+    close: number;
+    ma20: number | null;
+    ma60: number | null;
+    atr: number | null;
+    atrPct: number | null;
+    macdState: string | null;
+    barCount: number;
+  }>;
+  dow: DowStructure | null;
+  chan: ChanStructure | null;
+  volumePrice: VolumePriceReading | null;
+  phase: SymbolPhaseReading;
+  relativeStrength: RelativeStrengthReading[];
+  breadth: BreadthEvidence | null;
+  benchmarks: SymbolBenchmark[];
+  /** 执行质量与事件风险，缺数据显式标注 */
+  executionQuality: Array<{ key: string; value: string; missing: boolean }>;
+  eventRisks: Array<{ kind: string; date: string | null; note: string }>;
+  positionContext: SymbolPositionContext | null;
+  /** 大盘阶段与板块阶段，只用于收紧不放大 */
+  marketRegimePhase: string | null;
+  boardStage: string | null;
+  /** 候选目录数量摘要，完整目录走 list_symbol_plan_candidates */
+  candidateSummary: { levels: number; conditions: number; catalogHash: string };
+  activePlan: { id: string; version: number; status: SymbolPlanStatus } | null;
+  existingMarkCount: number;
+  warnings: string[];
+}
+
+export type SymbolAssetType = 'stock' | 'etf' | 'index';
+
+/** LLM 唯一允许提交的缩小输入：只选后端已给出的候选 ID */
+export interface SymbolTradePlanProposal {
+  contextId: string;
+  candidateModelVersion: string;
+  catalogHash: string;
+  horizon: SymbolPlanHorizon;
+  summary: string;
+  changes: string[];
+  levelSelections: Array<{
+    candidateLevelId: string;
+    role: TradeLevelRole;
+    label?: string;
+  }>;
+  scenarioSelections: Array<{
+    rank: 'primary' | 'alternative' | 'risk';
+    name: string;
+    conditionCandidateIds: string[];
+    invalidConditionCandidateIds: string[];
+    targetCandidateLevelIds: string[];
+  }>;
+}
+
+export interface SymbolTradePlanRisk {
+  structuralStop: number | null;
+  volatilityStop: number | null;
+  executionStop: number | null;
+  atrPct: number | null;
+  maxAccountRiskPct: number;
+  suggestedPositionPct: number | null;
+  timeStopBars: number | null;
+  gapRiskNote: string | null;
+}
+
+export interface SymbolTradePlanExitPlan {
+  firstTakeProfitLevelId: string | null;
+  secondTakeProfitLevelId: string | null;
+  trailingRule: string | null;
+  reduceFractions: number[];
+  profitProtectionRule: string | null;
+}
+
+export interface SymbolTradePlanExecution {
+  triggerMode: 'intraday_alert' | 'close_confirmed';
+  chaseGuardAtr: number | null;
+  maxPremiumPct: number | null;
+  maxSpreadPct: number | null;
+  nextReviewAt: string;
+}
+
+export interface SymbolTradePlan {
+  id: string;
+  version: number;
+  code: string;
+  name: string;
+  assetType: SymbolAssetType;
+  horizon: SymbolPlanHorizon;
+  status: SymbolPlanStatus;
+  asOf: string;
+  validFrom: string;
+  expiresAt: string | null;
+  dataStatus: 'complete' | 'provisional' | 'degraded';
+  /** 以下五项由后端从证据直接派生，LLM 不得提交 */
+  marketPhase: SymbolMarketPhase;
+  trendState: DowTrendState;
+  chanSetup: ChanSetup;
+  marketAction: SymbolPlanAction;
+  primaryAction: SymbolPlanAction;
+  summary: string;
+  changes: string[];
+  levels: TradeLevel[];
+  scenarios: TradeScenario[];
+  positionContext: SymbolPositionContext | null;
+  risk: SymbolTradePlanRisk;
+  exitPlan: SymbolTradePlanExitPlan;
+  execution: SymbolTradePlanExecution;
+  benchmarks: SymbolBenchmark[];
+  assetSpecificRisks: string[];
+  /** 生成时的证据快照，供历史回看与口径追溯 */
+  evidenceSnapshot: unknown;
+  evidenceVersion: string;
+  phaseModelVersion: string;
+  candidateModelVersion: string;
+  contextId: string | null;
+  sessionId: string | null;
+  runId: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 计划生命周期事件 */
+export type SymbolPlanEventKind =
+  | 'created'
+  | 'activated'
+  | 'condition_hit'
+  | 'triggered'
+  | 'invalidated'
+  | 'expired'
+  | 'reviewed'
+  | 'superseded';
+
+export interface SymbolPlanEvent {
+  id: string;
+  planId: string;
+  planVersion: number;
+  kind: SymbolPlanEventKind;
+  /** 触发该事件的条件 id（若有） */
+  conditionId: string | null;
+  note: string;
+  createdAt: string;
+}
+
+/** 计划结果归因（复盘只评价计划条件，不混入用户是否成交） */
+export type SymbolPlanOutcome =
+  | 'correct_wait'
+  | 'valid_trigger'
+  | 'false_breakout'
+  | 'structure_invalidated'
+  | 'time_expired'
+  | 'execution_blocked'
+  | 'data_degraded'
+  | 'user_override';
+
+/** 单条条件的求值状态 */
+export interface PlanConditionState {
+  conditionId: string;
+  satisfied: boolean;
+  /** 本轮刚由未满足变为满足 */
+  justHit: boolean;
+  /** 该条件的求值频率：价格条件走 tick，技术条件走 bar */
+  cadence: 'tick' | 'bar';
+  detail: string;
+  evaluatedAt: string;
+}
+
+export interface SymbolPlanEvaluation {
+  planId: string;
+  planVersion: number;
+  status: SymbolPlanStatus;
+  conditions: PlanConditionState[];
+  triggered: boolean;
+  invalidated: boolean;
+  expired: boolean;
+  needsNewVersion: boolean;
+  summary: string;
+  evaluatedAt: string;
 }

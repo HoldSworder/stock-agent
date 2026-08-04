@@ -58,7 +58,9 @@ CREATE TABLE IF NOT EXISTS chat_sessions (
   id TEXT PRIMARY KEY,
   title TEXT NOT NULL,
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  ref_code TEXT,
+  ref_name TEXT
 );
 
 CREATE TABLE IF NOT EXISTS chat_messages (
@@ -70,12 +72,95 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 );
 CREATE INDEX IF NOT EXISTS idx_chatmsg_session ON chat_messages(session_id);
 
+CREATE TABLE IF NOT EXISTS symbol_marks (
+  id TEXT PRIMARY KEY,
+  code TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  label TEXT NOT NULL,
+  note TEXT,
+  points TEXT NOT NULL,
+  color TEXT,
+  session_id TEXT,
+  run_id TEXT,
+  created_at TEXT NOT NULL,
+  semantic_key TEXT,
+  timeframe TEXT,
+  role TEXT,
+  plan_id TEXT,
+  plan_version INTEGER,
+  status TEXT,
+  invalidated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_symbol_marks_code ON symbol_marks(code, created_at);
+-- 注意：idx_symbol_marks_plan 依赖后补的 plan_id 列，必须放到 addColumns 之后建，
+-- 否则老库在 DDL 阶段就会因「no such column: plan_id」启动失败。
+
+CREATE TABLE IF NOT EXISTS symbol_trade_plans (
+  id TEXT PRIMARY KEY,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  asset_type TEXT NOT NULL,
+  version INTEGER NOT NULL,
+  horizon TEXT NOT NULL,
+  status TEXT NOT NULL,
+  as_of TEXT NOT NULL,
+  valid_from TEXT NOT NULL,
+  expires_at TEXT,
+  data_status TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  market_phase TEXT NOT NULL,
+  trend_state TEXT NOT NULL,
+  chan_setup TEXT NOT NULL,
+  market_action TEXT NOT NULL,
+  primary_action TEXT NOT NULL,
+  changes TEXT NOT NULL,
+  levels TEXT NOT NULL,
+  scenarios TEXT NOT NULL,
+  position_context TEXT,
+  risk TEXT NOT NULL,
+  exit_plan TEXT NOT NULL,
+  execution TEXT NOT NULL,
+  benchmarks TEXT NOT NULL,
+  asset_specific_risks TEXT NOT NULL,
+  evidence_snapshot TEXT,
+  evidence_version TEXT NOT NULL,
+  phase_model_version TEXT NOT NULL,
+  candidate_model_version TEXT NOT NULL,
+  context_id TEXT,
+  session_id TEXT,
+  run_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_symbol_plans_code ON symbol_trade_plans(code, horizon, status, updated_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_symbol_plans_code_version ON symbol_trade_plans(code, horizon, version);
+CREATE INDEX IF NOT EXISTS idx_symbol_plans_run ON symbol_trade_plans(run_id);
+
+CREATE TABLE IF NOT EXISTS symbol_trade_plan_events (
+  id TEXT PRIMARY KEY,
+  plan_id TEXT NOT NULL,
+  plan_version INTEGER NOT NULL,
+  kind TEXT NOT NULL,
+  condition_id TEXT,
+  note TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_symbol_plan_events_plan ON symbol_trade_plan_events(plan_id, created_at);
+
 CREATE TABLE IF NOT EXISTS watchlist (
   code TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   tags TEXT,
   note TEXT,
   added_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS cockpit_focus (
+  code TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  note TEXT,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS etf_pool (
@@ -487,6 +572,8 @@ CREATE TABLE IF NOT EXISTS discipline_events (
 );
 CREATE INDEX IF NOT EXISTS idx_discipline_events_created ON discipline_events(created_at);
 CREATE INDEX IF NOT EXISTS idx_discipline_events_dedup ON discipline_events(code, kind, event_date);
+-- 「止损未执行」按 (kind, event_date) 窗口查，去重索引以 code 打头用不上，缺它就是全表扫
+CREATE INDEX IF NOT EXISTS idx_discipline_events_kind_date ON discipline_events(kind, event_date);
 
 CREATE TABLE IF NOT EXISTS market_themes (
   id TEXT PRIMARY KEY,
@@ -614,6 +701,25 @@ CREATE TABLE IF NOT EXISTS board_newhigh_snapshots (
 CREATE INDEX IF NOT EXISTS idx_board_newhigh_date ON board_newhigh_snapshots(trade_date);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_board_newhigh_key ON board_newhigh_snapshots(trade_date, board_code);
 
+CREATE TABLE IF NOT EXISTS kline_daily (
+  code TEXT NOT NULL,
+  secid TEXT NOT NULL,
+  trade_date TEXT NOT NULL,
+  open REAL NOT NULL,
+  high REAL NOT NULL,
+  low REAL NOT NULL,
+  close REAL NOT NULL,
+  volume REAL NOT NULL DEFAULT 0,
+  amount REAL NOT NULL DEFAULT 0,
+  adj_base TEXT NOT NULL,
+  provisional INTEGER NOT NULL DEFAULT 0,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (code, secid, trade_date)
+);
+-- 按 code 的索引与主键前缀完全重复（纯写放大），真正需要走索引的是按 trade_date 的聚合与清理
+DROP INDEX IF EXISTS idx_kline_daily_code;
+CREATE INDEX IF NOT EXISTS idx_kline_daily_date ON kline_daily(trade_date);
+
 CREATE TABLE IF NOT EXISTS research_universe (
   code TEXT PRIMARY KEY,
   name TEXT NOT NULL,
@@ -641,6 +747,44 @@ CREATE TABLE IF NOT EXISTS research_modes (
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS playbooks (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  summary TEXT,
+  category TEXT,
+  tags TEXT,
+  horizon TEXT,
+  market_env TEXT,
+  source TEXT,
+  source_url TEXT,
+  pick_md TEXT,
+  buy_md TEXT,
+  sell_md TEXT,
+  risk_md TEXT,
+  notes_md TEXT,
+  rating INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'collected',
+  spec TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS playbook_backtests (
+  id TEXT PRIMARY KEY,
+  playbook_id TEXT NOT NULL,
+  label TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'system',
+  range TEXT,
+  pool_size INTEGER,
+  metrics TEXT NOT NULL DEFAULT '{}',
+  trades TEXT NOT NULL DEFAULT '[]',
+  equity TEXT NOT NULL DEFAULT '[]',
+  notes TEXT NOT NULL DEFAULT '[]',
+  spec TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_playbook_bt_playbook ON playbook_backtests(playbook_id);
 
 CREATE TABLE IF NOT EXISTS research_mode_backtests (
   id TEXT PRIMARY KEY,
@@ -681,15 +825,69 @@ CREATE TABLE IF NOT EXISTS research_mode_events (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_mode_evt_mode ON research_mode_events(mode_id);
+
+CREATE TABLE IF NOT EXISTS kol_accounts (
+  uid TEXT PRIMARY KEY,
+  platform TEXT NOT NULL DEFAULT 'weibo',
+  screen_name TEXT NOT NULL,
+  red_id TEXT,
+  avatar TEXT,
+  verified_reason TEXT,
+  followers_count TEXT,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  added_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS kol_posts (
+  bid TEXT PRIMARY KEY,
+  uid TEXT NOT NULL,
+  platform TEXT NOT NULL DEFAULT 'weibo',
+  screen_name TEXT NOT NULL,
+  avatar TEXT,
+  text TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  url TEXT,
+  is_retweet INTEGER NOT NULL DEFAULT 0,
+  retweet_text TEXT,
+  reposts INTEGER NOT NULL DEFAULT 0,
+  comments INTEGER NOT NULL DEFAULT 0,
+  attitudes INTEGER NOT NULL DEFAULT 0,
+  title_only INTEGER NOT NULL DEFAULT 0,
+  images TEXT,
+  fetched_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_kol_posts_time ON kol_posts(created_at);
+CREATE INDEX IF NOT EXISTS idx_kol_posts_uid ON kol_posts(uid);
 `;
 
+/**
+ * 建表前的破坏性重建：主键变更 SQLite 无法用 ALTER 完成，且旧行缺少判定来源身份的列。
+ * 只在「表存在且缺列」时执行一次，之后 PRAGMA 已带新列，重复执行为空操作（幂等）。
+ */
+function dropLegacyTables(): void {
+  // kline_daily 旧主键为 (code, trade_date)：上证指数与平安银行同为 000001，两者的 K 线互相覆盖过。
+  // 旧行无法回溯它到底属于哪一只，与其保留脏数据不如清空——预热任务会在下一轮全部重建（纯缓存表，无原始数据丢失）。
+  try {
+    const cols = sqlite.prepare('PRAGMA table_info(kline_daily)').all() as { name: string }[];
+    if (cols.length > 0 && !cols.some((c) => c.name === 'secid')) {
+      sqlite.exec('DROP TABLE kline_daily');
+      console.warn('[migrate] kline_daily 主键改为 (code, secid, trade_date)，已清空旧缓存等待预热重建');
+    }
+  } catch (e) {
+    console.warn('[migrate] kline_daily 旧表检查失败:', e instanceof Error ? e.message : e);
+  }
+}
+
 export function ensureSchema(): void {
+  dropLegacyTables();
   sqlite.exec(DDL);
   // 选股留痕功能已下线，记录改由战法模拟承接：清理历史表与数据
   sqlite.exec('DROP TABLE IF EXISTS stock_picks');
   // 旧库增量补列（已存在则忽略）
   const addColumns = [
     "ALTER TABLE scheduled_tasks ADD COLUMN strategy_id TEXT",
+    'ALTER TABLE playbooks ADD COLUMN spec TEXT',
     "ALTER TABLE strategies ADD COLUMN kind TEXT NOT NULL DEFAULT 'local'",
     "ALTER TABLE strategies ADD COLUMN synced_at TEXT",
     "ALTER TABLE strategies ADD COLUMN skill_enabled INTEGER NOT NULL DEFAULT 0",
@@ -732,12 +930,79 @@ export function ensureSchema(): void {
     'ALTER TABLE etf_watch_signals ADD COLUMN trend_stage TEXT',
     "ALTER TABLE etf_watch_state ADD COLUMN layer_entry_at TEXT NOT NULL DEFAULT '{}'",
     'ALTER TABLE etf_watch_state ADD COLUMN trend_stage TEXT',
+    "ALTER TABLE kol_accounts ADD COLUMN platform TEXT NOT NULL DEFAULT 'weibo'",
+    'ALTER TABLE kol_accounts ADD COLUMN red_id TEXT',
+    "ALTER TABLE kol_posts ADD COLUMN platform TEXT NOT NULL DEFAULT 'weibo'",
+    'ALTER TABLE kol_posts ADD COLUMN title_only INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE kol_posts ADD COLUMN images TEXT',
+    "ALTER TABLE board_newhigh_snapshots ADD COLUMN core_codes TEXT NOT NULL DEFAULT '[]'",
+    'ALTER TABLE screen_runs ADD COLUMN diagnostics TEXT',
+    'ALTER TABLE research_modes ADD COLUMN variant_count INTEGER NOT NULL DEFAULT 0',
+    "ALTER TABLE research_mode_backtests ADD COLUMN protocol TEXT NOT NULL DEFAULT ''",
+    'ALTER TABLE chat_sessions ADD COLUMN ref_code TEXT',
+    'ALTER TABLE chat_sessions ADD COLUMN ref_name TEXT',
+    'ALTER TABLE symbol_marks ADD COLUMN semantic_key TEXT',
+    'ALTER TABLE symbol_marks ADD COLUMN timeframe TEXT',
+    'ALTER TABLE symbol_marks ADD COLUMN role TEXT',
+    'ALTER TABLE symbol_marks ADD COLUMN plan_id TEXT',
+    'ALTER TABLE symbol_marks ADD COLUMN plan_version INTEGER',
+    'ALTER TABLE symbol_marks ADD COLUMN status TEXT',
+    'ALTER TABLE symbol_marks ADD COLUMN invalidated_at TEXT',
+    // 迭代早期建过这三张表的开发库会因 CREATE TABLE IF NOT EXISTS 跳过后续列，永久缺列。
+    // 凡是后加进 CREATE 语句的列都要在这里补 ALTER（NOT NULL 列必须带 DEFAULT，否则老库 ALTER 失败）。
+    "ALTER TABLE symbol_trade_plans ADD COLUMN market_phase TEXT NOT NULL DEFAULT 'uncertain'",
+    "ALTER TABLE symbol_trade_plans ADD COLUMN primary_action TEXT NOT NULL DEFAULT 'wait'",
+    "ALTER TABLE symbol_trade_plans ADD COLUMN candidate_model_version TEXT NOT NULL DEFAULT ''",
+    'ALTER TABLE symbol_trade_plans ADD COLUMN context_id TEXT',
+    "ALTER TABLE symbol_trade_plans ADD COLUMN trend_state TEXT NOT NULL DEFAULT 'range'",
+    "ALTER TABLE symbol_trade_plans ADD COLUMN chan_setup TEXT NOT NULL DEFAULT 'insufficient'",
+    "ALTER TABLE symbol_trade_plans ADD COLUMN market_action TEXT NOT NULL DEFAULT 'wait'",
+    "ALTER TABLE symbol_trade_plans ADD COLUMN changes TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE symbol_trade_plans ADD COLUMN levels TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE symbol_trade_plans ADD COLUMN scenarios TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE symbol_trade_plans ADD COLUMN risk TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE symbol_trade_plans ADD COLUMN exit_plan TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE symbol_trade_plans ADD COLUMN execution TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE symbol_trade_plans ADD COLUMN benchmarks TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE symbol_trade_plans ADD COLUMN asset_specific_risks TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE symbol_trade_plans ADD COLUMN evidence_version TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE symbol_trade_plans ADD COLUMN phase_model_version TEXT NOT NULL DEFAULT ''",
+    'ALTER TABLE symbol_trade_plans ADD COLUMN position_context TEXT',
+    'ALTER TABLE symbol_trade_plans ADD COLUMN evidence_snapshot TEXT',
+    'ALTER TABLE symbol_trade_plans ADD COLUMN session_id TEXT',
+    'ALTER TABLE symbol_trade_plans ADD COLUMN run_id TEXT',
+    'ALTER TABLE symbol_trade_plan_events ADD COLUMN plan_version INTEGER NOT NULL DEFAULT 0',
+    'ALTER TABLE symbol_trade_plan_events ADD COLUMN condition_id TEXT',
+    "ALTER TABLE symbol_trade_plan_events ADD COLUMN note TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE playbook_backtests ADD COLUMN source TEXT NOT NULL DEFAULT 'system'",
+    'ALTER TABLE playbook_backtests ADD COLUMN range TEXT',
+    'ALTER TABLE playbook_backtests ADD COLUMN pool_size INTEGER',
+    "ALTER TABLE playbook_backtests ADD COLUMN metrics TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE playbook_backtests ADD COLUMN trades TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE playbook_backtests ADD COLUMN equity TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE playbook_backtests ADD COLUMN notes TEXT NOT NULL DEFAULT '[]'",
+    'ALTER TABLE playbook_backtests ADD COLUMN spec TEXT',
   ];
   for (const sql of addColumns) {
     try {
       sqlite.exec(sql);
     } catch {
       /* 列已存在 */
+    }
+  }
+
+  // 依赖后补列的索引：必须等 addColumns 跑完才能建，否则老库在 DDL 阶段就报 no such column
+  const lateIndexes = [
+    'CREATE INDEX IF NOT EXISTS idx_symbol_marks_plan ON symbol_marks(plan_id, plan_version)',
+    // 标的专属会话按 ref_code find-or-create，靠唯一索引挡住并发建重（NULL 不参与唯一约束，
+    // 普通会话不受影响）。历史上已产生重复行的库会建索引失败，此时只告警，由用户手工合并会话。
+    'CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_sessions_ref_code ON chat_sessions(ref_code)',
+  ];
+  for (const sql of lateIndexes) {
+    try {
+      sqlite.exec(sql);
+    } catch (e) {
+      console.warn('[migrate] 后置索引创建失败:', e instanceof Error ? e.message : e);
     }
   }
 
@@ -756,8 +1021,37 @@ function warnOnSchemaDrift(): void {
     daily_plans: ['key_risks', 'intraday_guide'],
     daily_plan_items: ['asset_type', 'confirm_conditions', 'invalid_conditions', 'confidence'],
     watch_alerts: ['strategy_id', 'exec_status', 'instruction_json'],
-    screen_runs: ['engine', 'horizon'],
+    screen_runs: ['engine', 'horizon', 'diagnostics'],
     market_themes: ['phase', 'strength_history'],
+    kol_accounts: ['enabled', 'sort_order', 'platform', 'red_id'],
+    kol_posts: ['is_retweet', 'retweet_text', 'platform', 'title_only', 'images'],
+    board_newhigh_snapshots: ['core_codes'],
+    kline_daily: ['secid', 'adj_base', 'provisional'],
+    research_modes: ['variant_count'],
+    research_mode_backtests: ['protocol'],
+    chat_sessions: ['ref_code', 'ref_name'],
+    symbol_marks: ['semantic_key', 'timeframe', 'role', 'plan_id', 'plan_version', 'status'],
+    symbol_trade_plans: [
+      'market_phase',
+      'primary_action',
+      'candidate_model_version',
+      'context_id',
+      'trend_state',
+      'chan_setup',
+      'market_action',
+      'changes',
+      'levels',
+      'scenarios',
+      'risk',
+      'exit_plan',
+      'execution',
+      'benchmarks',
+      'asset_specific_risks',
+      'evidence_version',
+      'phase_model_version',
+    ],
+    symbol_trade_plan_events: ['plan_version', 'condition_id', 'note'],
+    playbook_backtests: ['source', 'metrics', 'trades', 'equity', 'notes', 'spec'],
   };
   for (const [table, cols] of Object.entries(required)) {
     try {

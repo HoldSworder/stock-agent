@@ -76,13 +76,23 @@ export const runMessages = sqliteTable(
   }),
 );
 
-/** 聊天会话 */
-export const chatSessions = sqliteTable('chat_sessions', {
-  id: text('id').primaryKey(),
-  title: text('title').notNull(),
-  createdAt: text('created_at').notNull(),
-  updatedAt: text('updated_at').notNull(),
-});
+/** 聊天会话（ref_code 非空表示绑定某标的的长期跟踪会话，由 K 线详情弹窗对话栏 find-or-create） */
+export const chatSessions = sqliteTable(
+  'chat_sessions',
+  {
+    id: text('id').primaryKey(),
+    title: text('title').notNull(),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+    refCode: text('ref_code'),
+    refName: text('ref_name'),
+  },
+  (t) => ({
+    // 一个标的至多一个跟踪会话：唯一约束挡住 find-or-create 的并发建重（SQLite 的 NULL 不参与唯一性，
+    // 普通会话可以有任意多条）
+    byRefCode: uniqueIndex('idx_chat_sessions_ref_code').on(t.refCode),
+  }),
+);
 
 export const chatMessages = sqliteTable(
   'chat_messages',
@@ -98,6 +108,117 @@ export const chatMessages = sqliteTable(
   }),
 );
 
+/**
+ * 标的 K 线标注：agent 在标的详情对话中调 add_kline_mark 打点，长期留存供后续跟踪复核。
+ * points 存 JSON 数组 `[{ time?, price? }]`：point 一个点，range/trend_line 两个点，
+ * price_line 一个点是水平线、两个点是价格带（下沿 + 上沿）。
+ * 计划标注按 (plan_id, plan_version, semantic_key) 幂等同步，历史版本不删，只置 historical。
+ */
+export const symbolMarks = sqliteTable(
+  'symbol_marks',
+  {
+    id: text('id').primaryKey(),
+    code: text('code').notNull(),
+    /** price_line | point | range | trend_line */
+    kind: text('kind').notNull(),
+    label: text('label').notNull(),
+    note: text('note'),
+    points: text('points').notNull(),
+    color: text('color'),
+    sessionId: text('session_id'),
+    runId: text('run_id'),
+    createdAt: text('created_at').notNull(),
+    /** 语义键（如 plan.support.primary），计划标注据此幂等同步，替代按 label 覆盖 */
+    semanticKey: text('semantic_key'),
+    /** 标注所属周期，用于各周期图上的严格过滤 */
+    timeframe: text('timeframe'),
+    /** support/resistance/entry/stop/target/structure */
+    role: text('role'),
+    planId: text('plan_id'),
+    planVersion: integer('plan_version'),
+    /** active | invalid | historical；失效线不删除，转 historical 供历史图层查看 */
+    status: text('status'),
+    invalidatedAt: text('invalidated_at'),
+  },
+  (t) => ({
+    byCode: index('idx_symbol_marks_code').on(t.code, t.createdAt),
+    byPlan: index('idx_symbol_marks_plan').on(t.planId, t.planVersion),
+  }),
+);
+
+/**
+ * 标的技术交易计划主表。每次重新生成都新增版本，旧版本置 superseded，不覆盖删除，
+ * 这样才能复盘 agent 的判断质量。evidence_snapshot 存生成时的证据快照供口径追溯。
+ */
+export const symbolTradePlans = sqliteTable(
+  'symbol_trade_plans',
+  {
+    id: text('id').primaryKey(),
+    code: text('code').notNull(),
+    name: text('name').notNull(),
+    /** stock | etf | index */
+    assetType: text('asset_type').notNull(),
+    version: integer('version').notNull(),
+    /** next_session | swing */
+    horizon: text('horizon').notNull(),
+    status: text('status').notNull(),
+    asOf: text('as_of').notNull(),
+    validFrom: text('valid_from').notNull(),
+    expiresAt: text('expires_at'),
+    /** complete | provisional | degraded */
+    dataStatus: text('data_status').notNull(),
+    summary: text('summary').notNull(),
+    /** 以下五项由后端从证据派生，LLM 不得提交 */
+    marketPhase: text('market_phase').notNull(),
+    trendState: text('trend_state').notNull(),
+    chanSetup: text('chan_setup').notNull(),
+    marketAction: text('market_action').notNull(),
+    primaryAction: text('primary_action').notNull(),
+    /** JSON 列 */
+    changes: text('changes').notNull(),
+    levels: text('levels').notNull(),
+    scenarios: text('scenarios').notNull(),
+    positionContext: text('position_context'),
+    risk: text('risk').notNull(),
+    exitPlan: text('exit_plan').notNull(),
+    execution: text('execution').notNull(),
+    benchmarks: text('benchmarks').notNull(),
+    assetSpecificRisks: text('asset_specific_risks').notNull(),
+    evidenceSnapshot: text('evidence_snapshot'),
+    /** 口径版本，用于历史回看时不漂移 */
+    evidenceVersion: text('evidence_version').notNull(),
+    phaseModelVersion: text('phase_model_version').notNull(),
+    candidateModelVersion: text('candidate_model_version').notNull(),
+    contextId: text('context_id'),
+    sessionId: text('session_id'),
+    runId: text('run_id'),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => ({
+    byCode: index('idx_symbol_plans_code').on(t.code, t.horizon, t.status, t.updatedAt),
+    byCodeVersion: uniqueIndex('idx_symbol_plans_code_version').on(t.code, t.horizon, t.version),
+    byRun: index('idx_symbol_plans_run').on(t.runId),
+  }),
+);
+
+/** 计划生命周期事件：created/activated/condition_hit/triggered/invalidated/expired/reviewed/superseded */
+export const symbolTradePlanEvents = sqliteTable(
+  'symbol_trade_plan_events',
+  {
+    id: text('id').primaryKey(),
+    planId: text('plan_id').notNull(),
+    planVersion: integer('plan_version').notNull(),
+    kind: text('kind').notNull(),
+    conditionId: text('condition_id'),
+    note: text('note').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({
+    byPlan: index('idx_symbol_plan_events_plan').on(t.planId, t.createdAt),
+  }),
+);
+
 /** 自选股镜像 */
 export const watchlist = sqliteTable('watchlist', {
   code: text('code').primaryKey(),
@@ -105,6 +226,16 @@ export const watchlist = sqliteTable('watchlist', {
   tags: text('tags'),
   note: text('note'),
   addedAt: text('added_at').notNull(),
+});
+
+/** 驾驶舱关注标的（独立于自选股，无同花顺/爱盯盘同步副作用，仅驾驶舱自维护） */
+export const cockpitFocus = sqliteTable('cockpit_focus', {
+  code: text('code').primaryKey(),
+  name: text('name').notNull(),
+  note: text('note'),
+  /** 手动排序位，越小越靠前 */
+  sortOrder: integer('sort_order').notNull().default(0),
+  createdAt: text('created_at').notNull(),
 });
 
 /** ETF 跟踪池（独立于自选股，ETF 模块自管买卖信号源） */
@@ -153,6 +284,11 @@ export const researchModes = sqliteTable('research_modes', {
   spec: text('spec'),
   /** 来源标记，如 codex / cursor */
   source: text('source'),
+  /**
+   * 该模式是从多少个参数/规则变体中挑出来的（0 = 未申报）。
+   * 多重检验惩罚用：从 30 个变体里挑最好的一个，即便全是噪声，最好那个的曲线也会很漂亮。
+   */
+  variantCount: integer('variant_count').notNull().default(0),
   createdAt: text('created_at').notNull(),
   updatedAt: text('updated_at').notNull(),
 });
@@ -178,6 +314,11 @@ export const researchModeBacktests = sqliteTable(
     /** 交易记录 markdown（惰性返回，列表不带） */
     tradesMd: text('trades_md'),
     isRecommended: integer('is_recommended', { mode: 'boolean' }).notNull().default(false),
+    /**
+     * 回测协议号，如 etf-mainline-v3。规则一改就换号，旧协议的结果不再作为当前证据。
+     * 没有这个字段时，改完规则的新结果和旧结果会混在同一个版本列表里，看上去像是同一套策略的多次验证。
+     */
+    protocol: text('protocol').notNull().default(''),
     createdAt: text('created_at').notNull(),
   },
   (t) => ({ byMode: index('idx_mode_bt_mode').on(t.modeId) }),
@@ -217,6 +358,71 @@ export const researchModeEvents = sqliteTable(
     createdAt: text('created_at').notNull(),
   },
   (t) => ({ byMode: index('idx_mode_evt_mode').on(t.modeId) }),
+);
+
+// ===== 战法库（手工收录外部收集的战法，纯知识收藏，不参与跟踪/回测）=====
+
+/** 收集的战法条目：来源 / 适用环境 / 选股·买点·卖点·风控 markdown / 标签星级 */
+export const playbooks = sqliteTable('playbooks', {
+  id: text('id').primaryKey(),
+  name: text('name').notNull(),
+  /** 一句话核心 */
+  summary: text('summary'),
+  /** 类型：打板 / 低吸 / 趋势 / 套利 / 中线… 自由文本 */
+  category: text('category'),
+  /** 逗号分隔标签 */
+  tags: text('tags'),
+  /** short / mid / long */
+  horizon: text('horizon'),
+  /** 适用环境逗号串，对齐大盘阶段口径：主升 / 反弹 / 退潮 / 震荡 */
+  marketEnv: text('market_env'),
+  /** 出处：书名 / 公众号 / 大V */
+  source: text('source'),
+  sourceUrl: text('source_url'),
+  /** 选股口径（markdown） */
+  pickMd: text('pick_md'),
+  /** 买点（markdown） */
+  buyMd: text('buy_md'),
+  /** 卖点（markdown） */
+  sellMd: text('sell_md'),
+  /** 风控（markdown） */
+  riskMd: text('risk_md'),
+  /** 个人心得（markdown） */
+  notesMd: text('notes_md'),
+  /** 0-5 星 */
+  rating: integer('rating').notNull().default(0),
+  /** collected / testing / adopted / retired */
+  status: text('status').notNull().default('collected'),
+  /** PlaybookSpec JSON：可执行回测规则，空则只能导入外部回测结果 */
+  spec: text('spec'),
+  createdAt: text('created_at').notNull(),
+  updatedAt: text('updated_at').notNull(),
+});
+
+/** 战法回测记录：站内引擎跑（source=system）与外部导入（external）共用一张表 */
+export const playbookBacktests = sqliteTable(
+  'playbook_backtests',
+  {
+    id: text('id').primaryKey(),
+    playbookId: text('playbook_id').notNull(),
+    label: text('label').notNull(),
+    /** system | external */
+    source: text('source').notNull().default('system'),
+    range: text('range'),
+    poolSize: integer('pool_size'),
+    /** PlaybookBacktestMetrics JSON */
+    metrics: text('metrics').notNull().default('{}'),
+    /** PlaybookTrade[] JSON */
+    trades: text('trades').notNull().default('[]'),
+    /** PlaybookEquityPoint[] JSON */
+    equity: text('equity').notNull().default('[]'),
+    /** string[] JSON：口径说明 */
+    notes: text('notes').notNull().default('[]'),
+    /** PlaybookSpec JSON 快照 */
+    spec: text('spec'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({ byPlaybook: index('idx_playbook_bt_playbook').on(t.playbookId) }),
 );
 
 /** 持仓快照（真实 + 模拟） */
@@ -780,6 +986,8 @@ export const screenRuns = sqliteTable(
     horizon: text('horizon').notNull().default('short'),
     /** 下钻 universe 来源说明（全市场为空） */
     universeNote: text('universe_note'),
+    /** 漏斗诊断 JSON（ScreenFunnelDiagnostics）：被硬筛刷掉的那部分留痕，只读研究统计 */
+    diagnostics: text('diagnostics'),
     createdAt: text('created_at').notNull(),
   },
   (t) => ({
@@ -1063,6 +1271,8 @@ export const disciplineEvents = sqliteTable(
   (t) => ({
     byCreated: index('idx_discipline_events_created').on(t.createdAt),
     byCodeKindDate: index('idx_discipline_events_dedup').on(t.code, t.kind, t.eventDate),
+    /** 「止损未执行」按 (kind, event_date) 窗口查，去重索引以 code 打头用不上 */
+    byKindDate: index('idx_discipline_events_kind_date').on(t.kind, t.eventDate),
   }),
 );
 
@@ -1155,11 +1365,116 @@ export const boardNewHighSnapshots = sqliteTable(
     ratio: real('ratio').notNull().default(0),
     /** 当日全榜横向排名（1 = 新高数最多） */
     rank: integer('rank').notNull().default(0),
+    /**
+     * 当日该板块内创新高的成分股代码 JSON（升序，上限 CORE_CODES_CAP 只）。
+     * 跨日确认要看「还是不是同一批股」：只比新高数量会把「每天换一批股轮流冲高」的普涨噪声误判成持续主线。
+     */
+    coreCodes: text('core_codes').notNull().default('[]'),
     createdAt: text('created_at').notNull(),
     updatedAt: text('updated_at').notNull(),
   },
   (t) => ({
     byDate: index('idx_board_newhigh_date').on(t.tradeDate),
     byKey: uniqueIndex('idx_board_newhigh_key').on(t.tradeDate, t.boardCode),
+  }),
+);
+
+/**
+ * 全市场日K本地缓存（前复权）：盘前预热 + 盘中增量追加，替代每次实时回源。
+ * adjBase 记录写入时的复权基准日：前复权价随分红送股整体变动，只做增量追加会让历史段口径与新段不一致，
+ * 故按 adjBase 分辨新旧口径，每周全量重刷时统一推进基准日并覆盖全部历史行。
+ *
+ * 主键含 secid：6 位代码会撞码（000001 既是上证指数也是平安银行），只按 code 建键两者会互相覆盖。
+ */
+export const klineDaily = sqliteTable(
+  'kline_daily',
+  {
+    /** 6 位证券代码 */
+    code: text('code').notNull(),
+    /** 东财 secid（市场前缀.代码），区分同码的指数与个股 */
+    secid: text('secid').notNull(),
+    /** 交易日 YYYY-MM-DD */
+    tradeDate: text('trade_date').notNull(),
+    open: real('open').notNull(),
+    high: real('high').notNull(),
+    low: real('low').notNull(),
+    close: real('close').notNull(),
+    /** 成交量（手） */
+    volume: real('volume').notNull().default(0),
+    /** 成交额（元） */
+    amount: real('amount').notNull().default(0),
+    /** 复权基准日 YYYY-MM-DD：该行写入时所属的全量重刷批次 */
+    adjBase: text('adj_base').notNull(),
+    /** 1 = 盘中用实时报价合成的当日临时 bar，收盘后会被真实日线覆盖 */
+    provisional: integer('provisional').notNull().default(0),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => ({
+    pk: primaryKey({ columns: [t.code, t.secid, t.tradeDate] }),
+    // 按 code 的索引与主键前缀重复、纯写放大；真正要走索引的是 getCacheStats 的 max(trade_date)
+    // 与 pruneCache 的 trade_date < cutoff（前者挂在号称秒开的 /api/cockpit/panorama 上）
+    byDate: index('idx_kline_daily_date').on(t.tradeDate),
+  }),
+);
+
+// ===== 大V观点（微博大V + 小红书博主实时发帖聚合）=====
+
+/**
+ * 关注的大V名单（在「大V观点」页添加/删除）。
+ * uid 不加平台前缀直接做主键：微博 UID 是纯数字、小红书 userId 是 24 位 hex，
+ * 两个 ID 空间天然不重叠，省掉复合主键的建表迁移。
+ */
+export const kolAccounts = sqliteTable('kol_accounts', {
+  /** 微博 UID / 小红书 userId */
+  uid: text('uid').primaryKey(),
+  /** weibo | xiaohongshu */
+  platform: text('platform').notNull().default('weibo'),
+  screenName: text('screen_name').notNull(),
+  /** 小红书号（与 userId 是两套 ID），仅小红书有，用于和 App 里的账号核对 */
+  redId: text('red_id'),
+  avatar: text('avatar'),
+  /** 微博认证信息 / 小红书个人简介，用于辨别真身与同名号 */
+  verifiedReason: text('verified_reason'),
+  /** 粉丝数展示串（微博「1313.3万」、小红书「1万+」这类，原样存） */
+  followersCount: text('followers_count'),
+  /** 1 参与定时抓取 / 0 暂停 */
+  enabled: integer('enabled').notNull().default(1),
+  /** 名单展示排序（小的在前） */
+  sortOrder: integer('sort_order').notNull().default(0),
+  addedAt: text('added_at').notNull(),
+});
+
+/** 大V博文/笔记（按 bid 幂等 upsert，重复抓取不产生重复行） */
+export const kolPosts = sqliteTable(
+  'kol_posts',
+  {
+    /** 微博 bid / 小红书 noteId；小红书降级模式下为「作者+标题」合成键 */
+    bid: text('bid').primaryKey(),
+    uid: text('uid').notNull(),
+    /** weibo | xiaohongshu */
+    platform: text('platform').notNull().default('weibo'),
+    screenName: text('screen_name').notNull(),
+    avatar: text('avatar'),
+    /** 已清洗的正文（微博长文为补拉后的全文；小红书为「标题\n\n正文」） */
+    text: text('text').notNull(),
+    /** 发布时间 ISO；小红书降级模式下取首次入库时间 */
+    createdAt: text('created_at').notNull(),
+    url: text('url'),
+    /** 1 转发他人 / 0 原创（小红书恒 0） */
+    isRetweet: integer('is_retweet').notNull().default(0),
+    /** 被转发原文（含原作者） */
+    retweetText: text('retweet_text'),
+    reposts: integer('reposts').notNull().default(0),
+    comments: integer('comments').notNull().default(0),
+    attitudes: integer('attitudes').notNull().default(0),
+    /** 1 为仅有标题的降级记录（小红书未配置 Cookie 时） */
+    titleOnly: integer('title_only').notNull().default(0),
+    /** 配图列表 JSON（KolImage[]，已下载到本地的站内地址），无图为 null */
+    images: text('images'),
+    fetchedAt: text('fetched_at').notNull(),
+  },
+  (t) => ({
+    byTime: index('idx_kol_posts_time').on(t.createdAt),
+    byUid: index('idx_kol_posts_uid').on(t.uid),
   }),
 );
