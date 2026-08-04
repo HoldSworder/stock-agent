@@ -50,6 +50,22 @@ export function isTradingDay(date: Date = new Date()): boolean {
 }
 
 /**
+ * 给定日期之前最近的一个交易日（YYYY-MM-DD）。
+ * 用于「这份历史快照真的是上一交易日的吗」这类跨日比对——直接拿「最近一份历史快照」当昨天，
+ * 会在快照任务漏跑时静默用三天前的数据做跨日判定。
+ * @param dateStr 基准日 YYYY-MM-DD（不含自身）
+ */
+export function prevTradingDay(dateStr: string): string {
+  // 回看 30 天足以跨过最长的春节假期；正常情况 1-4 天内即命中
+  for (let back = 1; back <= 30; back += 1) {
+    const d = new Date(`${dateStr}T00:00:00+08:00`);
+    d.setUTCDate(d.getUTCDate() - back);
+    if (isTradingDay(d)) return shanghaiDateStr(d);
+  }
+  return dateStr;
+}
+
+/**
  * 定时任务节假日 gate：是否应因节假日跳过。
  * 仅对「工作日触发」的任务生效——周一至五但当天为法定节假日时跳过；
  * 周末触发的任务（如周日周度扫描）不受影响，照常运行。

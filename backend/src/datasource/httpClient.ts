@@ -40,6 +40,11 @@ export interface RequestOptions {
   isAuthFailure?: (status: number) => boolean;
   /** 鉴权失效时的错误信息 */
   authFailureMessage?: string;
+  /**
+   * 重定向处理，默认跟随。'manual' 时不跟随、由调用方读 Location（短链展开等场景），
+   * 此时 3xx 视为成功响应而非错误。
+   */
+  redirect?: 'follow' | 'manual';
   /** 外部取消信号（如 agent 运行取消），中止时原样抛出 AbortError 不重试 */
   signal?: AbortSignal;
   /** 错误信息前缀 */
@@ -57,6 +62,8 @@ interface RunResult {
   status: number;
   text: string;
   json?: Record<string, unknown>;
+  /** 响应头 Location（redirect: 'manual' 时用于读一跳跳转目标） */
+  location?: string | null;
 }
 
 interface InternalOptions extends JsonRequestOptions {
@@ -78,6 +85,7 @@ async function run(opts: InternalOptions): Promise<RunResult> {
     maxAttempts = 1,
     retryBaseMs = 500,
     hostFallback,
+    redirect = 'follow',
     retryOnStatus = (s) => s >= 500,
     isAuthFailure,
     authFailureMessage,
@@ -120,7 +128,7 @@ async function run(opts: InternalOptions): Promise<RunResult> {
 
     let res: Response;
     try {
-      res = await fetch(reqUrl, { method, headers, body, signal: ctrl.signal });
+      res = await fetch(reqUrl, { method, headers, body, redirect, signal: ctrl.signal });
     } catch (e) {
       // 外部取消：原样抛出，不重试
       if (signal?.aborted) {
@@ -147,7 +155,9 @@ async function run(opts: InternalOptions): Promise<RunResult> {
       break; // 鉴权失效为确定性失败，不重试
     }
 
-    if (!res.ok) {
+    // redirect: 'manual' 时 3xx 是预期结果（调用方要读 Location），不算失败
+    const isManualRedirect = redirect === 'manual' && res.status >= 300 && res.status < 400;
+    if (!res.ok && !isManualRedirect) {
       const e = wrap(`${label} ${res.status}`) as HttpError;
       e.status = res.status;
       if (retryOnStatus(res.status) && attempt < maxAttempts) {
@@ -173,7 +183,7 @@ async function run(opts: InternalOptions): Promise<RunResult> {
     }
 
     if (parse === 'text') {
-      const result: RunResult = { status: res.status, text };
+      const result: RunResult = { status: res.status, text, location: res.headers.get('location') };
       if (cacheTtlMs > 0) cache.set(key, { at: Date.now(), result });
       record(sourceId, { ok: true, latencyMs: Date.now() - startedAt });
       return result;
@@ -221,4 +231,12 @@ export async function requestJson(opts: JsonRequestOptions): Promise<Record<stri
 export async function requestText(opts: RequestOptions): Promise<string> {
   const r = await run({ ...opts, parse: 'text' });
   return r.text;
+}
+
+/** 同 requestText，但带上状态码与 Location（短链展开这类需要读一跳重定向的场景） */
+export async function requestTextDetail(
+  opts: RequestOptions,
+): Promise<{ status: number; text: string; location: string | null }> {
+  const r = await run({ ...opts, parse: 'text' });
+  return { status: r.status, text: r.text, location: r.location ?? null };
 }

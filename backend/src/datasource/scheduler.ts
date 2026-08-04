@@ -2,6 +2,8 @@ import type { DataSourceRoute, KlineBar, KlinePeriod, StockQuote } from '@stock-
 import { QUOTE_PROVIDERS, KLINE_PROVIDERS_INTRADAY, KLINE_PROVIDERS_DAILY } from './providers';
 import { isSourceEnabled } from './registry';
 import { isMinutePeriod, frontAdjustMinute } from './adjust';
+import { getDailyCached } from './klineCache';
+import { toSecid } from './codes';
 
 // 行情类能力路由：按 启用+优先级 依次尝试 provider，成功即返回并记命中源，失败转下一个。
 // 各模块经 market/eastmoney 的 getQuotes/getKline 薄委托进入此处，实现统一调度与多源故障转移。
@@ -62,6 +64,15 @@ export async function getKline(
   limit = 250,
   secid?: string,
 ): Promise<KlineBar[]> {
+  // 日线走本地缓存（盘前预热 + 盘中增量）：命中即秒回，回源失败时用旧缓存顶住，
+  // 避免上游一慢就让板块宽度/情绪/纪律体检等模块整块降级。分钟线不缓存（量大且时效强）。
+  if (period === 'day') {
+    // 缓存身份必须带 secid：大盘指数与同码个股（如 1.000001 上证指数 / 0.000001 平安银行）
+    // 若共用 code 做键会互相覆盖，读出来的可能根本不是这只标的的 K 线。
+    return getDailyCached(code, secid ?? toSecid(code), limit, () =>
+      fetchKlineRaw(code, 'day', limit, secid),
+    );
+  }
   const bars = await fetchKlineRaw(code, period, limit, secid);
   if (!isMinutePeriod(period) || bars.length === 0) return bars;
   // 记录分钟命中源：下面取日线锚点会再走一次 fetchKlineRaw 覆盖 lastServed.kline，

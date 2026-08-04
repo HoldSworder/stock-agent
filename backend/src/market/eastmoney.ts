@@ -4,6 +4,7 @@ import type {
   DragonStock,
   FuturesItem,
   GlobalIndex,
+  IndexFundFlow,
   KlineBar,
   KlinePeriod,
   LadderTier,
@@ -38,8 +39,8 @@ const UA =
 
 export class MarketError extends Error {}
 
-// 指数 secid（市场前缀.代码）：上证/深成/创业板/科创50/北证50
-const INDEX_SECIDS = ['1.000001', '0.399001', '0.399006', '1.000688', '0.899050'];
+// 指数 secid（市场前缀.代码）：上证/深成/创业板/科创50/北证50/中证500/中证1000
+const INDEX_SECIDS = ['1.000001', '0.399001', '0.399006', '1.000688', '0.899050', '1.000905', '1.000852'];
 // 外围关键指数 secid（东财 push2 全球行情，market 100=国际指数 / 133=外汇）。
 // 顺序即展示顺序，按区域分组：美股 → 中概 → 欧洲 → 亚太 → 汇率 → 债券 → 加密。
 // 单个 secid 失败/无数据会被空名过滤剔除（同 getFutures），未生效 secid 不渲染、不影响整体。
@@ -697,19 +698,38 @@ export interface FundFlowDay {
 }
 
 /**
- * 个股主力资金多日序列（push2his fflow/daykline，klt=101 日线，免 MX）。
+ * 主力资金多日序列底层取数（push2his fflow/daykline，klt=101 日线，免 MX），个股/指数通用。
  * klines 逗号字段：f51 日期 / f52 主力 / f53 小单 / f54 中单 / f55 大单 / f56 超大单 /
- * f57 主力占比 / f58-61 各单占比 / f62 收盘价 / f63 涨跌幅。返回升序（旧→新），失败返回 []。
+ * f57 主力占比 / f58-61 各单占比 / f62 收盘价 / f63 涨跌幅。返回升序（旧→新），失败返回空 rows。
+ * @param secid 东财 secid（市场前缀.代码），如 1.000001（上证）/ 1.600519（个股）
+ */
+async function getFundFlowBySecid(secid: string, days: number): Promise<{ name: string; rows: string[] }> {
+  const qs =
+    `stock/fflow/daykline/get?secid=${secid}&klt=101&lmt=${days}` +
+    `&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63`;
+  // push2his 有完整日线历史但对部分出口 IP 的 /fflow/ 路径做连接封禁（ECONNRESET）；
+  // push2delay 延迟镜像可达但通常只回当日一根。故优先 push2his 取全量历史，失败回退 push2delay 保底当日。
+  const fetchFrom = async (host: string): Promise<{ name: string; rows: string[] }> => {
+    const json = await getJson(`https://${host}/api/qt/${qs}`);
+    const data = json.data as { name?: string; klines?: string[] } | null;
+    return { name: String(data?.name ?? ''), rows: data?.klines ?? [] };
+  };
+  try {
+    const primary = await fetchFrom('push2his.eastmoney.com');
+    if (primary.rows.length > 0) return primary;
+  } catch {
+    /* push2his 不可达：回退延迟镜像 */
+  }
+  return fetchFrom('push2delay.eastmoney.com');
+}
+
+/**
+ * 个股主力资金多日序列（fflow/daykline，klt=101 日线，免 MX）。返回升序（旧→新），失败返回 []。
  */
 export async function getStockFundFlow(code: string, days = 6): Promise<FundFlowDay[]> {
   if (!/^\d{6}$/.test(code)) return [];
-  const url =
-    `${PUSH2HIS}/stock/fflow/daykline/get?secid=${toSecid(code)}&klt=101&lmt=${days}` +
-    `&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63`;
-  const json = await getJson(url);
-  const data = json.data as { klines?: string[] } | null;
-  const kl = data?.klines ?? [];
-  return kl.map((row) => {
+  const { rows } = await getFundFlowBySecid(toSecid(code), days);
+  return rows.map((row) => {
     const c = row.split(',');
     return {
       date: String(c[0] ?? ''),
@@ -720,6 +740,28 @@ export async function getStockFundFlow(code: string, days = 6): Promise<FundFlow
       pct: num(c[12]),
     };
   });
+}
+
+/**
+ * 主要股指近 N 日主力净流入趋势（遍历 INDEX_SECIDS，逐个 best-effort 取 fflow）。
+ * 单指数取数失败 → days 置空、不阻断整体；主力净流入由元换算为「亿」。返回升序（旧→新）。
+ */
+export async function getIndexFundFlows(days = 10): Promise<IndexFundFlow[]> {
+  return Promise.all(
+    INDEX_SECIDS.map(async (secid) => {
+      const code = secid.split('.')[1] ?? secid;
+      try {
+        const { name, rows } = await getFundFlowBySecid(secid, days);
+        const daysArr = rows.map((row) => {
+          const c = row.split(',');
+          return { date: String(c[0] ?? ''), main: num(c[1]) / 1e8, pct: num(c[12]) };
+        });
+        return { code, name, secid, days: daysArr } satisfies IndexFundFlow;
+      } catch {
+        return { code, name: '', secid, days: [] } satisfies IndexFundFlow;
+      }
+    }),
+  );
 }
 
 /** 两市成交额（上证+深成，今日 + 昨日 best-effort 来自日K） */

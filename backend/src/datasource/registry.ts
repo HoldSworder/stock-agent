@@ -26,6 +26,8 @@ import { pingAstock } from '../astock/client';
 import { fetchCffexRank } from '../market/cffexRank';
 import { buildUsMapping } from '../market/usMapping';
 import { ping as pingCls } from '../cls/service';
+import { ping as pingWeibo } from '../kol/weibo';
+import { ping as pingXhs } from '../kol/xiaohongshu';
 import { sqlite } from '../db/client';
 
 // 数据源注册中心：所有外部取数的单一元数据真相。
@@ -306,6 +308,60 @@ const SOURCES: SourceDef[] = [
     enabledKey: 'clsEnabled',
     fields: [],
     healthCheck: () => pingCls(),
+  },
+  {
+    id: 'weibo',
+    name: '微博大V博文',
+    category: '资讯',
+    protocol: 'http-rest',
+    baseUrl: 'm.weibo.cn',
+    description:
+      '微博大V实时博文，供「大V观点」页时间流。默认走免登录访客态（visitor.passport.weibo.cn/genvisitor2 换访客 SUB + m.weibo.cn/api/config 取 XSRF-TOKEN），无需任何凭据。Cookie 选填：填入 m.weibo.cn 登录态 Cookie 可提升配额与稳定性。此为逆向私有流程，微博风控升级可能导致失效（表现为 432 / ok:-100）。',
+    enabledKey: 'weiboEnabled',
+    fields: [
+      {
+        key: 'weiboCookie',
+        label: 'Cookie（选填）',
+        secret: true,
+        required: false,
+        placeholder: '留空即走免登录访客态；如需登录态可粘贴 m.weibo.cn 的 Cookie',
+      },
+      {
+        key: 'weiboFetchDays',
+        label: '抓取窗口（天）',
+        secret: false,
+        required: false,
+        placeholder: '只收这个天数内发布的博文，默认 2',
+      },
+    ],
+    healthCheck: () => pingWeibo(),
+  },
+  {
+    id: 'xiaohongshu',
+    name: '小红书博主笔记',
+    category: '资讯',
+    protocol: 'http-rest',
+    baseUrl: 'www.xiaohongshu.com',
+    description:
+      '小红书博主笔记，供「大V观点」页时间流。走服务端渲染页解析（user/profile 拿 noteId + xsec_token，再逐篇取 explore 详情页的 __INITIAL_STATE__），不需要 x-s 签名也不需要无头浏览器。Cookie 选填但强烈建议填：不填时小红书会把 noteId 抹成空串，只能抓到标题、封面与点赞数，没有正文、发布时间和可跳转链接；填了才是完整笔记。Cookie 有效期约 7-30 天，失效后此处健康检查会直接报错。小红书按昵称搜用户的接口需要签名，因此只能粘贴博主主页链接添加。',
+    enabledKey: 'xhsEnabled',
+    fields: [
+      {
+        key: 'xhsCookie',
+        label: 'Cookie（选填，填了才有正文）',
+        secret: true,
+        required: false,
+        placeholder: '登录 www.xiaohongshu.com 后从浏览器开发者工具复制 Cookie',
+      },
+      {
+        key: 'xhsFetchDays',
+        label: '抓取窗口（天）',
+        secret: false,
+        required: false,
+        placeholder: '只收这个天数内的笔记，默认 2；调大会显著增加请求量',
+      },
+    ],
+    healthCheck: () => pingXhs(),
   },
   {
     id: 'research',
