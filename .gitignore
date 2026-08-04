@@ -13,4 +13,11 @@ backend/public/
 .codegraph
 .pnpm-store/
 __pycache__/
+
+# 研究脚本的取数缓存：可由脚本重新拉取，不入库（与其它 mode/* 目录只留脚本+结论的惯例一致）
+mode/*/cache/
+# 妙想 skill 的查询输出（xlsx/csv），属一次性临时产物
+miaoxiang/
+# 2026-08-04 误用 git reset --hard 后的变更快照，仅供本地核对
+.recovery/
 *.pyc
