@@ -400,9 +400,11 @@ export const miaoxiang = {
       useMarketPrice: p.useMarketPrice,
     };
     if (!p.useMarketPrice && typeof p.price === 'number') {
-      // 接口要求整数价：沪市6/科创9两位小数，其余三位
+      // 价格单位是「元」，带小数原样传（沪市/科创最多 2 位小数、深市最多 3 位，超位会被判非法价格）。
+      // 曾按响应里的 priceDec 反推成「×10^dp 整数」，结果 39.15 被当成 3915 元，
+      // 限价单一律回「输入价格不合理，超过限价」或挂成永不成交的废单；priceDec 只是回显放大位数，不是入参约定。
       const dp = ['6', '9'].includes(p.stockCode[0]) ? 2 : 3;
-      payload.price = Math.round(p.price * 10 ** dp);
+      payload.price = Number(p.price.toFixed(dp));
     }
     // 下单是确定性动作：业务拒单（如 T+1「当日买入不可卖」、资金/持仓不足、数量非法）不该被当作瞬时
     // 故障重试后吞成通用报错。这里只对限流(112)重试，其余（含拒单）一律直接返回完整响应体，
