@@ -874,6 +874,16 @@ defineExpose({ reload: load });
 .sw-time {
   color: var(--text-2);
 }
+/*
+ * 告警正文来自模型产出，长度不可控。flex 子项默认 min-width:auto 不会收缩，
+ * 一条超长告警会把整个内容区撑出横向滚动条（页面底部因此多出一条滚动条）。
+ * 这里让它占满剩余宽度并允许在任意字符处断行，长度约束由后端 parseVerdict 负责。
+ */
+.sw-advice {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .ew-act {
   color: #e6a23c;
 }
@@ -889,7 +899,7 @@ defineExpose({ reload: load });
   color: #e6a23c;
 }
 .sw-time {
-  margin-left: auto;
+  flex-shrink: 0;
 }
 
 /* 泳道 */
