@@ -25,6 +25,8 @@ export default defineConfig({
       strictPort: true,
       proxy: {
         '/api': { target: backend, changeOrigin: true },
+        // 大V配图由后端从 data/kol-images 托管，dev 下同样要代理过去才看得到图
+        '/media': { target: backend, changeOrigin: true },
         '/ws': { target: backend.replace(/^http/, 'ws'), ws: true, changeOrigin: true },
       },
     }

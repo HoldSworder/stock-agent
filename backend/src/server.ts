@@ -1,5 +1,5 @@
 import { timingSafeEqual } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import Fastify from 'fastify';
@@ -7,7 +7,7 @@ import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
-import type { ScheduledTaskInput, StreamEvent } from '@stock-agent/shared';
+import type { ScheduledTaskInput, StreamEvent, SymbolPlanHorizon } from '@stock-agent/shared';
 import { config } from './config';
 import { ensureSchema } from './db/migrate';
 import {
@@ -55,6 +55,7 @@ import {
   searchBoard,
   getKline,
   getTrends,
+  getIndexFundFlows,
 } from './market/eastmoney';
 import { getStockIndicators } from './market/indicators';
 import { getChipDistribution } from './market/chip';
@@ -79,6 +80,7 @@ import {
   executeSimTrade,
   getStrategy,
   getStrategySnapshot,
+  getStrategyHistory,
   listStrategyItems,
   resetStrategy,
   updateStrategy,
@@ -114,6 +116,7 @@ import type {
   BacktestRunInput,
 } from '@stock-agent/shared';
 import * as gateway from './agent/gateway';
+import { buildChatPrompt } from './agent/chatPrompt';
 import {
   listSessions,
   createSession,
@@ -122,6 +125,8 @@ import {
   listMessages,
   addMessage,
   touchSession,
+  getSession,
+  getOrCreateSymbolSession,
 } from './chat';
 import { subscribe } from './ws';
 import { registerWatchModule, startWatchEngine } from './watch';
@@ -131,9 +136,12 @@ import { registerTrendRadarModule } from './trendradar';
 import { registerSectorIntelModule } from './sectorintel';
 import { registerResearchModule } from './research';
 import { registerClsModule } from './cls';
+import { registerKolModule } from './kol';
+import { cacheDir as kolImageCacheDir } from './kol/images';
 import { registerPlanModule } from './plan';
 import { registerEtfModule } from './etf';
 import { registerDataSourceModule } from './datasource';
+import { registerKlineCacheModule } from './datasource/klineCacheModule';
 import { registerToolsModule } from './agent/toolsModule';
 import { registerPromptsModule } from './agent/promptsModule';
 import { registerSchedulesModule } from './scheduling/schedulesModule';
@@ -150,9 +158,13 @@ import { registerRadarModule } from './radar';
 import { registerRotationModule } from './rotation';
 import { registerFactorModule } from './factor';
 import { registerModesModule } from './modes';
+import { registerPlaybookModule } from './playbook';
+import { registerSymbolMarksModule } from './symbolMarks';
+import { registerSymbolPlansModule } from './symbolPlans';
 import { seedUniverseIfEmpty } from './modes/universeRepo';
 import { seedResearchModesIfEmpty } from './seeds/researchModes';
 import { registerSentimentModule } from './sentiment';
+import { registerMoneyEffectModule } from './moneyeffect';
 import { registerRegimeModule } from './regime';
 import { registerBreadthModule } from './breadth';
 import { registerBoardsModule } from './boards';
@@ -364,6 +376,22 @@ async function main() {
     data: await cached('market:usmapping', 600_000, buildUsMapping),
   }));
 
+  // 股指主力资金流趋势（7 个主要股指近 N 日主力净流入）：独立于 3s 大盘轮询，120s TTL 慢刷不加压。
+  // fetcher 全空时 throw，使 cached 不落缓存（东财 fflow 偶发软失败不至于卡死 120s），路由 catch 后回空。
+  app.get('/api/market/index-fundflow', async () => {
+    let items: Awaited<ReturnType<typeof getIndexFundFlows>> = [];
+    try {
+      items = await cached('market:index-fundflow', 120_000, async () => {
+        const r = await getIndexFundFlows();
+        if (!r.some((it) => it.days.length > 0)) throw new Error('股指资金流全空，跳过缓存');
+        return r;
+      });
+    } catch {
+      /* 全空/取数失败：回空数组，前端下次轮询自愈 */
+    }
+    return { ok: true, data: { asOf: new Date().toISOString(), items } };
+  });
+
   // 复盘历史（成功的「一键复盘」运行）
   app.get<{ Querystring: { limit?: string } }>('/api/reviews', (req) => ({
     ok: true,
@@ -504,6 +532,18 @@ async function main() {
       .filter((t) => t.strategyId === req.params.id)
       .map((t) => t.id);
     return { ok: true, data: listRunsByTaskIds(taskIds) };
+  });
+
+  // 历史持仓（按标的汇总复盘）：均买/卖价、持有收益、卖出后至今收益、首买末卖时间
+  app.get<{ Params: { id: string } }>('/api/strategies/:id/history', async (req, reply) => {
+    if (!getStrategy(req.params.id)) {
+      return reply.code(404).send({ ok: false, error: '战法不存在' });
+    }
+    try {
+      return { ok: true, data: await getStrategyHistory(req.params.id) };
+    } catch (e) {
+      return strategyErr(reply, e);
+    }
   });
 
   // 手动模拟买/卖
@@ -920,6 +960,22 @@ async function main() {
     return { ok: true, data: listSessions() };
   });
   app.post('/api/chat/sessions', () => ({ ok: true, data: createSession() }));
+  // 标的专属长期跟踪会话（K 线详情弹窗对话栏）：按 code find-or-create。
+  // 必须先校验 6 位代码：refCode 非空的会话被 pruneEmptySessions 豁免，
+  // 任意路径串落库都会变成永不回收的垃圾会话。
+  app.get<{ Params: { code: string }; Querystring: { name?: string } }>(
+    '/api/chat/sessions/by-symbol/:code',
+    (req, reply) => {
+      const code = (req.params.code ?? '').trim();
+      if (!/^\d{6}$/.test(code)) {
+        return reply.code(400).send({ ok: false, error: '请输入 6 位标的代码' });
+      }
+      return {
+        ok: true,
+        data: getOrCreateSymbolSession(code, req.query?.name?.trim() || ''),
+      };
+    },
+  );
   app.delete<{ Params: { id: string } }>('/api/chat/sessions/:id', (req) => {
     deleteSession(req.params.id);
     return { ok: true };
@@ -941,7 +997,14 @@ async function main() {
     let activeAbort: AbortController | null = null;
 
     socket.on('message', async (raw: Buffer) => {
-      let payload: { sessionId?: string; content?: string; thinking?: boolean; action?: string };
+      let payload: {
+        sessionId?: string;
+        content?: string;
+        thinking?: boolean;
+        action?: string;
+        /** 标的详情快捷按钮的一键生成意图，仅对标的专属会话生效 */
+        planIntent?: SymbolPlanHorizon;
+      };
       try {
         payload = JSON.parse(raw.toString());
       } catch {
@@ -962,6 +1025,16 @@ async function main() {
       }));
       addMessage(sessionId, 'user', content);
 
+      // 标的专属会话：给模型前置标的上下文，使其无需追问即可取数、并知道可往 K 线图上打点。
+      // 带 planIntent 时再叠一段钉死 horizon 的标准计划指令。落库的用户消息仍是原文，不含这些注入。
+      const session = getSession(sessionId);
+      const prompt = buildChatPrompt({
+        refCode: session?.refCode,
+        refName: session?.refName,
+        content,
+        planIntent: payload.planIntent,
+      });
+
       const send = (e: StreamEvent) => {
         try {
           socket.send(JSON.stringify(e));
@@ -979,7 +1052,7 @@ async function main() {
         trigger: 'chat',
         purpose: 'chat',
         taskName: '聊天',
-        prompt: content,
+        prompt,
         history,
         // 深思开关由前端传入，缺省按开启（兼容老前端）
         modelConfig: { thinking: payload.thinking ?? true },
@@ -994,7 +1067,8 @@ async function main() {
       if (result.status !== 'canceled' && result.outputText) {
         addMessage(sessionId, 'assistant', result.outputText);
       }
-      if (history.length === 0) touchSession(sessionId, content.slice(0, 20));
+      // 标的会话标题固定为「代码 名称」，不被首轮提问覆盖
+      if (history.length === 0 && !session?.refCode) touchSession(sessionId, content.slice(0, 20));
       else touchSession(sessionId);
     });
 
@@ -1005,12 +1079,29 @@ async function main() {
     });
   });
 
+  // ===== 大V配图缓存（/media/kol/*）=====
+  // 图床直链是短时效签名，抓取时已把字节落到 data/kol-images，这里原样对外托管。
+  // 与前端静态资源同属公开内容（鉴权只保护 /api 与 /ws），故不加 token 校验，
+  // 否则 <img> 请求带不上 x-app-token 会全部 401。
+  const mediaDir = kolImageCacheDir();
+  mkdirSync(mediaDir, { recursive: true });
+  await app.register(fastifyStatic, {
+    root: mediaDir,
+    prefix: '/media/kol/',
+    // 多次注册 fastify-static 时只有第一个能装饰 reply，其余必须关掉
+    decorateReply: false,
+    // 缓存图内容按文件名（图床 fileId）唯一，可长期强缓存
+    maxAge: '30d',
+    immutable: true,
+  });
+
   // ===== 静态前端（生产）=====
   const publicDir = resolve(__dirname, '../public');
   if (existsSync(publicDir)) {
     await app.register(fastifyStatic, { root: publicDir });
     app.setNotFoundHandler((req, reply) => {
-      if (req.url.startsWith('/api') || req.url.startsWith('/ws')) {
+      // /media 缺文件要如实 404，不能回落成 index.html（否则 <img> 拿到一坨 HTML）
+      if (req.url.startsWith('/api') || req.url.startsWith('/ws') || req.url.startsWith('/media')) {
         return reply.code(404).send({ ok: false, error: 'not found' });
       }
       return reply.sendFile('index.html');
@@ -1042,11 +1133,23 @@ async function main() {
   // 量化研究模式库模块（codex/cursor 读写 API + 声明式站内自跟踪 + 研究标的库，独立，删除此行整模块下线）
   registerModesModule(app);
 
+  // 战法库模块（手工收录外部战法，纯 CRUD，独立，删除此行整模块下线）
+  registerPlaybookModule(app);
+
+  // 标的 K 线标注模块（agent 在标的详情对话中打点，K 线图叠加，独立，删除此行整模块下线）
+  registerSymbolMarksModule(app);
+
+  // 标的技术交易计划模块（确定性证据层 + 候选目录 + 计划版本 + 条件求值，独立，删除此行整模块下线）
+  registerSymbolPlansModule(app);
+
   // S1 市场情绪周期模块（确定性 0-100 情绪指数 + 周期阶段 + 收盘快照，纯只读，删除此行整模块下线）
   registerSentimentModule(app);
 
   // 大盘阶段研判模块（确定性：多指数均线/趋势 + 全A等权失真校正 + 宽度/情绪/量能 → 主升/反弹/退潮/震荡，删除此行整模块下线）
   registerRegimeModule(app);
+
+  // 首板赚钱效应模块（同花顺 883994「昨日打首板表现」：站上MA5且向上→升温/否则退潮，删除此行整模块下线）
+  registerMoneyEffectModule(app);
 
   // 板块新高宽度主线识别（确定性：各板块创新高个股数横向排名 + 持续性判主线 + 收盘快照，删除此行整模块下线）
   registerBreadthModule(app);
@@ -1092,6 +1195,9 @@ async function main() {
   // 财联社电报模块（独立，删除此行整模块下线）
   registerClsModule(app);
 
+  // 大V观点模块（微博大V实时博文聚合，免登录访客态直连，独立，删除此行整模块下线）
+  registerKolModule(app);
+
   // 今日计划模块（独立，删除此行整模块下线）
   registerPlanModule(app);
 
@@ -1100,6 +1206,9 @@ async function main() {
 
   // 数据源中心模块（独立，删除此行整模块下线）
   registerDataSourceModule(app);
+
+  // 日K本地缓存：盘前预热 / 盘中增量 / 每周全量重刷（独立，删除此行整模块下线，取数自动回落实时源）
+  registerKlineCacheModule(app);
 
   // Agent 工具管理（罗列 / 启停 / 描述覆盖，独立，删除此行整模块下线）
   registerToolsModule(app);

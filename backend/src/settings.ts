@@ -40,6 +40,14 @@ const DEFAULTS: Partial<Record<SettingKey, string>> = {
   xueqiuEnabled: 'true',
   // a-stock-data sidecar（mootdx 不封IP 行情 + 同花顺一致预期 + 巨潮公告 + 龙虎榜/解禁/两融等 28 端点），默认开启
   astockEnabled: 'true',
+  // 微博大V博文（m.weibo.cn 免登录访客态直连），默认开启，无需凭据
+  weiboEnabled: 'true',
+  // 小红书博主笔记（SSR 页解析），默认开启；不填 Cookie 只能抓到标题
+  xhsEnabled: 'true',
+  // 大V发帖抓取窗口（天）：只收这个天数内发布的内容。
+  // 小红书要拿发布时间必须逐篇请求详情页，窗口越小请求越少、越不容易触发风控。
+  weiboFetchDays: '2',
+  xhsFetchDays: '2',
 };
 
 const KEYS = {
@@ -85,6 +93,12 @@ const KEYS = {
   xueqiuEnabled: 'xueqiu_enabled',
   astockBaseUrl: 'astock_base_url',
   astockEnabled: 'astock_enabled',
+  weiboEnabled: 'weibo_enabled',
+  weiboCookie: 'weibo_cookie',
+  weiboFetchDays: 'weibo_fetch_days',
+  xhsFetchDays: 'xhs_fetch_days',
+  xhsEnabled: 'xhs_enabled',
+  xhsCookie: 'xhs_cookie',
 } as const;
 
 type SettingKey = keyof typeof KEYS;
@@ -99,6 +113,8 @@ const SECRET_KEYS = new Set<SettingKey>([
   'idpToken',
   'htApiKey',
   'iwencaiApiKey',
+  'weiboCookie',
+  'xhsCookie',
 ]);
 
 function readRawByName(name: string): string | undefined {
@@ -219,6 +235,12 @@ export function getPublicSettings(): AppSettings {
     xueqiuEnabled: getValue('xueqiuEnabled'),
     astockBaseUrl: getValue('astockBaseUrl'),
     astockEnabled: getValue('astockEnabled'),
+    weiboEnabled: getValue('weiboEnabled'),
+    weiboCookie: getValue('weiboCookie'),
+    xhsEnabled: getValue('xhsEnabled'),
+    xhsCookie: getValue('xhsCookie'),
+    weiboFetchDays: getValue('weiboFetchDays'),
+    xhsFetchDays: getValue('xhsFetchDays'),
   };
 }
 
@@ -265,6 +287,12 @@ export interface SettingsUpdate {
   xueqiuEnabled?: string;
   astockBaseUrl?: string;
   astockEnabled?: string;
+  weiboEnabled?: string;
+  weiboCookie?: string;
+  xhsEnabled?: string;
+  xhsCookie?: string;
+  weiboFetchDays?: string;
+  xhsFetchDays?: string;
 }
 
 export function updateSettings(patch: SettingsUpdate): void {

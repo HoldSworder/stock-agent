@@ -24,6 +24,12 @@ export const router = createRouter({
     },
     // 情报二合一：热点 + 研报合并为「情报」页
     { path: '/intel', name: 'intel', component: () => import('./views/IntelHubView.vue') },
+    { path: '/kol', name: 'kol', component: () => import('./views/KolView.vue') },
+    {
+      path: '/playbooks',
+      name: 'playbooks',
+      component: () => import('./views/PlaybookView.vue'),
+    },
     // 中线雷达 / 市场主线已折叠进大盘多 Tab，旧链接兜底跳转
     { path: '/themes', redirect: '/market' },
     { path: '/radar', redirect: '/market' },

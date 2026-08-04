@@ -19,6 +19,8 @@ import {
   // Stopwatch,  // 回测下沉后暂未使用，恢复回测导航时一并取消注释
   Bell,
   DataLine,
+  ChatLineSquare,
+  Notebook,
 } from '@element-plus/icons-vue';
 import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
@@ -62,6 +64,7 @@ const groups = [
       { to: '/market', title: '大盘', desc: 'Market', icon: Histogram },
       { to: '/etf', title: 'ETF', desc: 'ETF', icon: PieChart },
       { to: '/intel', title: '情报', desc: 'Intel', icon: TrendCharts },
+      { to: '/kol', title: '大V观点', desc: 'KOL', icon: ChatLineSquare },
     ],
   },
   {
@@ -89,6 +92,7 @@ const groups = [
     items: [
       { to: '/review', title: '复盘', desc: 'Review', icon: Memo },
       { to: '/strategy', title: '战法模拟', desc: 'Strategy', icon: DataAnalysis },
+      { to: '/playbooks', title: '战法库', desc: 'Playbooks', icon: Notebook },
       { to: '/factors', title: '因子探索', desc: 'Factors', icon: Grid },
       { to: '/modes', title: '模式库', desc: 'Modes', icon: Collection },
       // 回测下沉：14 天 0 调用且需量化知识维护，移出主导航（路由 /backtest 仍可直达，恢复=取消下行注释）

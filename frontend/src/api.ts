@@ -8,6 +8,11 @@ import type {
   LoginResult,
   ChatMessage,
   ChatSession,
+  SymbolMark,
+  SymbolPlanEvaluation,
+  SymbolPlanEvent,
+  SymbolPlanHorizon,
+  SymbolTradePlan,
   DailyPlanDetail,
   DailyPlanEvent,
   DailyPlanSummary,
@@ -64,6 +69,7 @@ import type {
   HomeModule,
   IdingpanPushResult,
   KlineBar,
+  KlineCacheStats,
   KlinePeriod,
   BacktestRun,
   BacktestRunInput,
@@ -71,16 +77,28 @@ import type {
   MacroOverview,
   UsMappingOverview,
   MarketOverview,
+  IndexFundFlowResult,
+  MoneyEffectOverview,
   ModuleScheduleJob,
   ModuleScheduleUpdate,
   OpsCleanupResult,
   OpsDbStats,
+  Playbook,
+  PlaybookBacktest,
+  PlaybookBacktestImport,
+  PlaybookBacktestListItem,
+  PlaybookSpec,
+  PlaybookUpsert,
   PromptConfigUpdate,
   PromptInfo,
   RealPortfolio,
   RetentionConfig,
   CockpitEvent,
   CockpitOverview,
+  CockpitFocusInput,
+  CockpitFocusItem,
+  CockpitPanorama,
+  CockpitPanoramaLive,
   SafetyState,
   SafetyUpdate,
   DisciplineConfig,
@@ -115,6 +133,7 @@ import type {
   Strategy,
   StrategyInput,
   StrategyForwardStats,
+  StrategyHistoryItem,
   StrategyListItem,
   StrategySkillView,
   StrategySnapshot,
@@ -132,6 +151,11 @@ import type {
   TrendTopic,
   TrendsResult,
   ClsTelegraph,
+  KolAccount,
+  KolPlatform,
+  KolPost,
+  KolRefreshResult,
+  KolSearchResult,
   WatchAlert,
   WatchConfig,
   WatchStats,
@@ -343,6 +367,9 @@ export const api = {
     unwrap<MacroOverview>(http.get('/market/macro', { timeout: 20000 })),
   getUsMapping: () =>
     unwrap<UsMappingOverview>(http.get('/market/usmapping', { timeout: 20000 })),
+  // 股指主力资金流趋势（120s 慢刷，取数失败后端回空数组，不抛错）
+  getIndexFundFlow: () =>
+    unwrap<IndexFundFlowResult>(http.get('/market/index-fundflow', { timeout: 30000 })),
   getMarketModules: () => unwrap<HomeModule[]>(http.get('/market/modules')),
   updateMarketModules: (patch: Record<string, boolean>) =>
     unwrap<HomeModule[]>(http.put('/market/modules', patch)),
@@ -382,6 +409,9 @@ export const api = {
     unwrap<StrategySnapshot>(http.post(`/strategies/${id}/reset`, {}, { timeout: 30000 })),
   getStrategyDailyOutput: (id: string) =>
     unwrap<TaskRun[]>(http.get(`/strategies/${id}/daily-output`)),
+  // 历史持仓（按标的汇总复盘：均买/卖价、持有收益、卖出后至今收益）
+  getStrategyHistory: (id: string) =>
+    unwrap<StrategyHistoryItem[]>(http.get(`/strategies/${id}/history`, { timeout: 30000 })),
 
   // 回测（单标的信号级 / 组合级）
   runBacktest: (body: BacktestRunInput) =>
@@ -496,6 +526,42 @@ export const api = {
   cls: {
     telegraph: (limit = 50) =>
       unwrap<ClsTelegraph[]>(http.get('/cls/telegraph', { params: { limit }, timeout: 30000 })),
+  },
+
+  // 大V观点（微博 / 小红书大V实时博文，免登录访客态直连）
+  kol: {
+    feed: (uid?: string, limit = 50, platform?: KolPlatform) =>
+      unwrap<KolPost[]>(
+        http.get('/kol/feed', { params: { uid, limit, platform }, timeout: 20000 }),
+      ),
+    accounts: () => unwrap<KolAccount[]>(http.get('/kol/accounts', { timeout: 20000 })),
+    addAccount: (body: KolSearchResult) =>
+      unwrap<KolAccount>(http.post('/kol/accounts', body, { timeout: 20000 })),
+    removeAccount: (uid: string) =>
+      unwrap<{ uid: string }>(
+        http.delete(`/kol/accounts/${encodeURIComponent(uid)}`, { timeout: 20000 }),
+      ),
+    toggleAccount: (uid: string, enabled: boolean) =>
+      unwrap<{ uid: string; enabled: boolean }>(
+        http.post(`/kol/accounts/${encodeURIComponent(uid)}/toggle`, { enabled }, { timeout: 20000 }),
+      ),
+    // 逐个大V串行抓取，账号多时耗时较长
+    refresh: () => unwrap<KolRefreshResult>(http.post('/kol/refresh', {}, { timeout: 180000 })),
+    search: (q: string) =>
+      unwrap<Array<KolSearchResult & { added: boolean }>>(
+        http.get('/kol/search', { params: { q }, timeout: 30000 }),
+      ),
+    // 小红书搜人接口需签名，只能粘主页链接/分享短链解析后确认
+    previewXhs: (url: string) =>
+      unwrap<KolSearchResult & { added: boolean }>(
+        http.get('/kol/xhs/preview', { params: { url }, timeout: 30000 }),
+      ),
+  },
+
+  // 首板赚钱效应（同花顺 883994，只读；后端 120s 响应级缓存）
+  moneyEffect: {
+    overview: () =>
+      unwrap<MoneyEffectOverview>(http.get('/moneyeffect/overview', { timeout: 30000 })),
   },
 
   // 研报（东方财富研报中心）
@@ -694,6 +760,12 @@ export const api = {
       unwrap<DataSourceInfo>(http.post(`/datasource/${id}/toggle`, { enabled })),
     config: (id: string, patch: DataSourceConfigUpdate) =>
       unwrap<DataSourceInfo>(http.put(`/datasource/${id}/config`, patch)),
+    // 日K本地缓存：覆盖情况 / 手动预热（full=推进复权基准日的全量重刷）
+    klineCache: () => unwrap<KlineCacheStats>(http.get('/datasource/kline-cache')),
+    klineCachePrewarm: (full = false) =>
+      unwrap<{ total: number; ok: number; failed: number }>(
+        http.post('/datasource/kline-cache/prewarm', { full }, { timeout: 600000 }),
+      ),
   },
 
   // Agent 工具管理（罗列 / 启停 / 描述覆盖）
@@ -728,6 +800,20 @@ export const api = {
     overview: () => unwrap<CockpitOverview>(http.get('/cockpit/overview', { timeout: 20000 })),
     timeline: (limit = 40) =>
       unwrap<CockpitEvent[]>(http.get('/cockpit/timeline', { params: { limit } })),
+    // 今日全景·秒开层：纯本地读取，首屏立即渲染
+    panorama: () => unwrap<CockpitPanorama>(http.get('/cockpit/panorama', { timeout: 15000 })),
+    // 今日全景·实时层：账户/纪律/ETF轮动/涨停梯队，需外部取数，到达后补位
+    panoramaLive: () =>
+      unwrap<CockpitPanoramaLive>(http.get('/cockpit/panorama/live', { timeout: 45000 })),
+    // 关注标的：用户自维护小清单（列表带实时行情，行情失败降级为 null）
+    listFocus: () =>
+      unwrap<CockpitFocusItem[]>(http.get('/cockpit/focus', { timeout: 20000 })),
+    addFocus: (body: CockpitFocusInput) =>
+      unwrap<void>(http.post('/cockpit/focus', body, { timeout: 20000 })),
+    updateFocus: (code: string, body: { note?: string }) =>
+      unwrap<void>(http.put(`/cockpit/focus/${encodeURIComponent(code)}`, body)),
+    removeFocus: (code: string) =>
+      unwrap<void>(http.delete(`/cockpit/focus/${encodeURIComponent(code)}`)),
   },
 
   // 运维（SQLite 体积治理：统计 / 保留策略 / 清理 / VACUUM）
@@ -831,12 +917,71 @@ export const api = {
     remove: (code: string) => unwrap<void>(http.delete(`/research-universe/${code}`)),
   },
 
+  // 战法库（手工收录的外部战法 + 站内严格回测 / 外部回测导入；不接 LLM）
+  playbooks: {
+    list: () => unwrap<Playbook[]>(http.get('/playbooks')),
+    detail: (id: string) => unwrap<Playbook>(http.get(`/playbooks/${id}`)),
+    create: (body: PlaybookUpsert) => unwrap<Playbook>(http.post('/playbooks', body)),
+    update: (id: string, body: PlaybookUpsert) =>
+      unwrap<Playbook>(http.put(`/playbooks/${id}`, body)),
+    remove: (id: string) => unwrap<void>(http.delete(`/playbooks/${id}`)),
+    saveSpec: (id: string, spec: PlaybookSpec | null) =>
+      unwrap<Playbook>(http.put(`/playbooks/${id}/spec`, { spec })),
+    listBacktests: (id: string) =>
+      unwrap<PlaybookBacktestListItem[]>(http.get(`/playbooks/${id}/backtests`)),
+    backtest: (id: string, bid: string) =>
+      unwrap<PlaybookBacktest>(http.get(`/playbooks/${id}/backtests/${bid}`)),
+    // 带 spec 跑站内回测：后端顺带把 spec 存为战法规则，免得再点一次保存
+    runBacktest: (id: string, spec?: PlaybookSpec, label?: string) =>
+      unwrap<PlaybookBacktest>(
+        http.post(`/playbooks/${id}/backtest`, { spec, label }, { timeout: 600000 }),
+      ),
+    importBacktest: (id: string, body: PlaybookBacktestImport) =>
+      unwrap<PlaybookBacktest>(http.post(`/playbooks/${id}/backtests`, body, { timeout: 20000 })),
+    removeBacktest: (id: string, bid: string) =>
+      unwrap<void>(http.delete(`/playbooks/${id}/backtests/${bid}`)),
+  },
+
   // 聊天
   listSessions: () => unwrap<ChatSession[]>(http.get('/chat/sessions')),
   createSession: () => unwrap<ChatSession>(http.post('/chat/sessions')),
   deleteSession: (id: string) => unwrap<void>(http.delete(`/chat/sessions/${id}`)),
   listMessages: (id: string) =>
     unwrap<ChatMessage[]>(http.get(`/chat/sessions/${id}/messages`)),
+  /** 标的专属长期跟踪会话（K 线详情弹窗对话栏）：按 code find-or-create */
+  sessionBySymbol: (code: string, name = '') =>
+    unwrap<ChatSession>(
+      http.get(`/chat/sessions/by-symbol/${encodeURIComponent(code)}`, {
+        params: name ? { name } : undefined,
+      }),
+    ),
+
+  // 标的 K 线标注（写入统一由 agent 工具落库，前端只读 + 删除）
+  symbolMarks: {
+    list: (code: string) => unwrap<SymbolMark[]>(http.get('/symbol-marks', { params: { code } })),
+    remove: (id: string) => unwrap<void>(http.delete(`/symbol-marks/${id}`)),
+  },
+
+  // 标的技术交易计划（生成走 agent 工具，这里只读 + 复核）
+  symbolPlans: {
+    active: (code: string, horizon: SymbolPlanHorizon = 'next_session') =>
+      unwrap<SymbolTradePlan | null>(http.get('/symbol-plans/active', { params: { code, horizon } })),
+    history: (code: string, limit = 20) =>
+      unwrap<SymbolTradePlan[]>(http.get('/symbol-plans/history', { params: { code, limit } })),
+    detail: (id: string) =>
+      unwrap<{ plan: SymbolTradePlan; events: SymbolPlanEvent[]; marks: SymbolMark[] }>(
+        http.get(`/symbol-plans/${id}`),
+      ),
+    evaluate: (id: string) =>
+      unwrap<SymbolPlanEvaluation>(http.post(`/symbol-plans/${id}/evaluate`, {}, { timeout: 120000 })),
+    review: (id: string, outcome: string, note?: string) =>
+      unwrap<void>(http.post(`/symbol-plans/${id}/review`, { outcome, note })),
+    expire: (id: string) => unwrap<void>(http.post(`/symbol-plans/${id}/expire`, {})),
+    capabilities: () =>
+      unwrap<{ probedAt: string; capabilities: Record<string, { verdict: string; note: string }> }>(
+        http.get('/symbol-plans/capabilities'),
+      ),
+  },
 };
 
 /** 建立 WebSocket 连接（自动适配协议与主机，附带访问 token） */
