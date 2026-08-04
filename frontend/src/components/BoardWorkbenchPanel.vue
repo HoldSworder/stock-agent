@@ -7,7 +7,13 @@ import { api } from '@/api';
 import { useCachedResource } from '@/composables/useCachedResource';
 import StockLink from '@/components/StockLink.vue';
 import MetricScaleHint from '@/components/MetricScaleHint.vue';
-import { ACTION_TAG_TYPE, EXPO_STATUS_LABEL, EXPO_STATUS_TYPE } from '@/constants/boardTags';
+import {
+  ACTION_TAG_TYPE,
+  EXPO_STATUS_LABEL,
+  EXPO_STATUS_TYPE,
+  STAGE_ACTION_LABEL,
+  STAGE_LABEL,
+} from '@/constants/boardTags';
 import type {
   AiActionVerdict,
   BoardWorkbench,
@@ -31,6 +37,7 @@ const CONS_LABEL: Record<MainlineConsensusLevel, string> = {
   diverge: '出现分歧',
   watch: '观察',
 };
+
 
 async function refresh() {
   try {
@@ -124,6 +131,10 @@ onMounted(() =>
           <span class="wc-cycle">{{ it.cycleFit }}</span>
         </div>
         <div class="wc-meta">
+          <span v-if="it.stage" class="wc-stage" :class="`st-${it.stage}`">
+            {{ STAGE_LABEL[it.stage] }}
+            <template v-if="it.stageAction">· {{ STAGE_ACTION_LABEL[it.stageAction] }}</template>
+          </span>
           <span class="wc-cons">{{ CONS_LABEL[it.consensus] }}</span>
           <span v-if="it.phase" class="wc-phase">{{ it.phase }}</span>
           <span v-if="it.strength != null" class="wc-strength num">强度 {{ it.strength }}</span>
@@ -311,6 +322,28 @@ onMounted(() =>
   flex-wrap: wrap;
   font-size: 12px;
   color: var(--text-2);
+}
+.wc-stage {
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+}
+.st-advancing {
+  color: #f56c6c;
+}
+.st-brewing {
+  color: #e6a23c;
+}
+.st-diverging {
+  color: #909399;
+}
+.st-fading {
+  color: #4eb61b;
+}
+.st-none {
+  color: var(--text-2);
+  font-weight: 400;
 }
 .wc-strength {
   color: var(--text-1);

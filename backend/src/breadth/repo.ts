@@ -15,6 +15,19 @@ export interface BoardBreadthSnapshotInput {
   consTotal: number;
   ratio: number;
   rank: number;
+  /** 当日该板块内创新高的成分股代码（跨日核心股延续判定用；历史行为空数组） */
+  coreCodes: string[];
+}
+
+/** core_codes 列存 JSON 数组；历史行为 '[]' 或非法值时按空数组处理 */
+function parseCoreCodes(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+  try {
+    const arr = JSON.parse(raw) as unknown;
+    return Array.isArray(arr) ? arr.filter((x): x is string => typeof x === 'string') : [];
+  } catch {
+    return [];
+  }
 }
 
 /** 批量 upsert 当日各板块快照（同 (date, code) 覆盖） */
@@ -35,6 +48,7 @@ export function upsertSnapshots(rows: BoardBreadthSnapshotInput[]): void {
           consTotal: r.consTotal,
           ratio: r.ratio,
           rank: r.rank,
+          coreCodes: JSON.stringify(r.coreCodes ?? []),
           createdAt: now,
           updatedAt: now,
         })
@@ -47,6 +61,7 @@ export function upsertSnapshots(rows: BoardBreadthSnapshotInput[]): void {
             consTotal: r.consTotal,
             ratio: r.ratio,
             rank: r.rank,
+            coreCodes: JSON.stringify(r.coreCodes ?? []),
             updatedAt: now,
           },
         })
@@ -87,6 +102,7 @@ export function listRecentSnapshots(beforeDate: string, dateLimit = 6): BoardBre
       consTotal: row.consTotal,
       ratio: row.ratio,
       rank: row.rank,
+      coreCodes: parseCoreCodes(row.coreCodes),
     }));
 }
 
@@ -117,6 +133,7 @@ export function listSnapshotsByDate(date: string): BoardBreadthSnapshotRow[] {
       consTotal: row.consTotal,
       ratio: row.ratio,
       rank: row.rank,
+      coreCodes: parseCoreCodes(row.coreCodes),
     }))
     .sort((a, b) => a.rank - b.rank);
 }

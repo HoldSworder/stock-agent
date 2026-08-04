@@ -6,6 +6,7 @@ import { Refresh } from '@element-plus/icons-vue';
 import { api } from '@/api';
 import { useCachedResource } from '@/composables/useCachedResource';
 import StockLink from '@/components/StockLink.vue';
+import { STAGE_ACTION_LABEL, STAGE_LABEL } from '@/constants/boardTags';
 import type {
   MainlineConsensus,
   MainlineConsensusItem,
@@ -35,7 +36,13 @@ const CONS_TAG: Record<MainlineConsensusLevel, 'danger' | 'warning' | 'info'> = 
   watch: 'info',
 };
 
-const VERDICT_LABEL = { confirmed: '确认', candidate: '候选', fading: '退潮', none: '—' } as const;
+const ACTION_CLS = {
+  lead: 'act-lead',
+  probe: 'act-probe',
+  hold_only: 'act-hold',
+  exit_only: 'act-exit',
+  none: 'act-none',
+} as const;
 const TREND_LABEL: Record<TrendState, string> = {
   multi_long: '多头排列',
   up: '趋势向上',
@@ -89,6 +96,9 @@ onMounted(() =>
             {{ CONS_LABEL[it.consensus] }}
           </el-tag>
           <span class="cc-board">{{ it.board }}</span>
+          <span v-if="it.breadthAction" class="cc-act" :class="ACTION_CLS[it.breadthAction]">
+            {{ STAGE_ACTION_LABEL[it.breadthAction] }}
+          </span>
           <StockLink
             v-if="it.etf"
             class="cc-etf"
@@ -99,9 +109,15 @@ onMounted(() =>
         <div class="cc-metrics">
           <div class="m">
             <span class="m-cap">新高宽度</span>
-            <span class="m-val" :class="{ strong: it.breadthVerdict === 'confirmed' }">
-              {{ it.breadthVerdict ? VERDICT_LABEL[it.breadthVerdict] : '—' }}
-              <small v-if="it.newHighCount != null">新高{{ it.newHighCount }}·居首{{ it.topDays }}日</small>
+            <span class="m-val" :class="{ strong: it.breadthStage === 'advancing' }">
+              {{ it.breadthStage ? STAGE_LABEL[it.breadthStage] : '—' }}
+              <small v-if="it.newHighCount != null">
+                新高{{ it.newHighCount }}·居首{{ it.topDays }}日·核心股延续{{
+                  it.continuity && it.continuity.overlap != null
+                    ? `${it.continuity.kept}/${it.continuity.prevCount}`
+                    : '待积累'
+                }}
+              </small>
             </span>
           </div>
           <div class="m">
@@ -201,6 +217,29 @@ onMounted(() =>
 .cc-board {
   font-size: 15px;
   font-weight: 600;
+}
+.cc-act {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid currentColor;
+}
+.act-lead {
+  color: #f56c6c;
+}
+.act-probe {
+  color: #e6a23c;
+}
+.act-hold {
+  color: #909399;
+}
+.act-exit {
+  color: #4eb61b;
+}
+.act-none {
+  color: var(--el-text-color-secondary);
+  font-weight: 400;
 }
 .cc-etf {
   margin-left: auto;

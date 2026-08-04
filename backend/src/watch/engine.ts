@@ -25,7 +25,8 @@ import { sendDailyDigest } from './digest';
 import { resolveProfile, ETF_MID_PROFILE, isStrategyMonitored } from './strategyProfile';
 import { getActivePlanItems } from '../plan/service';
 import type { QuoteCtx, RollState } from './types';
-import type { DailyPlanItem, StrategySellProfile } from '@stock-agent/shared';
+import { listLivePlans, livePlansRevision } from '../symbolPlans/repo';
+import type { DailyPlanItem, StrategySellProfile, SymbolTradePlan } from '@stock-agent/shared';
 
 // Pulse 层：常驻轮询循环（纯计算，无 LLM）。仅交易时段拉快照评估，命中信号交 dispatcher。
 
@@ -112,6 +113,12 @@ function isAbnormalJump(code: string, prev: number, cur: number): boolean {
 interface PoolMeta {
   source: WatchSource;
   name: string;
+  /**
+   * 仅因为存在标的交易计划才被并进池的标的。
+   * 它没有被用户加进自选，不该享受自选那套异动告警；
+   * 也不能让它把 'watch' 塞进 evaluatedSources，否则真自选的迟滞状态会被误清。
+   */
+  planOnly?: boolean;
   avgCost?: number;
   /** 战法归属（仅战法持仓，真实持仓不带） */
   strategyId?: string;
@@ -361,6 +368,52 @@ async function midTrendScan(
   return out;
 }
 
+/**
+ * 标的交易计划按修订号缓存。
+ * 计划只在 agent 生成或复核时变化，而 tick 是 10 秒一轮；每轮全表读 + 9 个 JSON 字段反序列化纯属浪费。
+ * 修订号（最新 updatedAt + 条数）一变就重建，保证不会读到陈旧计划。
+ */
+let planCacheRevision = '';
+let planCache = new Map<string, SymbolTradePlan[]>();
+
+function loadSymbolPlansCached(): Map<string, SymbolTradePlan[]> {
+  try {
+    const rev = livePlansRevision();
+    if (rev === planCacheRevision) return planCache;
+    const next = new Map<string, SymbolTradePlan[]>();
+    for (const p of listLivePlans()) {
+      const arr = next.get(p.code) ?? [];
+      arr.push(p);
+      next.set(p.code, arr);
+    }
+    planCache = next;
+    planCacheRevision = rev;
+    return planCache;
+  } catch {
+    // 计划表不可用时不影响原有盯盘，沿用上一次的缓存
+    return planCache;
+  }
+}
+
+/**
+ * 计划涉及但不在轮询池内的标的：不并进来的话它们的 tick 级价格条件一次都不会被求值。
+ * 只并入确有 tick 级条件的——降级观察计划（draft）没有任何条件，
+ * 并进来纯粹是给每轮行情请求和告警链路增加噪声。
+ */
+function planOnlyCodes(plans: Map<string, SymbolTradePlan[]>, pooled: Set<string>): string[] {
+  const hasTickCond = (ps: SymbolTradePlan[]): boolean =>
+    ps.some(
+      (p) =>
+        p.status !== 'draft' &&
+        p.scenarios.some((sc) =>
+          [...sc.conditions, ...sc.invalidConditions].some((c) => c.rule.kind === 'priceLevel'),
+        ),
+    );
+  return [...plans.entries()]
+    .filter(([c, ps]) => !pooled.has(c) && /^\d{6}$/.test(c) && hasTickCond(ps))
+    .map(([c]) => c);
+}
+
 /** 单轮 tick */
 async function tick(cfg: WatchConfig): Promise<void> {
   const { day, minutes } = shanghaiNow();
@@ -374,6 +427,16 @@ async function tick(cfg: WatchConfig): Promise<void> {
   if (doScan) lastScanAt = now;
 
   const meta = await collectPool(cfg, includeWatch);
+
+  // 该轮的标的交易计划（带修订号缓存，避免每 10 秒把全部计划重新反序列化一遍）
+  const plansByCode = loadSymbolPlansCached();
+  // 在标的详情弹窗里给任意标的生成的计划，其标的未必在持仓/自选池内。
+  // 不并进池的话它的盘中价格条件一次都不会被求值，而 UI 上却标着「盘中」。
+  for (const c of planOnlyCodes(plansByCode, new Set(meta.keys()))) {
+    // name 留空，让下游回落到行情返回的名称，否则列表里显示成代码
+    meta.set(c, { name: '', source: 'watch', planOnly: true });
+  }
+
   const codes = [...meta.keys()];
   const quotes = codes.length > 0 ? await getQuotes(codes) : [];
 
@@ -400,6 +463,7 @@ async function tick(cfg: WatchConfig): Promise<void> {
       code: q.code,
       name: m.name || q.name,
       source: m.source,
+      planOnly: m.planOnly,
       price: q.price,
       pct: q.pct,
       prevClose: q.prevClose,
@@ -415,6 +479,7 @@ async function tick(cfg: WatchConfig): Promise<void> {
       horizon: m.horizon,
       profile: m.profile,
       planItem: m.planItem,
+      symbolPlans: plansByCode.get(q.code) ?? null,
     };
     signals.push(...evalQuoteSignals(ctx, cfg));
 
@@ -469,7 +534,11 @@ async function tick(cfg: WatchConfig): Promise<void> {
 
   // 迟滞 + 最小持续门：把持续成立期间每 tick 重复的信号收敛为「首次/升级」事件再 dispatch。
   // evaluatedSources 据本 tick 实际评估过的来源（持仓/自选 ∪ doScan 时的扫描）精确判定「消失重置」。
-  const evaluatedSources = new Set<WatchSource>([...meta.values()].map((m) => m.source));
+  // planOnly 标的不算「本 tick 评估过自选」：本轮 includeWatch 为假时真自选根本不在池里，
+  // 把 watch 记为已评估会让持续成立的自选信号每轮都被当成首次出现，迟滞形同虚设
+  const evaluatedSources = new Set<WatchSource>(
+    [...meta.values()].filter((m) => !m.planOnly).map((m) => m.source),
+  );
   if (doScan) evaluatedSources.add('scan');
   const { passed, suppressed } = gateSignals(signals, evaluatedSources);
   // 信号流去向化广播：被迟滞静默者标 hysteresis；放行者交 dispatcher 按冷却/限流/送AI 等去向广播。

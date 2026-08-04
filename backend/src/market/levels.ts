@@ -26,6 +26,11 @@ const FIB_RETRACE = [0.236, 0.382, 0.5, 0.618, 0.786] as const;
 const FIB_EXTEND = [1.272, 1.618] as const;
 
 const r2 = (n: number): number => Math.round(n * 100) / 100;
+/**
+ * ATR 专用精度。两位小数对低价标的（0.6 元的 ETF、低价股）相当于把波动量化掉 10%~25%，
+ * 极低波动时甚至舍成 0，而聚类容差与风险距离都直接吃这个值，误差会一路传下去。
+ */
+const r3 = (n: number): number => Math.round(n * 1000) / 1000;
 const pct = (r: number): string => `${r2(r * 100)}%`;
 
 /**
@@ -163,7 +168,7 @@ export function computeLevels(
     swing,
     fibRetracements: swing ? calcFibRetracements(swing) : [],
     fibExtensions: swing ? calcFibExtensions(swing) : [],
-    atr: atr == null ? null : r2(atr),
+    atr: atr == null ? null : r3(atr),
     atrPct: atr == null || close <= 0 ? null : r2((atr / close) * 100),
     pivot: calcPivot(bars),
     ma: calcMaStructure(closes, close),

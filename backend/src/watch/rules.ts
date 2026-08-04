@@ -8,6 +8,7 @@ import type {
 import { nowIso } from '../util';
 import type { QuoteCtx } from './types';
 import { volScale } from './volatility';
+import { cadenceOf, evalTickCondition } from '../symbolPlans/evaluate';
 
 // 纯函数触发规则：输入快照 + 滚动状态，输出分类信号列表，零副作用。
 
@@ -250,15 +251,49 @@ function evalPlanSignals(ctx: QuoteCtx): WatchSignal[] {
   return out;
 }
 
+/**
+ * 标的交易计划的 tick 级条件（R19 分频）。
+ * 只做纯价格穿越/触及的 O(1) 比较，绝不在 tick 里调 buildSeries；
+ * 均线/MACD/量价等技术条件由 bar 级求值负责（见 symbolPlans/evaluate.ts）。
+ */
+function evalSymbolPlanTickSignals(ctx: QuoteCtx): WatchSignal[] {
+  const plans = ctx.symbolPlans;
+  if (!plans?.length || ctx.price <= 0) return [];
+  const out: WatchSignal[] = [];
+  for (const plan of plans) {
+    for (const sc of plan.scenarios) {
+      const check = (conds: typeof sc.conditions, isInvalid: boolean): void => {
+        for (const cond of conds) {
+          if (cadenceOf(cond) !== 'tick') continue;
+          if (!evalTickCondition(cond, { price: ctx.price, prevPrice: ctx.prevPrice })) continue;
+          out.push(
+            mk(
+              ctx,
+              isInvalid ? 'plan_stop' : 'plan_buy',
+              isInvalid ? 'high' : 'medium',
+              `标的计划 v${plan.version}（${sc.name}）${isInvalid ? '失效' : '触发'}条件命中：` +
+                `${cond.description}，现价 ${ctx.price.toFixed(2)}` +
+                `${isInvalid ? '' : '（盘中预警，需收盘确认）'}`,
+              isInvalid ? 76 : 62,
+            ),
+          );
+        }
+      };
+      check(sc.conditions, false);
+      check(sc.invalidConditions, true);
+    }
+  }
+  return out;
+}
+
 /** 单标的规则评估入口 */
 export function evalQuoteSignals(ctx: QuoteCtx, cfg: WatchConfig): WatchSignal[] {
-  const base =
-    ctx.source === 'position'
-      ? evalPositionSignals(ctx, cfg)
-      : ctx.source === 'watch'
-        ? evalWatchSignals(ctx, cfg)
-        : [];
-  return [...base, ...evalPlanSignals(ctx)];
+  // planOnly 标的用户并没有加进自选，只跑它自己计划里的条件，不叠加自选异动告警
+  let base: WatchSignal[] = [];
+  if (ctx.planOnly) base = [];
+  else if (ctx.source === 'position') base = evalPositionSignals(ctx, cfg);
+  else if (ctx.source === 'watch') base = evalWatchSignals(ctx, cfg);
+  return [...base, ...evalPlanSignals(ctx), ...evalSymbolPlanTickSignals(ctx)];
 }
 
 /**

@@ -8,7 +8,9 @@ import type {
   RsiReadout,
   BollReadout,
 } from '@stock-agent/shared';
-import { getKline } from './eastmoney';
+import { buildVolumeReadout } from '../symbolPlans/volumePrice';
+import { isAShareTradingTime } from '../util';
+import { getKline, getQuotes } from './eastmoney';
 
 // S9 技术指标库：用 trading-signals（MIT，已用于 ATR）从日线衍生 MACD/KDJ/RSI/BOLL + 读数。
 // 纯确定性、不自造算法轮子；读数（金叉/超买等）为规则化判断，不含主观预测。
@@ -99,11 +101,17 @@ function calcBoll(closes: number[]): BollReadout | null {
   return { upper: r2(upper), mid: r2(middle), lower: r2(lower), pctB: r2(pctB), pos };
 }
 
-/** 从日线 bars 计算 MACD/KDJ/RSI/BOLL 全套读数（数据不足返回 null 段，never throw） */
+/**
+ * 从日线 bars 计算 MACD/KDJ/RSI/BOLL 全套读数（数据不足返回 null 段，never throw）。
+ *
+ * `opts.completeBar` 默认为 true：同步调用方喂的都是历史完整日线。
+ * 只有实时链路（getStockIndicators）在盘中才需要显式传 false 并附上实时量比。
+ */
 export function computeIndicators(
   code: string,
   bars: KlineBar[],
   period: KlinePeriod = 'day',
+  opts: { completeBar?: boolean; realtimeVolumeRatio?: number | null; turnoverRate?: number | null } = {},
 ): StockIndicators {
   const closes = bars.map((b) => b.close);
   const last = bars[bars.length - 1];
@@ -112,6 +120,16 @@ export function computeIndicators(
   const kdj = enough ? calcKdj(bars) : null;
   const rsi = enough ? calcRsi(closes) : null;
   const boll = enough ? calcBoll(closes) : null;
+  // 量能读数的两套口径（20 日成交额中位数、东财实时量比）都是按日线标定的，
+  // 换成周/月线就会拿「20 周中位数」冒充「20 日」，宁可不给
+  const volume =
+    period === 'day'
+      ? buildVolumeReadout(bars, {
+          completeBar: opts.completeBar !== false,
+          realtimeRatio: opts.realtimeVolumeRatio ?? null,
+          turnoverRate: opts.turnoverRate ?? null,
+        })
+      : null;
   return {
     code,
     asOf: last?.time ?? '',
@@ -121,18 +139,34 @@ export function computeIndicators(
     kdj,
     rsi,
     boll,
+    volume,
     note: enough ? '日线技术指标（规则化读数）' : '日线数据不足，指标暂不可用',
   };
 }
 
-/** 取个股日线并计算技术指标（默认 60 根日线） */
+/**
+ * 取个股日线并计算技术指标（默认 60 根日线）。
+ * 盘中日 K 未收完，额外拉一次实时报价取量比，让「是否放量」在盘中也有可比读数。
+ */
 export async function getStockIndicators(
   code: string,
   signal?: AbortSignal,
 ): Promise<StockIndicators> {
   void signal;
-  const bars = await getKline(code, 'day', 60).catch(() => [] as KlineBar[]);
-  return computeIndicators(code, bars, 'day');
+  const completeBar = !isAShareTradingTime();
+  const [bars, quote] = await Promise.all([
+    getKline(code, 'day', 60).catch(() => [] as KlineBar[]),
+    completeBar
+      ? Promise.resolve(null)
+      : getQuotes([code])
+          .then((qs) => qs[0] ?? null)
+          .catch(() => null),
+  ]);
+  return computeIndicators(code, bars, 'day', {
+    completeBar,
+    realtimeVolumeRatio: quote?.volumeRatio ?? null,
+    turnoverRate: quote?.turnoverRate ?? null,
+  });
 }
 
 /** 技术指标文本（注入技术分析师 / agent 的确定性底稿） */
@@ -155,6 +189,11 @@ export function formatIndicatorsForAgent(ind: StockIndicators): string {
     lines.push(
       `BOLL：上 ${ind.boll.upper} / 中 ${ind.boll.mid} / 下 ${ind.boll.lower}，%B ${ind.boll.pctB}（${ind.boll.pos}）`,
     );
+  }
+  if (ind.volume) {
+    const basis = ind.volume.basis === 'realtime' ? '盘中实时量比' : '当日成交额/前20日中位数';
+    const turnover = ind.volume.turnoverRate != null ? `，换手 ${ind.volume.turnoverRate}%` : '';
+    lines.push(`量能：${ind.volume.ratio} 倍（${ind.volume.label}，${basis}）${turnover}`);
   }
   if (lines.length === 1) lines.push(ind.note);
   return lines.join('\n');

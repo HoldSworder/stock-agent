@@ -11,6 +11,7 @@ const SETTING_KEY = 'home_modules';
 /** 模块定义（id + 展示名 + 默认是否开启）。顺序即首页渲染顺序。 */
 export const MODULE_DEFS: ReadonlyArray<{ id: string; label: string; defaultOn: boolean }> = [
   { id: 'indices', label: '大盘指数', defaultOn: true },
+  { id: 'indexFundFlow', label: '股指主力资金流', defaultOn: true },
   { id: 'globalIndices', label: '外围关键指数', defaultOn: true },
   { id: 'macro', label: '宏观·资金面', defaultOn: true },
   { id: 'usmap', label: '美股映射', defaultOn: true },

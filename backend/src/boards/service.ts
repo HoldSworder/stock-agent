@@ -19,15 +19,30 @@ import { computeBoardExposure } from './exposure';
 // 投影为带操盘动作/周期/风险标签的决策卡片。不新造板块判断源——所有阶段/强度均源自共识产物，
 // 以 boardCode 为跨源/跨页稳定键，保证首页、大盘、持仓、AI 各处板块口径一致。
 
-/** 派生操盘动作标签：退潮回避 > 背离减仓 > 共振加/持 > 观察级试错/观察 */
+/**
+ * 派生操盘动作标签：以 breadth 阶段硬路由为准，themes/radar 只能在阶段许可范围内「降级」，不能越级放行。
+ * 旧版直接用 themePhase/consensus 拼启发式，会出现「宽度锚已退幕但多源协同还在走强 → 标成加仓候选」这种越权。
+ * 现在退幕一律回避、分歧一律只减不加，主升/酝酿内部再按协同强弱细分。
+ */
 function deriveActionTag(it: MainlineConsensusItem): BoardActionTag {
   const rising = it.themeTrend === 'rising';
   const hot = it.themePhase === '加速' || it.themePhase === '启动';
-  if (it.themePhase === '退潮') return '回避';
-  if (it.consensus === 'diverge') return '减仓';
-  if (it.consensus === 'resonance') return rising || hot ? '加仓候选' : '持有';
-  // watch（仅锚成立）：走强可小仓试错，否则观察
-  return rising ? '试错' : '观察';
+  switch (it.breadthAction) {
+    case 'exit_only':
+      return '回避';
+    case 'hold_only':
+      return '减仓';
+    case 'lead':
+      // 主升：允许追领涨；多源协同同时走强才提示加仓候选，否则只持有
+      if (it.themePhase === '退潮' || it.consensus === 'diverge') return '减仓';
+      return (rising || hot) && it.consensus === 'resonance' ? '加仓候选' : '持有';
+    case 'probe':
+      // 酝酿：最多小仓试错，任何情况下不给加仓候选
+      if (it.themePhase === '退潮' || it.consensus === 'diverge') return '观察';
+      return rising ? '试错' : '观察';
+    default:
+      return '等待';
+  }
 }
 
 /** 派生周期视角（与生命周期阶段正交）：启动/加速偏短线，共振偏中线，其余波段 */
@@ -37,9 +52,14 @@ function deriveCycleFit(it: MainlineConsensusItem): BoardCycleFit {
   return '波段';
 }
 
-/** 派生风险标签：退潮 / 分歧背离 / 强度走弱 / 拥挤（长期居首） */
+/** 派生风险标签：退幕 / 核心股换血 / 退潮 / 分歧背离 / 强度走弱 / 拥挤（长期居首） */
 function deriveRiskTags(it: MainlineConsensusItem): string[] {
   const tags: string[] = [];
+  if (it.breadthStage === 'fading') tags.push('宽度退幕');
+  // 核心股换了一批但新高数还在：典型的轮动噪声伪装成持续主线
+  if (it.continuity && it.continuity.overlap != null && it.continuity.overlap < 0.5) {
+    tags.push('核心股换血');
+  }
   if (it.themePhase === '退潮') tags.push('退潮');
   if (it.consensus === 'diverge') tags.push('分歧背离');
   if (it.themeTrend === 'falling') tags.push('强度走弱');
@@ -58,6 +78,8 @@ export async function buildBoardWorkbench(): Promise<BoardWorkbench> {
     strength: it.themeStrength,
     strengthTrend: it.themeTrend,
     consensus: it.consensus,
+    stage: it.breadthStage,
+    stageAction: it.breadthAction,
     etf: it.etf,
     actionTag: deriveActionTag(it),
     cycleFit: deriveCycleFit(it),

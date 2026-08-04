@@ -1,4 +1,9 @@
-import type { DailyPlanItem, StrategySellProfile, WatchSource } from '@stock-agent/shared';
+import type {
+  DailyPlanItem,
+  StrategySellProfile,
+  SymbolTradePlan,
+  WatchSource,
+} from '@stock-agent/shared';
 
 // 盯盘模块内部上下文类型（不对外导出到 shared）。
 
@@ -7,6 +12,8 @@ export interface QuoteCtx {
   code: string;
   name: string;
   source: WatchSource;
+  /** 仅因存在标的交易计划才入池：只跑计划自身的条件，不跑自选那套异动告警 */
+  planOnly?: boolean;
   /** 现价 */
   price: number;
   /** 涨跌幅 % */
@@ -37,6 +44,11 @@ export interface QuoteCtx {
   profile?: StrategySellProfile | null;
   /** 今日计划标的项（有则启用计划结构化触发价对照） */
   planItem?: DailyPlanItem | null;
+  /**
+   * 该标的当前生效的技术交易计划（有则启用 tick 级价格条件对照）。
+   * 只用于纯价格穿越，技术条件走 bar 级求值，不在 tick 里重建指标序列。
+   */
+  symbolPlans?: SymbolTradePlan[] | null;
 }
 
 /** 每只标的的滚动状态（engine 内存维护） */

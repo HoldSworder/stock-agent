@@ -6,7 +6,7 @@ import type {
 } from '@stock-agent/shared';
 import { cached } from '../lib/ttlCache';
 import { nowIso } from '../util';
-import { buildBreadthOverview } from './service';
+import { buildBreadthOverview, STAGE_LABEL } from './service';
 import { listThemes } from '../themes/service';
 import { buildRadarOverview } from '../radar/service';
 
@@ -50,10 +50,9 @@ export async function buildMainlineConsensus(): Promise<MainlineConsensus> {
   })();
   const radarInds = radarOv?.industries ?? [];
 
-  // 锚：breadth 的确认/候选主线（确定性硬证据，与计划 focusSectors 同口径）
-  const anchors = (breadth?.items ?? []).filter(
-    (it) => it.verdict === 'confirmed' || it.verdict === 'candidate',
-  );
+  // 锚：breadth 的主升/酝酿/分歧板块（确定性硬证据，与计划 focusSectors 同口径）。
+  // 退幕板块也保留：持仓还在里面的人需要看到「只退出」，把它从榜上抹掉等于让人失去退出提示。
+  const anchors = (breadth?.items ?? []).filter((it) => it.stage !== 'none');
 
   // 跨源关联未命中留痕（boardCode 优先命中失败、退回名称匹配的锚板块），供 boardCode 回填校准参考
   const unmatched: string[] = [];
@@ -81,19 +80,24 @@ export async function buildMainlineConsensus(): Promise<MainlineConsensus> {
     const radarUp = radar ? radar.trend === 'multi_long' || radar.trend === 'up' : false;
     const radarDown = radar ? radar.trend === 'down' : false;
 
-    const confirmed = b.verdict === 'confirmed';
+    const confirmed = b.stage === 'advancing';
     const supports = (themeUp ? 1 : 0) + (radarUp ? 1 : 0);
     const anyDown = themeDown || radarDown;
 
     // 共振：确认主线 + 至少一路同向走强 + 无任一路背离走弱；
-    // 分歧：出现背离（一路看多一路走弱）；其余：仅锚成立的观察级。
+    // 分歧：出现背离（一路看多一路走弱）或宽度锚本身已进入分歧/退幕；其余：仅锚成立的观察级。
+    const anchorWeak = b.stage === 'diverging' || b.stage === 'fading';
     let consensus: MainlineConsensusLevel;
     if (confirmed && supports >= 1 && !anyDown) consensus = 'resonance';
-    else if (anyDown && (confirmed || themeUp || radarUp)) consensus = 'diverge';
+    else if ((anyDown || anchorWeak) && (confirmed || themeUp || radarUp || anchorWeak)) consensus = 'diverge';
     else consensus = 'watch';
 
+    const contText =
+      b.continuity.overlap == null
+        ? '核心股延续待积累'
+        : `核心股延续${b.continuity.kept}/${b.continuity.prevCount}`;
     const parts: string[] = [
-      `新高宽度${confirmed ? '确认' : '候选'}（新高${b.newHighCount}·居首${b.topDays}日）`,
+      `新高宽度${STAGE_LABEL[b.stage]}（新高${b.newHighCount}·居首${b.topDays}日·${contText}）`,
     ];
     if (theme) {
       const tt =
@@ -109,6 +113,9 @@ export async function buildMainlineConsensus(): Promise<MainlineConsensus> {
       board: b.boardName,
       etf: b.etf,
       breadthVerdict: b.verdict,
+      breadthStage: b.stage,
+      breadthAction: b.stageAction,
+      continuity: b.continuity,
       newHighCount: b.newHighCount,
       topDays: b.topDays,
       themeStrength: theme ? Math.round(theme.strength) : null,

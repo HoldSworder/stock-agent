@@ -12,6 +12,7 @@ import MarkdownView from '@/components/MarkdownView.vue';
 import StockLink from '@/components/StockLink.vue';
 import BoardReviewConclusion from '@/components/BoardReviewConclusion.vue';
 import MarketRegimePanel from '@/components/MarketRegimePanel.vue';
+import IndexFundFlowPanel from '@/components/IndexFundFlowPanel.vue';
 import BoardStrengthPanel from '@/components/BoardStrengthPanel.vue';
 import BoardBreadthPanel from '@/components/BoardBreadthPanel.vue';
 import MarketThemesPanel from '@/components/MarketThemesPanel.vue';
@@ -19,6 +20,8 @@ import MainlineConsensusPanel from '@/components/MainlineConsensusPanel.vue';
 import BoardWorkbenchPanel from '@/components/BoardWorkbenchPanel.vue';
 import HotConceptsPanel from '@/components/HotConceptsPanel.vue';
 import SentimentPanel from '@/components/SentimentPanel.vue';
+import MoneyEffectPanel from '@/components/MoneyEffectPanel.vue';
+import MoneyEffectBadge from '@/components/MoneyEffectBadge.vue';
 import MacroPanel from '@/components/MacroPanel.vue';
 import UsMappingPanel from '@/components/UsMappingPanel.vue';
 import LadderPanel from '@/components/LadderPanel.vue';
@@ -261,6 +264,9 @@ onUnmounted(() => {
         <!-- 大盘阶段研判（确定性完整面板：阶段/强度分/明日展望/驱动风险/6维度/权重指数/全A等权背离/历史走势） -->
         <MarketRegimePanel />
 
+        <!-- 首板赚钱效应徽标（883994·打板追涨情绪温度计，详细趋势见「情绪周期」tab） -->
+        <MoneyEffectBadge auto-load class="me-badge-row" />
+
         <div class="tab-actions">
           <el-button :icon="MagicStick" type="primary" @click="reviewOpen = true">
             一键 AI 大盘与板块研判
@@ -283,6 +289,9 @@ onUnmounted(() => {
             <div class="idx-pct num" :class="dir(ix.pct)">{{ pct(ix.pct) }}</div>
           </div>
         </div>
+
+        <!-- 股指主力资金流趋势（近 N 日主力净流入，独立 120s 缓存接口） -->
+        <IndexFundFlowPanel v-if="enabled('indexFundFlow')" />
 
         <!-- 两市成交额 + 情绪温度（并排关键指标条） -->
       <div
@@ -520,6 +529,7 @@ onUnmounted(() => {
       <!-- ===== 情绪周期（S1 短线择时总开关）===== -->
       <el-tab-pane label="情绪周期" name="sentiment" lazy>
         <SentimentPanel />
+        <MoneyEffectPanel />
       </el-tab-pane>
 
       <!-- ===== 连板梯队 / 龙头辨识（S6 龙头战法）===== -->
@@ -674,6 +684,9 @@ onUnmounted(() => {
   align-items: center;
   gap: 12px;
   margin-bottom: 14px;
+}
+.me-badge-row {
+  margin: 0 0 12px;
 }
 .tab-tip {
   font-size: 12px;

@@ -3,8 +3,12 @@ import type {
   BoardBreadthOverview,
   BoardBreadthVerdict,
   BoardKind,
+  BoardMainlineStage,
+  BoardStageAction,
+  CoreContinuity,
 } from '@stock-agent/shared';
 import { nowIso, shanghaiToday } from '../util';
+import { prevTradingDay } from '../market/calendar';
 import {
   fetchBoardConstituents,
   fetchBoards,
@@ -45,6 +49,13 @@ const PERSIST_TOP_DAYS = 3;
 const FADE_DROP_PCT = 50;
 /** 榜单展示/落库上限（按新高数降序截取） */
 const MAX_BOARDS = 40;
+/** 每板块落库的核心股（板块内创新高成分）上限，控制单行体积 */
+const CORE_CODES_CAP = 30;
+/**
+ * 跨日确认要求的核心股重叠率下限：今日与上一交易日的板块内新高集合重叠 ≥ 此比例才算「同一批股在延续」。
+ * 只比新高数量会把「每天换一批股轮流冲高」的普涨/轮动噪声误判成持续主线，那种主线追进去大概率立刻分歧。
+ */
+const CORE_CONTINUITY_MIN = 0.5;
 
 // ===== ETF 盯盘·中长期主线口径（仅供 ETF 多周期盯盘研判用，独立于上方当日/短期口径）=====
 /** 中长期回看交易日窗口（约一个半月，贴中线主升浪聚焦） */
@@ -153,6 +164,8 @@ interface RawCount {
   newHighCount: number;
   consTotal: number;
   ratio: number;
+  /** 板块内创新高的成分股代码（升序，已截断到 CORE_CODES_CAP） */
+  coreCodes: string[];
 }
 
 const VERDICT_LABEL: Record<BoardBreadthVerdict, string> = {
@@ -162,26 +175,106 @@ const VERDICT_LABEL: Record<BoardBreadthVerdict, string> = {
   fading: '退潮',
 };
 
+/** 阶段中文名（前端与文本产出共用） */
+export const STAGE_LABEL: Record<BoardMainlineStage, string> = {
+  none: '未入场景',
+  brewing: '主线酝酿',
+  advancing: '主线主升',
+  diverging: '主线分歧',
+  fading: '主线退幕',
+};
+
+/** 阶段允许动作的中文说明（硬路由，只收紧不放大） */
+export const STAGE_ACTION_LABEL: Record<BoardStageAction, string> = {
+  none: '不参与',
+  probe: '可试仓',
+  lead: '可追领涨',
+  hold_only: '只减不加',
+  exit_only: '只退出',
+};
+
+/** verdict → 阶段。两者同源，阶段只是把判定翻译成面向操作的语义 */
+function toStage(verdict: BoardBreadthVerdict, wasMainline: boolean): BoardMainlineStage {
+  if (verdict === 'fading') return 'fading';
+  if (verdict === 'confirmed') return 'advancing';
+  if (verdict === 'candidate') return wasMainline ? 'diverging' : 'brewing';
+  return 'none';
+}
+
+/**
+ * 阶段 → 允许的开仓动作（硬路由）。
+ * 只做收紧：酝酿只给试仓额度、主升才允许追领涨、分歧一律只减不加、退幕只退出。
+ * 不存在「判定为主升就放大仓位」的分支——阶段判定滞后于价格，用它加码等于系统性高位加仓。
+ */
+export function stageAction(stage: BoardMainlineStage): BoardStageAction {
+  switch (stage) {
+    case 'brewing':
+      return 'probe';
+    case 'advancing':
+      return 'lead';
+    case 'diverging':
+      return 'hold_only';
+    case 'fading':
+      return 'exit_only';
+    default:
+      return 'none';
+  }
+}
+
+/**
+ * 核心股延续度：上一交易日的核心股今天还有多少留在新高名单里（留存率）。
+ *
+ * 分母必须是 prevCodes.length 而不是 min(today, prev)：取 min 时「昨天 30 只、今天只剩 3 只且都在昨天名单里」
+ * 会算出 100% 延续，而那恰恰是主线退潮最该报警的形态——同一批股大面积消失。
+ *
+ * 上一交易日快照缺该字段（改造前的历史行）时 overlap 返回 null —— 未知不阻断确认，
+ * 否则改造当天全部主线会集体退回候选。真实延续判定从积累出第一份带 coreCodes 的快照起生效。
+ */
+function assessContinuity(today: string[], prev: string[] | undefined): CoreContinuity {
+  const prevCodes = prev ?? [];
+  if (prevCodes.length === 0 || today.length === 0) {
+    return { kept: 0, prevCount: prevCodes.length, overlap: null };
+  }
+  const prevSet = new Set(prevCodes);
+  const kept = today.filter((c) => prevSet.has(c)).length;
+  return { kept, prevCount: prevCodes.length, overlap: kept / prevCodes.length };
+}
+
 /** 持续性 + 判定结果（由当日计数 + 该板块历史快照算出） */
 interface Persistence {
   streakDays: number;
   topDays: number;
   delta: number | null;
   verdict: BoardBreadthVerdict;
+  stage: BoardMainlineStage;
+  action: BoardStageAction;
+  continuity: CoreContinuity;
 }
 
 /**
  * 由「当日计数 + 该板块近端历史快照（新→旧）」算持续性与主线判定。
  * 供实时总览与今日计划底稿复用，保证两处口径一致（DRY）。
+ *
+ * @param tradeDate 当日交易日。传入时会校验 hist[0] 确实是上一交易日的快照，
+ *   否则核心股延续度按未知处理——收盘快照漏跑时 hist[0] 可能是三天前的名单，
+ *   拿它做「跨日延续」比对得出的结论是假的。不传则跳过校验（自检脚本直接喂构造数据）。
  */
-function assessPersistence(
+export function assessPersistence(
   rank: number,
   count: number,
   ratio: number,
   hist: BoardBreadthSnapshotRow[],
+  coreCodes: string[] = [],
+  tradeDate?: string,
 ): Persistence {
-  const prevCount = hist[0]?.newHighCount ?? null;
+  const prevRow = hist[0];
+  const prevIsYesterday =
+    tradeDate == null || (prevRow != null && prevRow.tradeDate === prevTradingDay(tradeDate));
+  const prevCount = prevRow?.newHighCount ?? null;
   const delta = prevCount != null ? count - prevCount : null;
+  const continuity = prevIsYesterday
+    ? assessContinuity(coreCodes, prevRow?.coreCodes)
+    : { kept: 0, prevCount: 0, overlap: null };
   // 连续达标天数：今日 + 历史中连续满足地板的天数
   const flooredSeq = [meetsFloor(count, ratio), ...hist.map((h) => meetsFloor(h.newHighCount, h.ratio))];
   let streakDays = 0;
@@ -193,8 +286,34 @@ function assessPersistence(
   const topSeq = [rank, ...hist.map((h) => h.rank)].slice(0, LOOKBACK_DAYS + 1);
   const topDays = topSeq.filter((rk) => rk <= TOP_RANK).length;
   const wasMainline = hist.some((h) => h.rank <= TOP_RANK);
-  const verdict = judge({ count, ratio, rank, prevCount, topDays, wasMainline });
-  return { streakDays, topDays, delta, verdict };
+  const verdict = judge({ count, ratio, rank, prevCount, topDays, wasMainline, continuity });
+  const stage = toStage(verdict, wasMainline);
+  return { streakDays, topDays, delta, verdict, stage, action: stageAction(stage), continuity };
+}
+
+/**
+ * 单板块阶段动作（只读最新持久化快照，不现场重跑、不联网）。
+ * 供标的计划的板块闸门使用：R3 纪律要求这条链路只读快照，
+ * 现场重跑要遍历全部板块成分，绝不能挂在「生成一份标的计划」的路径上。
+ * @returns 无快照或该板块当日未入榜时返回 null（由调用方显式标未覆盖，不得当成 none 收紧）
+ */
+export function boardStageActionOf(
+  boardCode: string,
+): { action: BoardStageAction; stage: BoardMainlineStage; tradeDate: string } | null {
+  const date = getLatestSnapshotDate();
+  if (!date) return null;
+  const row = listSnapshotsByDate(date).find((r) => r.boardCode === boardCode);
+  if (!row) return null;
+  const hist = groupHistory(listRecentSnapshots(date, LOOKBACK_DAYS)).get(boardCode) ?? [];
+  const { stage, action } = assessPersistence(
+    row.rank,
+    row.newHighCount,
+    row.ratio,
+    hist,
+    row.coreCodes,
+    date,
+  );
+  return { action, stage, tradeDate: date };
 }
 
 /** 按 boardCode 把历史快照分组并按交易日新→旧排序 */
@@ -212,7 +331,7 @@ function groupHistory(history: BoardBreadthSnapshotRow[]): Map<string, BoardBrea
 /**
  * 主线判定：
  *  - 先判退潮（曾居首 + 新高数腰斩/跌出榜首/掉地板）；
- *  - 否则达标 + 居首 + 确认门槛 + 持续 → 确认；
+ *  - 否则达标 + 居首 + 确认门槛 + 持续 + 核心股延续 → 确认；
  *  - 否则达标 → 候选；其余未达标。
  */
 function judge(args: {
@@ -222,8 +341,9 @@ function judge(args: {
   prevCount: number | null;
   topDays: number;
   wasMainline: boolean;
+  continuity: CoreContinuity;
 }): BoardBreadthVerdict {
-  const { count, ratio, rank, prevCount, topDays, wasMainline } = args;
+  const { count, ratio, rank, prevCount, topDays, wasMainline, continuity } = args;
   const isTop = rank <= TOP_RANK;
   const floored = meetsFloor(count, ratio);
 
@@ -233,7 +353,9 @@ function judge(args: {
     if (!floored || !isTop || halved) return 'fading';
   }
   if (!floored) return 'none';
-  if (meetsConfirm(count, ratio) && isTop && topDays >= PERSIST_TOP_DAYS) return 'confirmed';
+  // 核心股换了一批（重叠率不足）→ 只能是候选，不给确认：数量还在但换了主力，属于轮动噪声而非资金聚焦
+  const continued = continuity.overlap == null || continuity.overlap >= CORE_CONTINUITY_MIN;
+  if (meetsConfirm(count, ratio) && isTop && topDays >= PERSIST_TOP_DAYS && continued) return 'confirmed';
   return 'candidate';
 }
 
@@ -276,11 +398,12 @@ export async function buildBreadthOverview(persist = true): Promise<BoardBreadth
           await jitterDelay(FETCH_JITTER_MS); // 错峰发包，降低对 push2 的瞬时 req/s
           const cons = await fetchBoardConstituents(meta.kind, meta.name).catch(() => [] as string[]);
           if (cons.length === 0) return null; // 成分取数失败/为空，不参与排名
-          let newHighCount = 0;
-          for (const code of cons) if (newHighSet.has(code)) newHighCount += 1;
+          // 记下「哪些股在创新高」而不只是「几只在创新高」：跨日确认要比对是不是同一批股
+          const hits = cons.filter((code) => newHighSet.has(code)).sort();
+          const newHighCount = hits.length;
           const consTotal = cons.length;
           const ratio = consTotal > 0 ? (newHighCount / consTotal) * 100 : 0;
-          return { meta, newHighCount, consTotal, ratio };
+          return { meta, newHighCount, consTotal, ratio, coreCodes: hits.slice(0, CORE_CODES_CAP) };
         })
       ).filter((x): x is RawCount => x != null && x.newHighCount > 0);
 
@@ -293,17 +416,24 @@ export async function buildBreadthOverview(persist = true): Promise<BoardBreadth
   // 6) 逐项算持续性 + 判定 + 映射 ETF
   const items: BoardBreadthItem[] = counts.map((c, i) => {
     const rank = i + 1;
-    const { streakDays, topDays, delta, verdict } = assessPersistence(
+    const { streakDays, topDays, delta, verdict, stage, action, continuity } = assessPersistence(
       rank,
       c.newHighCount,
       c.ratio,
       histByBoard.get(c.meta.code) ?? [],
+      c.coreCodes,
+      tradeDate,
     );
 
     const deltaText = delta == null ? '' : `·较昨${delta >= 0 ? '+' : ''}${delta}`;
+    const contText =
+      continuity.overlap == null
+        ? '·核心股延续待积累'
+        : `·核心股延续 ${continuity.kept}/${continuity.prevCount}`;
     const note =
       `新高 ${c.newHighCount} 只（占比 ${r1(c.ratio)}%）·当日第 ${rank} 名` +
-      `·近${LOOKBACK_DAYS}日居首 ${topDays} 日${deltaText}·【${VERDICT_LABEL[verdict]}】`;
+      `·近${LOOKBACK_DAYS}日居首 ${topDays} 日${deltaText}${contText}` +
+      `·【${STAGE_LABEL[stage]} → ${STAGE_ACTION_LABEL[action]}】`;
 
     return {
       boardCode: c.meta.code,
@@ -317,6 +447,9 @@ export async function buildBreadthOverview(persist = true): Promise<BoardBreadth
       topDays,
       delta,
       verdict,
+      stage,
+      stageAction: action,
+      continuity,
       etf: mapBoardEtf(c.meta.name),
       note,
     };
@@ -324,6 +457,7 @@ export async function buildBreadthOverview(persist = true): Promise<BoardBreadth
 
   // 7) 落库（仅当有真实计数；按上限截取，控制每日行数）
   if (persist && items.length > 0) {
+    const coreByCode = new Map(counts.map((c) => [c.meta.code, c.coreCodes]));
     upsertSnapshots(
       items.slice(0, Math.max(MAX_BOARDS, 60)).map((it) => ({
         tradeDate,
@@ -334,11 +468,12 @@ export async function buildBreadthOverview(persist = true): Promise<BoardBreadth
         consTotal: it.consTotal,
         ratio: it.ratio ?? 0,
         rank: it.rank,
+        coreCodes: coreByCode.get(it.boardCode) ?? [],
       })),
     );
   }
 
-  const mainlines = items.filter((it) => it.verdict === 'confirmed');
+  const mainlines = items.filter((it) => it.stage === 'advancing');
 
   return {
     asOf: nowIso(),
@@ -349,7 +484,8 @@ export async function buildBreadthOverview(persist = true): Promise<BoardBreadth
     mainlines,
     note:
       '板块新高宽度（主线识别，确定性只读，仅供参考，不构成投资建议）：' +
-      `按板块内${WINDOW}个股数横向排名，"最多且持续多日稳居榜首"判定主线。` +
+      `按板块内${WINDOW}个股数横向排名，"最多且持续多日稳居榜首、且核心股跨日延续"判定主线。` +
+      '阶段（酝酿/主升/分歧/退幕）只用于收紧动作（该不该开新仓、是否只减不加），不用于放大仓位。' +
       (stale ? '⚠️ 创新高/板块成分取数降级，榜为不完整估计（请到数据源页检查 AKShare 配置）。' : ''),
     stale,
   };
@@ -370,28 +506,37 @@ export function formatBreadthForPlan(): string {
   const histByBoard = groupHistory(listRecentSnapshots(date, LOOKBACK_DAYS));
   const enriched = rows.map((r) => ({
     ...r,
-    ...assessPersistence(r.rank, r.newHighCount, r.ratio, histByBoard.get(r.boardCode) ?? []),
+    ...assessPersistence(r.rank, r.newHighCount, r.ratio, histByBoard.get(r.boardCode) ?? [], r.coreCodes, date),
     etf: mapBoardEtf(r.boardName),
   }));
-  const mains = enriched.filter((e) => e.verdict === 'confirmed');
+  const mains = enriched.filter((e) => e.stage === 'advancing');
   const top = enriched.slice(0, 8);
 
   const fresh = date === shanghaiToday() ? '' : `（${date}，非当日产出，注意时效）`;
   const lines: string[] = [
-    `【板块新高宽度·最新】${fresh}（${WINDOW}口径，板块内创新高个股数横向排名；"最多且持续多日稳居榜首"判主线，确定性只读）`,
+    `【板块新高宽度·最新】${fresh}（${WINDOW}口径，板块内创新高个股数横向排名；"最多且持续多日稳居榜首、且核心股跨日延续"判主线，确定性只读）`,
+    '阶段硬路由：酝酿=可试仓 / 主升=可追领涨 / 分歧=只减不加 / 退幕=只退出。阶段只收紧不放大仓位。',
   ];
   if (mains.length > 0) {
     lines.push(
-      '确认主线：' +
+      '确认主线（主升）：' +
         mains
           .map(
             (m) =>
-              `${m.boardName}(新高${m.newHighCount}/占比${r1(m.ratio)}%·居首${m.topDays}日${m.etf ? `→${m.etf.name}${m.etf.code}` : ''})`,
+              `${m.boardName}(新高${m.newHighCount}/占比${r1(m.ratio)}%·居首${m.topDays}日·核心股延续${m.continuity.overlap == null ? '待积累' : `${m.continuity.kept}/${m.continuity.prevCount}`}${m.etf ? `→${m.etf.name}${m.etf.code}` : ''})`,
           )
           .join('；'),
     );
   } else {
-    lines.push('确认主线：暂无（无板块稳居榜首足够天数，或市场处于冰点/普跌）。');
+    lines.push('确认主线：暂无（无板块稳居榜首足够天数、核心股未跨日延续，或市场处于冰点/普跌）。');
+  }
+  const brewing = enriched.filter((e) => e.stage === 'brewing').slice(0, 4);
+  const fadingList = enriched.filter((e) => e.stage === 'fading').slice(0, 4);
+  if (brewing.length > 0) {
+    lines.push('酝酿中(仅可试仓)：' + brewing.map((m) => `${m.boardName}(新高${m.newHighCount})`).join('  '));
+  }
+  if (fadingList.length > 0) {
+    lines.push('退幕(只退出)：' + fadingList.map((m) => `${m.boardName}(新高${m.newHighCount})`).join('  '));
   }
   lines.push(
     '新高榜Top：' +

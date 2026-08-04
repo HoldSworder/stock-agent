@@ -5,10 +5,18 @@ import { ElMessage } from 'element-plus';
 import { Refresh } from '@element-plus/icons-vue';
 import { api } from '@/api';
 import { useCachedResource } from '@/composables/useCachedResource';
-import type { BoardBreadthItem, BoardBreadthOverview, BoardBreadthVerdict } from '@stock-agent/shared';
+import { STAGE_ACTION_LABEL, STAGE_LABEL } from '@/constants/boardTags';
+import type {
+  BoardBreadthItem,
+  BoardBreadthOverview,
+  BoardMainlineStage,
+  BoardStageAction,
+  CoreContinuity,
+} from '@stock-agent/shared';
 
 // 板块新高宽度（主线识别）：各概念/行业板块内创新高个股数横向排名，
-// 「新高数最多且持续多日稳居榜首」判定主线。确定性只读，零量化术语。
+// 「新高数最多、持续多日稳居榜首、且核心股跨日延续」判定主线。确定性只读，零量化术语。
+// 每行给出生命周期阶段与该阶段允许的动作（硬路由，只收紧不放大）。
 
 // SWR 缓存（120s，慢变）：重进/切 Tab 瞬显；后端逐板块取成分较重，已做 30min 响应缓存
 const { data, loading, refreshing, load, reload } = useCachedResource<BoardBreadthOverview>(
@@ -21,12 +29,31 @@ const ov = computed(() => data.value ?? null);
 const mainlines = computed(() => ov.value?.mainlines ?? []);
 const items = computed(() => ov.value?.items ?? []);
 
-const VERDICT_META: Record<BoardBreadthVerdict, { label: string; type: 'danger' | 'success' | 'warning' | 'info' }> = {
-  confirmed: { label: '确认主线', type: 'danger' },
-  candidate: { label: '候选主线', type: 'warning' },
-  fading: { label: '退潮', type: 'info' },
-  none: { label: '未达标', type: 'info' },
+const STAGE_TYPE: Record<BoardMainlineStage, 'danger' | 'success' | 'warning' | 'info'> = {
+  advancing: 'danger',
+  brewing: 'warning',
+  diverging: 'warning',
+  fading: 'info',
+  none: 'info',
 };
+
+const ACTION_CLS: Record<BoardStageAction, string> = {
+  lead: 'act-lead',
+  probe: 'act-probe',
+  hold_only: 'act-hold',
+  exit_only: 'act-exit',
+  none: 'act-none',
+};
+
+/** 核心股延续展示：历史快照尚无该字段时显式说明「待积累」，不冒充 0 */
+function continuityText(c: CoreContinuity | undefined): string {
+  if (!c || c.overlap == null) return '待积累';
+  return `${c.kept}/${c.prevCount}`;
+}
+function continuityClass(c: CoreContinuity | undefined): string {
+  if (!c || c.overlap == null) return 'flat';
+  return c.overlap >= 0.5 ? 'up' : 'down';
+}
 
 const KIND_LABEL: Record<BoardBreadthItem['kind'], string> = { industry: '行业', concept: '概念' };
 
@@ -56,7 +83,8 @@ onMounted(() => void load().catch((e) => ElMessage.error(e instanceof Error ? e.
       <el-button :icon="Refresh" size="small" :loading="loading || refreshing" @click="refresh">刷新</el-button>
     </div>
     <div class="block-sub">
-      统计每个概念/行业板块内创新高个股数并横向排名，「新高数最多且持续多日稳居榜首」判定主线（确定性只读，仅研判不下单）。
+      统计每个概念/行业板块内创新高个股数并横向排名，「新高数最多、持续多日稳居榜首、且核心股跨日延续」判定主线。
+      阶段只用于收紧动作（能不能开新仓、是否只减不加），不用于放大仓位（确定性只读，仅研判不下单）。
     </div>
 
     <template v-if="ov">
@@ -72,11 +100,14 @@ onMounted(() => void load().catch((e) => ElMessage.error(e instanceof Error ? e.
             size="large"
             class="ml-tag"
           >
-            {{ m.boardName }}（新高 {{ m.newHighCount }} 只·居首 {{ m.topDays }} 日）
+            {{ m.boardName }}（新高 {{ m.newHighCount }} 只·居首 {{ m.topDays }} 日·核心股延续
+            {{ continuityText(m.continuity) }}）
             <span v-if="m.etf" class="ml-etf">→ {{ m.etf.name }} {{ m.etf.code }}</span>
           </el-tag>
         </template>
-        <span v-else class="ml-empty">暂无确认主线（无板块稳居榜首足够天数，或市场处于冰点/普跌）</span>
+        <span v-else class="ml-empty">
+          暂无确认主线（无板块稳居榜首足够天数、核心股未跨日延续，或市场处于冰点/普跌）
+        </span>
       </div>
 
       <!-- 板块新高榜 -->
@@ -117,11 +148,27 @@ onMounted(() => void load().catch((e) => ElMessage.error(e instanceof Error ? e.
             <span class="num sub">{{ row.topDays }} / {{ row.streakDays }} 日</span>
           </template>
         </el-table-column>
-        <el-table-column label="判定" width="100" align="center">
+        <el-table-column label="核心股延续" width="100" align="center">
           <template #default="{ row }">
-            <el-tag :type="VERDICT_META[row.verdict as BoardBreadthVerdict].type" size="small" :effect="row.verdict === 'confirmed' ? 'dark' : 'plain'">
-              {{ VERDICT_META[row.verdict as BoardBreadthVerdict].label }}
+            <span class="num" :class="continuityClass(row.continuity)">{{ continuityText(row.continuity) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column label="阶段" width="86" align="center">
+          <template #default="{ row }">
+            <el-tag
+              :type="STAGE_TYPE[row.stage as BoardMainlineStage]"
+              size="small"
+              :effect="row.stage === 'advancing' ? 'dark' : 'plain'"
+            >
+              {{ STAGE_LABEL[row.stage as BoardMainlineStage] }}
             </el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="可做动作" width="96" align="center">
+          <template #default="{ row }">
+            <span class="act" :class="ACTION_CLS[row.stageAction as BoardStageAction]">
+              {{ STAGE_ACTION_LABEL[row.stageAction as BoardStageAction] }}
+            </span>
           </template>
         </el-table-column>
       </el-table>
@@ -216,6 +263,26 @@ onMounted(() => void load().catch((e) => ElMessage.error(e instanceof Error ? e.
 }
 .flat {
   color: var(--el-text-color-secondary);
+}
+.act {
+  font-size: 12px;
+  font-weight: 600;
+}
+.act-lead {
+  color: #f56c6c;
+}
+.act-probe {
+  color: #e6a23c;
+}
+.act-hold {
+  color: #909399;
+}
+.act-exit {
+  color: #4eb61b;
+}
+.act-none {
+  color: var(--el-text-color-secondary);
+  font-weight: 400;
 }
 .note {
   font-size: 12px;
