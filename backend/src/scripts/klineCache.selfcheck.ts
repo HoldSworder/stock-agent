@@ -179,6 +179,76 @@ const bar = (
 assert.deepEqual(frontAdjustDaily([]), []);
 assert.equal(frontAdjustDaily([bar('2026-08-04', 1, 1, 1, 1)]).length, 1);
 
+// ===== 10b. bar 内除权检测（周/月线专用）=====
+// 除权发生在周中时，周线那根 bar 的 open 在折算前、close 在折算后，
+// 跨 bar 的「开盘/前收」看不到跳空。不补这条，周线波段锚点会取到折算前的高点，
+// 黄金分割回撤/扩展整套失真（实测 159516 周线高点 2.11 vs 日线 1.05）。
+
+{
+  // 复刻 159516：折算周 open 1.755（折算前）、high 1.79、close 0.905（折算后）
+  const weekly = [
+    bar('2026-06-29', 1.7, 1.8, 1.68, 1.73, 5000),
+    bar('2026-07-06', 1.755, 1.79, 0.9, 0.905, 9000),
+    bar('2026-07-13', 0.873, 0.93, 0.85, 0.865, 8000),
+  ];
+
+  // 不开 intrabar：跨 bar 无跳空（1.755/1.73 ≈ 1.01），检测不到
+  assert.deepEqual(frontAdjustDaily(weekly), weekly, '跨 bar 检测看不到 bar 内除权，应原样返回');
+
+  // 开 intrabar：close/open = 0.5157 < 0.55，判定为除权
+  const fixed = frontAdjustDaily(weekly, undefined, { intrabar: true });
+  const f = 0.905 / 1.755;
+  assert.ok(Math.abs(fixed[1].open - 1.755 * f) < 1e-9, '折算 bar 的 open 应缩放到折算后口径');
+  assert.ok(Math.abs(fixed[1].high - 1.79 * f) < 1e-9, '折算 bar 的 high 应缩放（波段锚点靠它）');
+  assert.equal(fixed[1].close, 0.905, '折算 bar 的 close 已是折算后价，不得再缩放');
+  assert.equal(fixed[1].low, 0.9, '折算 bar 的 low 已是折算后价，不得再缩放');
+  assert.ok(fixed[1].high < 1, `修正后 high 应落到 1 以下，实际 ${fixed[1].high}`);
+  assert.ok(Math.abs(fixed[0].close - 1.73 * f) < 1e-9, '折算之前的 bar 应整根缩放');
+  assert.deepEqual(fixed[2], weekly[2], '折算之后的 bar 不得改动');
+
+  // 真实单周暴跌不得被误判：5 个交易日连续跌停理论上限约 -41%，达不到 -45% 阈值
+  const crash = [
+    bar('2026-06-29', 10, 10, 10, 10),
+    bar('2026-07-06', 10, 10, 5.9, 5.9),
+    bar('2026-07-13', 5.9, 6, 5.5, 5.6),
+  ];
+  assert.deepEqual(
+    frontAdjustDaily(crash, undefined, { intrabar: true }),
+    crash,
+    '一周 -41% 是涨跌停可达的真实行情，不得判为除权',
+  );
+}
+
+{
+  // bar 内因子与跨 bar 因子叠加：两个必须叠乘。
+  // 只应用 bar 内因子会让那根 bar 停在旧基准，与下一根之间重新出现假跳空——
+  // 正是本函数要消除的东西，而热门 ETF 一年内做两次折算完全可能。
+  const raw = [
+    bar('w1', 4, 4.2, 3.9, 4),
+    bar('w2', 4, 4.2, 1.9, 2), // bar 内 1:2
+    bar('w3', 2, 2.1, 1.9, 2),
+    bar('w4', 1, 1.05, 0.95, 1), // 跨 bar 1:2
+  ];
+  const fixed = frontAdjustDaily(raw, undefined, { intrabar: true });
+  // w2 的 open/high 吃两次因子（0.25），low/close 只吃跨 bar 那次（0.5）
+  assert.ok(Math.abs(fixed[1].open - 1) < 1e-9, `w2 open 应为 4×0.25=1，实际 ${fixed[1].open}`);
+  assert.ok(Math.abs(fixed[1].high - 1.05) < 1e-9, `w2 high 应为 4.2×0.25，实际 ${fixed[1].high}`);
+  assert.ok(Math.abs(fixed[1].close - 1) < 1e-9, `w2 close 应为 2×0.5=1，实际 ${fixed[1].close}`);
+  assert.ok(Math.abs(fixed[0].close - 1) < 1e-9, 'w1 应吃满两次因子');
+  // 最终诉求：修正后不得残留任何假跳空
+  for (let i = 1; i < fixed.length; i++) {
+    const gap = Math.abs(fixed[i].close / fixed[i - 1].close - 1);
+    assert.ok(gap < 0.05, `修正后 ${fixed[i].time} 仍残留 ${(gap * 100).toFixed(1)}% 跳空`);
+  }
+  // 成交额不随除权变化，故 close×volume 必须守恒（volume 只除 f、不除 self）
+  for (let i = 0; i < raw.length; i++) {
+    assert.ok(
+      Math.abs(fixed[i].close * fixed[i].volume - raw[i].close * raw[i].volume) < 1e-6,
+      `${raw[i].time} 的「收盘 × 成交量」应守恒`,
+    );
+  }
+}
+
 // ===== 11. 分钟前复权的量能口径必须与日线一致（M2）=====
 {
   // 折算因子取整 0.5：日线 07-10 开盘 0.9725 / 前收 1.945 = 0.5，便于精确比对

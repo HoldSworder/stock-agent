@@ -147,6 +147,35 @@ CREATE TABLE IF NOT EXISTS symbol_trade_plan_events (
 );
 CREATE INDEX IF NOT EXISTS idx_symbol_plan_events_plan ON symbol_trade_plan_events(plan_id, created_at);
 
+CREATE TABLE IF NOT EXISTS symbol_plan_condition_latches (
+  id TEXT PRIMARY KEY,
+  plan_id TEXT NOT NULL,
+  condition_id TEXT NOT NULL,
+  bar_time TEXT,
+  latched_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_latch_plan_cond ON symbol_plan_condition_latches(plan_id, condition_id);
+
+CREATE TABLE IF NOT EXISTS symbol_plan_forecasts (
+  id TEXT PRIMARY KEY,
+  plan_id TEXT NOT NULL,
+  plan_version INTEGER NOT NULL,
+  code TEXT NOT NULL,
+  scenario_id TEXT NOT NULL,
+  scenario_rank TEXT NOT NULL,
+  probability_pct REAL NOT NULL,
+  probability_basis TEXT,
+  target_price REAL,
+  invalid_price REAL,
+  base_price REAL NOT NULL,
+  due_date TEXT NOT NULL,
+  outcome TEXT,
+  settled_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_forecast_plan_scenario ON symbol_plan_forecasts(plan_id, scenario_id);
+CREATE INDEX IF NOT EXISTS idx_plan_forecast_pending ON symbol_plan_forecasts(outcome, due_date);
+
 CREATE TABLE IF NOT EXISTS watchlist (
   code TEXT PRIMARY KEY,
   name TEXT NOT NULL,

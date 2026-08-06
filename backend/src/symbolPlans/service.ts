@@ -15,6 +15,7 @@ import { sqlite } from '../db/client';
 import { newId, nowIso } from '../util';
 import * as repo from './repo';
 import { syncPlanMarks } from './markSync';
+import { recordForecasts } from './forecast';
 import { PHASE_MODEL_VERSION, tighten } from './phase';
 import { CANDIDATE_MODEL_VERSION } from './candidateCatalog';
 
@@ -29,6 +30,9 @@ export interface ProposalIssue {
     | 'unknown_level_candidate'
     | 'duplicate_level_candidate'
     | 'unknown_condition_candidate'
+    | 'purpose_mismatch'
+    /** 被选作失效条件的候选在计划生成时就已成立，会产出一份出生即失效的计划 */
+    | 'invalidation_already_true'
     | 'role_not_compatible'
     | 'catalog_mismatch'
     | 'catalog_expired'
@@ -108,16 +112,6 @@ export function validateProposal(input: CompileInput): ProposalIssue[] {
       message: `候选目录已于 ${catalog.expiresAt} 过期，请重新生成技术上下文`,
     });
   }
-  // horizon 决定版本车道、有效期与风险口径。不校验的话，LLM 用 next_session 的快照
-  // 提交 horizon=swing，就能拿着次日口径的 risk/execution 去 supersede 真正的波段计划。
-  if (proposal.horizon !== catalog.horizon) {
-    issues.push({
-      field: 'horizon',
-      code: 'catalog_mismatch',
-      message: `horizon 与本次上下文不符：提案 ${proposal.horizon}，上下文 ${catalog.horizon}。请按上下文的期限提交`,
-    });
-  }
-
   const levelById = new Map(catalog.levels.map((l) => [l.candidateId, l]));
   const condById = new Map(catalog.conditions.map((c) => [c.candidateId, c]));
   const price = context.periods[0]?.close ?? 0;
@@ -171,7 +165,11 @@ export function validateProposal(input: CompileInput): ProposalIssue[] {
     issues.push({ field: 'scenarioSelections', code: 'no_scenario', message: '至少需要一个情景' });
   }
   proposal.scenarioSelections?.forEach((sc, i) => {
-    const checkIds = (ids: string[], f: string): CandidateCondition[] => {
+    const checkIds = (
+      ids: string[],
+      f: string,
+      expect: 'trigger' | 'invalidation',
+    ): CandidateCondition[] => {
       const out: CandidateCondition[] = [];
       for (const id of ids ?? []) {
         const c = condById.get(id);
@@ -184,12 +182,41 @@ export function validateProposal(input: CompileInput): ProposalIssue[] {
           });
           continue;
         }
+        // 必须排在 purpose_mismatch 之前：目录已把已成立的条件从 suitableFor 摘掉，
+        // 落到下面只会报「只适用于 trigger」，模型据此换一条同样已成立的条件继续撞墙。
+        if (expect === 'invalidation' && c.alreadySatisfied) {
+          issues.push({
+            field: `scenarioSelections[${i}].${f}`,
+            code: 'invalidation_already_true',
+            message:
+              `候选条件 ${id}「${c.description}」在计划生成时就已成立，不能当失效条件。` +
+              '失效条件必须是「将来若发生则计划作废」的事；用已发生的事实做失效条件，' +
+              '计划第一次复核就会判失效。请改选一条当前尚未成立的失效条件。',
+            availableCandidateIds: catalog.conditions
+              .filter((x) => x.suitableFor.includes('invalidation'))
+              .map((x) => x.candidateId),
+          });
+          continue;
+        }
+        // 用途护栏：只防「LLM 把条件放错数组」。它读的仍是目录里的 suitableFor，
+        // 所以防不了白名单本身极性写反——那一层由 candidateCatalog 的独立断言锁死。
+        if (!c.suitableFor.includes(expect)) {
+          issues.push({
+            field: `scenarioSelections[${i}].${f}`,
+            code: 'purpose_mismatch',
+            message: `候选条件 ${id}「${c.description}」只适用于 ${c.suitableFor.join('/')}，不能当作${expect === 'trigger' ? '触发' : '失效'}条件`,
+            availableCandidateIds: catalog.conditions
+              .filter((x) => x.suitableFor.includes(expect))
+              .map((x) => x.candidateId),
+          });
+          continue;
+        }
         out.push(c);
       }
       return out;
     };
-    const trig = checkIds(sc.conditionCandidateIds, 'conditionCandidateIds');
-    const inval = checkIds(sc.invalidConditionCandidateIds, 'invalidConditionCandidateIds');
+    const trig = checkIds(sc.conditionCandidateIds, 'conditionCandidateIds', 'trigger');
+    const inval = checkIds(sc.invalidConditionCandidateIds, 'invalidConditionCandidateIds', 'invalidation');
     for (const id of sc.targetCandidateLevelIds ?? []) {
       if (!levelById.has(id)) {
         issues.push({
@@ -231,6 +258,15 @@ function toPlanCondition(c: CandidateCondition, required: boolean): PlanConditio
   };
 }
 
+/**
+ * 主观概率归一：越界或非数一律丢弃，不夹逼到 0/100。
+ * 夹逼会把「模型输出坏了」伪装成「模型很有把握」，而这个数本就没资格被抢救。
+ */
+function normalizeProbability(v: number | undefined): number | undefined {
+  if (v == null || !Number.isFinite(v) || v < 0 || v > 100) return undefined;
+  return Math.round(v);
+}
+
 function toTradeLevel(cand: CandidateLevel, role: TradeLevelRole, label: string | undefined): TradeLevel {
   const isZone = cand.high > cand.low;
   return {
@@ -243,6 +279,8 @@ function toTradeLevel(cand: CandidateLevel, role: TradeLevelRole, label: string 
     label: label?.trim() || cand.label,
     rationale: cand.description,
     evidenceIds: cand.sourceEvidenceIds,
+    // 透传来源，供图上把「这条金色 0.618」与「这条计划触发线」认成同一条，详见 TradeLevel.sources
+    sources: cand.sources,
   };
 }
 
@@ -279,19 +317,22 @@ export function compileAndSavePlan(input: CompileInput): SymbolTradePlan {
       .filter((c): c is CandidateCondition => !!c)
       .map((c) => toPlanCondition(c, true)),
     targetLevelIds: sc.targetCandidateLevelIds ?? [],
+    // 主观概率原样透传：它是全计划里唯一允许来自 LLM 的「数」，
+    // 代价是必须处处按「只展示」对待——落库与核对见 forecast.ts，越界拦截见 symbolPlanProjection.selfcheck.ts
+    subjectiveProbabilityPct: normalizeProbability(sc.subjectiveProbabilityPct),
+    probabilityBasis: sc.probabilityBasis?.trim() || undefined,
   }));
 
   // 止盈计划从已选目标位派生，不由 LLM 填
   const targets = levels.filter((l) => l.role === 'target');
   const now = nowIso();
-  const version = repo.nextVersion(context.code, proposal.horizon);
+  // 版本号在下面的 immediate 事务里分配，见事务处注释
   const plan: SymbolTradePlan = {
     id: newId(),
-    version,
+    version: 0,
     code: context.code,
     name: context.name,
     assetType: context.assetType,
-    horizon: proposal.horizon,
     status: 'active',
     asOf: context.asOf,
     validFrom: input.validFrom,
@@ -343,16 +384,24 @@ export function compileAndSavePlan(input: CompileInput): SymbolTradePlan {
     updatedAt: now,
   };
 
-  // 事务：计划 + 旧版本 supersede + 标注同步 + 事件，全成或全不成
+  // 事务：版本分配 + 计划 + 旧版本 supersede + 标注同步 + 事件，全成或全不成。
+  //
+  // 版本号必须在事务**内**取。放在事务外的话，dev 双开或多进程部署时两边可能读到同一个
+  // max(version)，唯一索引 idx_symbol_plans_code_version 会兜住但其中一方直接抛错、计划丢失。
+  // 走 immediate 而非默认的 deferred：deferred 要等第一条写语句才升级锁，
+  // 「读版本号」这一步仍在共享锁下并发发生，等于没锁。
   const tx = sqlite.transaction(() => {
+    plan.version = repo.nextVersion(plan.code);
     repo.insertPlan(plan);
-    const superseded = repo.supersedeOthers(plan.code, plan.horizon, plan.id);
+    const superseded = repo.supersedeOthers(plan.code, plan.id);
     syncPlanMarks(plan);
+    // 概率预测与计划同生共死：只落一半会让核对表出现判不了的无主记录
+    recordForecasts(plan, context.periods.find((p) => p.meta.period === 'day')?.close ?? 0);
     repo.appendEvent({
       planId: plan.id,
       planVersion: plan.version,
       kind: 'created',
-      note: `v${version} 生成（阶段 ${plan.marketPhase}，动作 ${plan.primaryAction}，${levels.length} 条关键位）`,
+      note: `v${plan.version} 生成（阶段 ${plan.marketPhase}，动作 ${plan.primaryAction}，${levels.length} 条关键位）`,
     });
     repo.appendEvent({
       planId: plan.id,
@@ -365,11 +414,11 @@ export function compileAndSavePlan(input: CompileInput): SymbolTradePlan {
         planId: old.id,
         planVersion: old.version,
         kind: 'superseded',
-        note: `被 v${version}（${plan.id}）替代`,
+        note: `被 v${plan.version}（${plan.id}）替代`,
       });
     }
   });
-  tx();
+  tx.immediate();
 
   return plan;
 }
@@ -380,7 +429,6 @@ export function compileAndSavePlan(input: CompileInput): SymbolTradePlan {
  */
 export function saveDraftObservationPlan(input: {
   context: SymbolTechnicalContext;
-  horizon: SymbolTradePlanProposal['horizon'];
   risk: SymbolTradePlan['risk'];
   positionContext: SymbolTradePlan['positionContext'];
   execution: SymbolTradePlan['execution'];
@@ -393,14 +441,13 @@ export function saveDraftObservationPlan(input: {
 }): SymbolTradePlan {
   const { context } = input;
   const now = nowIso();
-  const version = repo.nextVersion(context.code, input.horizon);
+  // 与 compileAndSavePlan 同理，版本号在 immediate 事务内分配
   const plan: SymbolTradePlan = {
     id: newId(),
-    version,
+    version: 0,
     code: context.code,
     name: context.name,
     assetType: context.assetType,
-    horizon: input.horizon,
     status: 'draft',
     asOf: context.asOf,
     validFrom: now,
@@ -440,15 +487,16 @@ export function saveDraftObservationPlan(input: {
   };
 
   const tx = sqlite.transaction(() => {
+    plan.version = repo.nextVersion(plan.code);
     repo.insertPlan(plan);
     // 必须同样 supersede 旧版本并同步标注：否则旧 active 计划仍在 LIVE_STATUSES 里被盘中引擎继续求值，
     // 图上也还挂着上一版的辅助线，而正文已经变成「未产出可执行价位」。
-    const superseded = repo.supersedeOthers(plan.code, plan.horizon, plan.id);
+    const superseded = repo.supersedeOthers(plan.code, plan.id);
     // levels 为空时 syncPlanMarks 只做 historize、不插入新线，正是观察计划需要的效果
     syncPlanMarks(plan);
     repo.appendEvent({
       planId: plan.id,
-      planVersion: version,
+      planVersion: plan.version,
       kind: 'created',
       note: `降级为观察计划：${input.reason}`,
     });
@@ -457,11 +505,11 @@ export function saveDraftObservationPlan(input: {
         planId: old.id,
         planVersion: old.version,
         kind: 'superseded',
-        note: `被观察计划 v${version}（${plan.id}）替代`,
+        note: `被观察计划 v${plan.version}（${plan.id}）替代`,
       });
     }
   });
-  tx();
+  tx.immediate();
   return plan;
 }
 

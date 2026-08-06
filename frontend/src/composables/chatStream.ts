@@ -2,7 +2,7 @@ import { computed, nextTick, onUnmounted, ref } from 'vue';
 import { ElMessage } from 'element-plus';
 import { openWs } from '@/api';
 import { applyStepEvent, type Step } from '@/composables/agentTrace';
-import type { StreamEvent, SymbolPlanHorizon } from '@stock-agent/shared';
+import type { StreamEvent } from '@stock-agent/shared';
 
 /** 对话气泡：用户为纯文本，助手按 agent 轨迹步序渲染 */
 export interface UIMsg {
@@ -20,10 +20,10 @@ export interface SendOptions {
    */
   content?: string;
   /**
-   * 一键生成标的计划的车道。后端据此注入钉死 horizon 的标准指令，
-   * 落库与气泡里仍只是用户那句短话。
+   * 一键生成标的技术交易计划。后端据此注入固定的工具序列指令，
+   * 落库与气泡里仍只是用户那句短话。计划已合并为单一车道，无需再指定期限。
    */
-  planIntent?: SymbolPlanHorizon;
+  planIntent?: boolean;
 }
 
 export interface ChatStreamOptions {

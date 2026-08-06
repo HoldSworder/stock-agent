@@ -37,6 +37,23 @@ function dateOf(time: string): string {
 export const SPLIT_GAP = 0.35;
 
 /**
+ * bar 内除权的判定幅度（`close_t / open_t`），只用于周/月线。
+ *
+ * 周线的 bar 横跨整周，除权发生在周中时（159516 是 2026-07-10 周五折算），
+ * 该 bar 的 open 在折算前、close 在折算后，跳空被吸收进 bar 内部，
+ * 跨 bar 的 `open_t / close_{t-1}` 完全看不到。后果是周线波段锚点取到折算前的高点，
+ * 黄金分割回撤/扩展位整套失真（实测周线高点 2.11 vs 日线 1.05）。
+ *
+ * 阈值比 SPLIT_GAP 更严（0.55 而非 0.65）是有物理依据的：一周 5 个交易日按 ±10%
+ * 涨跌停算，理论最大周跌幅约 -41%，达不到 -45%，故 `close/open < 0.55` 只可能是除权。
+ *
+ * ponytail: 只抓得住 1:2 及更激进的折算（比例 ≤ 0.5）；1:1.5 这种（0.667）抓不到。
+ * bar 内无法还原折算发生的具体时点，故该 bar 自身只修 open/high（它们在折算前），
+ * low/close 视为折算后不动——这是近似，要精确就得接折算公告按日期切分。
+ */
+const INTRABAR_SPLIT_GAP = 0.45;
+
+/**
  * 日/周/月线连续性自修正：用价格自身重建复权因子，补上数据源漏掉的除权。
  *
  * 实测背景：腾讯 fqkline 的 qfq 只处理个股分红送股，不处理 ETF 份额折算。
@@ -54,16 +71,32 @@ export const SPLIT_GAP = 0.35;
  * @param label 传入即打印命中的除权点。只应由取数路径传（一次性事件）；
  *   读缓存出口那次是幂等兜底，每次读都打会随图表轮询刷屏，故不传。
  */
-export function frontAdjustDaily(bars: KlineBar[], label?: string): KlineBar[] {
+export function frontAdjustDaily(
+  bars: KlineBar[],
+  label?: string,
+  opts: { intrabar?: boolean } = {},
+): KlineBar[] {
   if (bars.length < 2) return bars;
 
   // 每根 bar 各自的累乘因子：除权点之前的 bar 要把它之后所有除权因子都乘上
   const factors = new Array<number>(bars.length).fill(1);
+  // bar 内除权（周/月线专用）：该 bar 自身的 open/high 也要缩放
+  const selfFactors = new Array<number>(bars.length).fill(1);
   const hits: Array<{ time: string; ratio: number }> = [];
   let acc = 1;
-  for (let i = bars.length - 1; i >= 1; i--) {
-    const prev = bars[i - 1];
+  for (let i = bars.length - 1; i >= 0; i--) {
     const cur = bars[i];
+    // 先看 bar 内：周/月线的除权多半发生在 bar 内部，跨 bar 看不到
+    if (opts.intrabar === true && cur.open > 0 && cur.close > 0) {
+      const inner = cur.close / cur.open;
+      if (inner < 1 - INTRABAR_SPLIT_GAP) {
+        selfFactors[i] = inner;
+        acc *= inner;
+        hits.push({ time: `${cur.time}(bar内)`, ratio: inner });
+      }
+    }
+    if (i === 0) break;
+    const prev = bars[i - 1];
     if (prev.close > 0 && cur.open > 0) {
       const r = cur.open / prev.close;
       // 只修向下跳空，见 SPLIT_GAP 注释：向上的大跳空可能是新股上市初期的真实暴涨
@@ -74,7 +107,7 @@ export function frontAdjustDaily(bars: KlineBar[], label?: string): KlineBar[] {
     }
     factors[i - 1] = acc;
   }
-  if (acc === 1) return bars;
+  if (acc === 1 && selfFactors.every((f) => f === 1)) return bars;
 
   if (label) {
     // hits 是按倒序扫出来的，输出时按时间正序更好读
@@ -88,13 +121,19 @@ export function frontAdjustDaily(bars: KlineBar[], label?: string): KlineBar[] {
 
   return bars.map((b, i) => {
     const f = factors[i];
-    if (f === 1) return b;
+    const self = selfFactors[i];
+    if (f === 1 && self === 1) return b;
+    // 两个因子必须叠乘：f 是该 bar 之后所有除权的累乘，self 是该 bar 内部那次除权。
+    // bar 内除权只影响 open/high（它们在折算前），low/close 已是折算后价，只吃 f。
+    // 漏乘 f 会让这根 bar 停在旧基准，和下一根之间重新出现假跳空——正是本函数要消除的东西。
     return {
       ...b,
-      open: b.open * f,
-      high: b.high * f,
+      open: b.open * f * self,
+      high: b.high * f * self,
       low: b.low * f,
       close: b.close * f,
+      // 只除 f 不除 self：成交额不随除权变化，而 close 只乘了 f，
+      // 除 f 才能保住「成交额 ≈ 收盘 × 成交量 × 100」这个恒等式
       volume: b.volume / f,
     };
   });

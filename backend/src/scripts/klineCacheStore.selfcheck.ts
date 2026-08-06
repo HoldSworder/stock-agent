@@ -108,7 +108,46 @@ assert.ok(askedLimit > 240, `全量重刷抓取根数应按 keepDays 折算，�
   );
 }
 
+// ---- fresh=true 必须无视新鲜度直接回源（前台 K 线弹窗靠它拿实时当日 bar）----
+// 缓存窗口 10 分钟、弹窗 10 秒一刷，开关失效就等于盯着一根不动的当日线。
+{
+  cache.writeCachedDaily('600005', '1.600005', [bar('2026-08-01', 10), bar('2026-08-03', 11)]);
+  let calls = 0;
+  const out = await cache.getDailyCached(
+    '600005',
+    '1.600005',
+    2,
+    async () => {
+      calls += 1;
+      return [bar('2026-08-01', 10), bar('2026-08-03', 12)];
+    },
+    { fresh: true },
+  );
+  assert.equal(calls, 1, '缓存再新鲜，fresh=true 也必须回源一次');
+  assert.equal(out[1].close, 12, '应返回回源到的新值而非旧缓存');
+}
+
+// ---- fresh=true 回源失败仍要回退旧缓存 ----
+// 否则上游一抖，正在看的图就整块白掉——这正是缓存模块本要消灭的降级。
+{
+  cache.writeCachedDaily('600006', '1.600006', [bar('2026-08-01', 20), bar('2026-08-03', 21)]);
+  const out = await cache.getDailyCached(
+    '600006',
+    '1.600006',
+    2,
+    async () => {
+      throw new Error('上游超时');
+    },
+    { fresh: true },
+  );
+  assert.deepEqual(
+    out.map((b) => b.close),
+    [20, 21],
+    'fresh 回源失败时必须回退旧缓存，不得抛错',
+  );
+}
+
 rmSync(tmpDir, { recursive: true, force: true });
 console.log(
-  '✅ 日K缓存落库自检通过：secid 隔离 / 全量重刷失败标的保历史 / 重刷根数 / 读出口幂等补修正',
+  '✅ 日K缓存落库自检通过：secid 隔离 / 全量重刷失败标的保历史 / 重刷根数 / 读出口幂等补修正 / fresh 强制回源与失败回退',
 );

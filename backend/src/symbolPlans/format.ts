@@ -43,7 +43,7 @@ export interface ContextSnapshotLike {
   context: SymbolTechnicalContext;
   catalog: CandidateCatalog;
   risk: { structuralStop: number | null; executionStop: number | null; atrPct: number | null; suggestedPositionPct: number | null; maxAccountRiskPct: number; timeStopBars: number | null; gapRiskNote: string | null };
-  execution: { triggerMode: string; chaseGuardAtr: number | null; maxPremiumPct: number | null; nextReviewAt: string };
+  execution: { chaseGuardAtr: number | null; maxPremiumPct: number | null; nextReviewAt: string };
   marketAction: string;
   primaryAction: string;
   actionReasons: string[];
@@ -54,7 +54,7 @@ export function formatTechnicalContext(snap: ContextSnapshotLike): string {
   const c = snap.context;
   const L: string[] = [];
 
-  L.push(`【标的】${c.code} ${c.name}（${c.assetType}）｜期限 ${c.horizon}｜数据截至 ${c.asOf}｜数据状态 ${c.dataStatus}`);
+  L.push(`【标的】${c.code} ${c.name}（${c.assetType}）｜数据截至 ${c.asOf}｜数据状态 ${c.dataStatus}`);
   L.push(`【contextId】${c.contextId}（后续取候选与提交计划必须带上）`);
   L.push(`【候选目录】价位 ${c.candidateSummary.levels} 个 / 条件 ${c.candidateSummary.conditions} 个｜catalogHash ${c.candidateSummary.catalogHash}`);
 
@@ -141,7 +141,7 @@ export function formatTechnicalContext(snap: ContextSnapshotLike): string {
   }
   for (const r of snap.actionReasons.slice(0, 4)) L.push(`- ${r}`);
   L.push(
-    `【执行闸门】触发口径 ${snap.execution.triggerMode}｜追涨保护 ${n2(snap.execution.chaseGuardAtr)}×ATR｜` +
+    `【执行闸门】追涨保护 ${n2(snap.execution.chaseGuardAtr)}×ATR｜` +
       `折溢价上限 ${snap.execution.maxPremiumPct == null ? '不适用' : `${snap.execution.maxPremiumPct}%`}`,
   );
 
@@ -169,7 +169,7 @@ export function formatTechnicalContext(snap: ContextSnapshotLike): string {
 /** 候选目录 → 文本 */
 export function formatCandidates(catalog: CandidateCatalog, which: 'levels' | 'conditions'): string {
   const L: string[] = [];
-  L.push(`【${which === 'levels' ? '候选价位' : '候选条件'}】contextId ${catalog.contextId}｜catalogHash ${catalog.catalogHash}｜期限 ${catalog.horizon}`);
+  L.push(`【${which === 'levels' ? '候选价位' : '候选条件'}】contextId ${catalog.contextId}｜catalogHash ${catalog.catalogHash}`);
   L.push(`（提交计划时必须原样带上 contextId、candidateModelVersion=${catalog.candidateModelVersion}、catalogHash）`);
 
   if (which === 'levels') {
@@ -185,9 +185,14 @@ export function formatCandidates(catalog: CandidateCatalog, which: 'levels' | 'c
   } else {
     if (catalog.conditions.length === 0) L.push('无候选条件，只能生成观察计划');
     for (const c of catalog.conditions) {
+      // 打来源价位 id 而不是把价位标签整段抄进描述：同一标签在价位目录里已完整列出，
+      // 抄第二遍会让条件目录逼近 CATALOG_SOFT_LIMIT，尾部候选被静默裁掉后 LLM 只能猜 id
       L.push(
-        `- ${c.candidateId}｜${c.purpose}｜适用 ${c.suitableFor.join('/')}｜${c.timeframe}` +
-          `${c.capability === 'live_only' ? '｜实时专用(不可回测)' : ''}｜${c.description}`,
+        `- ${c.candidateId}｜${c.purpose}｜适用 ${c.suitableFor.join('/') || '（无）'}｜${c.timeframe}` +
+          `${c.capability === 'live_only' ? '｜实时专用(不可回测)' : ''}` +
+          // 不写这句的话，模型只看到「适用」里少了 invalidation，会以为目录漏了东西继续硬填
+          `${c.alreadySatisfied ? '｜当前已成立，不可作失效条件' : ''}｜${c.description}` +
+          `${c.fromLevelCandidateId ? `｜源 ${c.fromLevelCandidateId}` : ''}`,
       );
     }
   }

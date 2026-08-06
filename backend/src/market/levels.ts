@@ -253,6 +253,63 @@ if (process.argv[1] && /levels\.ts$/.test(process.argv[1])) {
   assert(!!fib618 && fib618.price > 13 && fib618.price < 17, `61.8% 回撤位异常：${fib618?.price}`);
   assert(lv.atr != null && lv.atr > 0 && lv.atr < 2, `ATR 数量级异常：${lv.atr}`);
   assert(lv.pivot != null, 'pivot 应可计算');
+
+  /** 造 n 根线性走势的日线（from → to），供窗口与方向断言复用 */
+  const ramp = (n: number, from: number, to: number): KlineBar[] =>
+    Array.from({ length: n }, (_, i) => {
+      const base = from + ((to - from) * i) / (n - 1);
+      return {
+        time: `2026-${String(Math.floor(i / 28) + 1).padStart(2, '0')}-${String((i % 28) + 1).padStart(2, '0')}`,
+        open: base,
+        close: base,
+        high: base + 0.2,
+        low: base - 0.2,
+        volume: 1000,
+        amount: 10000,
+      };
+    });
+
+  // 波段锚点只看最近 SWING_WINDOW 根：这正是「跟随周期」的实现方式——
+  // 窗口按根数而非日历天数，故日线给近 60 个交易日的波段、周线给近 60 周的波段。
+  // 窗口外的极值不得影响锚点，否则换周期拿到的就不是该周期的波段。
+  const long = ramp(70, 10, 20);
+  const polluted: KlineBar[] = [{ ...long[0], high: 999, low: 999, open: 999, close: 999 }, ...long];
+  const a = computeLevels('TEST', long, 'day');
+  const b = computeLevels('TEST', polluted, 'day');
+  assert(
+    JSON.stringify(a.swing) === JSON.stringify(b.swing),
+    `窗口外的极值不得影响波段锚点：${JSON.stringify(a.swing)} vs ${JSON.stringify(b.swing)}`,
+  );
+
+  // 方向不能判反：回撤位必须落在波段区间内，扩展位必须在顺势那一侧的区间之外。
+  // 判反会让图上一次画出 7 条完全离谱的线。
+  const up = computeLevels('TEST', ramp(70, 10, 20), 'day');
+  assert(up.swing?.direction === 'up', '低点在前应判上行波段');
+  for (const f of up.fibRetracements) {
+    assert(
+      f.price >= up.swing!.low && f.price <= up.swing!.high,
+      `上行回撤位应落在波段内：${f.ratio} → ${f.price}`,
+    );
+  }
+  for (const f of up.fibExtensions) {
+    assert(f.price > up.swing!.high, `上行扩展位应高于波段高点：${f.ratio} → ${f.price}`);
+  }
+
+  const down = computeLevels('TEST', ramp(70, 20, 10), 'day');
+  assert(down.swing?.direction === 'down', '高点在前应判下行波段');
+  for (const f of down.fibRetracements) {
+    assert(
+      f.price >= down.swing!.low && f.price <= down.swing!.high,
+      `下行反弹位应落在波段内：${f.ratio} → ${f.price}`,
+    );
+  }
+  for (const f of down.fibExtensions) {
+    assert(f.price < down.swing!.low, `下行扩展位应低于波段低点：${f.ratio} → ${f.price}`);
+  }
+
   // eslint-disable-next-line no-console
-  console.log('levels.ts 自检通过：', JSON.stringify({ swing: lv.swing, fib618, atr: lv.atr }));
+  console.log(
+    'levels.ts 自检通过（61.8% 回撤 · ATR 数量级 · 波段窗口只看最近 60 根 · 回撤/扩展方向）：',
+    JSON.stringify({ swing: lv.swing, fib618, atr: lv.atr }),
+  );
 }

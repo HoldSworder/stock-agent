@@ -108,7 +108,6 @@ const CONTEXT: SymbolTechnicalContext = {
   code: '159516',
   name: '半导体设备ETF',
   assetType: 'etf',
-  horizon: 'next_session',
   asOf: dayAt(39),
   dataStatus: 'complete',
   periods: [
@@ -134,12 +133,8 @@ const CONTEXT: SymbolTechnicalContext = {
 
 const CATALOG: CandidateCatalog = buildCandidateCatalog({
   contextId: 'ctx-1',
-  horizon: 'next_session',
-  bars: BARS,
-  timeframe: 'day',
-  levels: LEVELS,
-  dow,
-  chan,
+  code: '600000',
+  periods: [{ period: 'day', bars: BARS, levels: LEVELS, dow, chan }],
   createdAt: '2026-08-03T07:00:00.000Z',
   expiresAt: '2099-01-01T00:00:00.000Z',
 });
@@ -153,9 +148,12 @@ const RISK = {
   suggestedPositionPct: 12,
   timeStopBars: 5,
   gapRiskNote: null,
+  allowedShares: 2400,
+  reduceShares: 0,
+  effectiveLossPct: 8.2,
+  sizingBasisPrice: CLOSE,
 };
 const EXECUTION = {
-  triggerMode: 'close_confirmed' as const,
   chaseGuardAtr: 1.5,
   maxPremiumPct: 1,
   maxSpreadPct: null,
@@ -177,7 +175,6 @@ function validProposal(): SymbolTradePlanProposal {
     contextId: CATALOG.contextId,
     candidateModelVersion: CATALOG.candidateModelVersion,
     catalogHash: CATALOG.catalogHash,
-    horizon: 'next_session',
     summary: '站上压力位后小仓试错，跌破支撑即退出',
     changes: ['首次生成'],
     levelSelections: [
@@ -215,6 +212,39 @@ function mkCompileInput(proposal: SymbolTradePlanProposal) {
   };
 }
 
+// ===== 0. 持有时长口径：界面分栏与「这条线是明天的事还是几个月的事」直接挂钩 =====
+
+{
+  const { planSpanOf } = await import('@stock-agent/shared');
+  assert.equal(planSpanOf('week'), 'long', '周线级价位是数周到数月的仓位安排');
+  assert.equal(planSpanOf('month'), 'long', '比周线更粗的一律中长期');
+  assert.equal(planSpanOf('day'), 'short', '日线级动作应在本周内完成');
+  assert.equal(planSpanOf('60m'), 'short');
+  assert.equal(planSpanOf('15m'), 'short', '比日线更细的一律短期');
+}
+
+// ===== 0.1 条件待办进度：必要条件置顶 + 只数触发条件 =====
+
+{
+  const { planConditionProgress } = await import('@stock-agent/shared');
+  const mk = (id: string, required: boolean) =>
+    ({ id, required, description: id, timeframe: 'day', evidenceIds: [], rule: {} }) as never;
+  const conds = [mk('可选A', false), mk('必要B', true), mk('可选C', false)];
+  const hit = new Set(['可选A']);
+  const r = planConditionProgress(conds, (id) => hit.has(id));
+  assert.deepEqual(
+    r.ordered.map((c) => c.id),
+    ['必要B', '可选A', '可选C'],
+    '必要条件必须置顶，否则 required 字段在界面上等于不存在',
+  );
+  assert.equal(r.total, 3);
+  assert.equal(r.done, 1, '只有命中的才算已满足');
+  assert.deepEqual(r.missing.map((c) => c.id), ['必要B', '可选C'], '还差的条目也要保持置顶后的顺序');
+  // 未复核时全部算未满足，不得乐观地当成已满足
+  const none = planConditionProgress(conds, () => undefined);
+  assert.equal(none.done, 0, '尚未复核时不得把条件当成已满足');
+}
+
 // ===== 1. 合法提案可编译落库 =====
 
 const plan1 = svc.compileAndSavePlan(mkCompileInput(validProposal()));
@@ -230,6 +260,23 @@ assert.ok(plan1.scenarios.length === 1, '应编译出情景');
 assert.ok(plan1.scenarios[0].conditions.length > 0 && plan1.scenarios[0].invalidConditions.length > 0);
 assert.equal(plan1.candidateModelVersion, CATALOG.candidateModelVersion);
 assert.equal(plan1.contextId, 'ctx-1');
+
+// 价位来源必须原样透传：丢了它，图上的黄金分割虚线与计划线就认不成同一条，
+// 面板也无从说明「这条触发线是怎么来的」——LLM 还能用自定义 label 把候选标签里的来源覆盖掉
+{
+  const byId = new Map(CATALOG.levels.map((l) => [l.candidateId, l]));
+  for (const lv of plan1.levels) {
+    assert.deepEqual(
+      lv.sources,
+      byId.get(lv.id)!.sources,
+      `价位 ${lv.id} 的来源必须原样来自候选目录`,
+    );
+  }
+  assert.ok(
+    plan1.levels.some((l) => (l.sources?.length ?? 0) > 0),
+    '至少应有一个价位带上来源，否则这条断言等于没测',
+  );
+}
 
 // 标注已同步。画在同一高度的关键位合并成一条，所以标注数 = 不同价位数而非 level 数
 const m1 = marks.listPlanMarks(plan1.id, 1);
@@ -375,6 +422,77 @@ assert.ok(ev1.some((e) => e.kind === 'activated'), '应写 activated 事件');
     '缺失效条件应被拒',
   );
 }
+// 用途护栏：只适用于触发的条件被放进失效数组必须被拒，反之亦然。
+// 缺这层的话，白名单一旦极性写错就会直接落进计划——LLM 还被 suitableFor 主动引导着放错。
+{
+  const p = validProposal();
+  const trigOnly = CATALOG.conditions.find(
+    (c) => c.suitableFor.includes('trigger') && !c.suitableFor.includes('invalidation'),
+  )!;
+  const invalOnly = CATALOG.conditions.find(
+    (c) => c.suitableFor.includes('invalidation') && !c.suitableFor.includes('trigger'),
+  )!;
+  assert.ok(trigOnly && invalOnly, 'fixture 应同时含单一用途的触发条件与失效条件');
+
+  const asInval = {
+    ...p,
+    scenarioSelections: [
+      { ...p.scenarioSelections[0], invalidConditionCandidateIds: [trigOnly.candidateId] },
+    ],
+  };
+  assert.ok(
+    svc.validateProposal(mkCompileInput(asInval)).some((i) => i.code === 'purpose_mismatch'),
+    '把只适用于触发的条件当失效条件必须被拒',
+  );
+
+  const asTrig = {
+    ...p,
+    scenarioSelections: [
+      { ...p.scenarioSelections[0], conditionCandidateIds: [invalOnly.candidateId] },
+    ],
+  };
+  assert.ok(
+    svc.validateProposal(mkCompileInput(asTrig)).some((i) => i.code === 'purpose_mismatch'),
+    '把只适用于失效的条件当触发条件必须被拒',
+  );
+
+  // 合法组合不得被误伤
+  assert.ok(
+    !svc.validateProposal(mkCompileInput(p)).some((i) => i.code === 'purpose_mismatch'),
+    '用途正确的提案不得被护栏误杀',
+  );
+}
+// 出生即失效拦截：当下已成立的条件不能当失效条件。
+// 缺这层的话（线上 159516 v4 的原样），计划落库后第一次复核就判失效，
+// 界面上表现为计划凭空消失，收盘重算次日又挑中它，每天空转一份。
+{
+  const p = validProposal();
+  const already = CATALOG.conditions.find((c) => c.alreadySatisfied);
+  assert.ok(already, 'fixture 应含至少一条当下已成立的条件，否则本节断言空转');
+  const bad = {
+    ...p,
+    scenarioSelections: [
+      { ...p.scenarioSelections[0], invalidConditionCandidateIds: [already.candidateId] },
+    ],
+  };
+  const issues = svc.validateProposal(mkCompileInput(bad));
+  assert.ok(
+    issues.some((i) => i.code === 'invalidation_already_true'),
+    `已成立的条件当失效条件必须被拒，实际问题码：${issues.map((i) => i.code).join(',') || '（无）'}`,
+  );
+  // 必须报专用码而不是笼统的 purpose_mismatch：后者的提示是「该条件只适用于 trigger」，
+  // 模型据此换一条同样已成立的条件继续撞墙，两次重试用完就降级成观察计划
+  const it = issues.find((i) => i.code === 'invalidation_already_true')!;
+  assert.ok(it.message.includes('尚未成立'), '拒绝理由须说明失效条件应当尚未成立');
+  assert.ok(
+    (it.availableCandidateIds ?? []).length > 0,
+    '必须回传仍可用的失效候选，否则模型无从修正',
+  );
+  assert.ok(
+    !svc.validateProposal(mkCompileInput(p)).some((i) => i.code === 'invalidation_already_true'),
+    '合法提案不得被这条护栏误杀',
+  );
+}
 {
   const bad = { ...validProposal(), catalogHash: 'deadbeef' };
   assert.ok(
@@ -424,7 +542,7 @@ assert.ok(ev1.some((e) => e.kind === 'activated'), '应写 activated 事件');
   assert.equal(old.status, 'superseded', '旧计划应置 superseded 而非删除');
 
   // 当前生效计划是最新版本
-  const active = repo.getActivePlan('159516', 'next_session')!;
+  const active = repo.getActivePlan('159516')!;
   assert.equal(active.id, plan3.id, '最新版本应为当前生效计划');
 
   // 历史可完整回看
@@ -435,7 +553,7 @@ assert.ok(ev1.some((e) => e.kind === 'activated'), '应写 activated 事件');
 // ===== 7. 同一版本重复同步标注不产生重复线 =====
 
 {
-  const active = repo.getActivePlan('159516', 'next_session')!;
+  const active = repo.getActivePlan('159516')!;
   const n1 = marks.listPlanMarks(active.id, active.version).length;
   marks.syncPlanMarks(active);
   marks.syncPlanMarks(active);
@@ -446,7 +564,7 @@ assert.ok(ev1.some((e) => e.kind === 'activated'), '应写 activated 事件');
 // ===== 8. 失效标注变灰保留，不删除 =====
 
 {
-  const active = repo.getActivePlan('159516', 'next_session')!;
+  const active = repo.getActivePlan('159516')!;
   const changed = marks.invalidatePlanMarks(active.id, active.version);
   assert.ok(changed > 0, '应有标注被置失效');
   const after = marks.listPlanMarks(active.id, active.version);
@@ -466,7 +584,6 @@ assert.equal(marks.shouldRenderOnTimeframe('trend_line', null, 'day'), true, '�
 {
   const draft = svc.saveDraftObservationPlan({
     context: CONTEXT,
-    horizon: 'next_session',
     risk: RISK,
     positionContext: null,
     execution: EXECUTION,
@@ -612,6 +729,41 @@ assert.equal(marks.shouldRenderOnTimeframe('trend_line', null, 'day'), true, '�
   assert.ok(etf.warning?.includes('未覆盖'), 'ETF 必须显式说明板块闸门未覆盖');
 }
 
+// ===== 14.5 情景主观概率：透传 + 落库待校准 + 越界丢弃 =====
+
+{
+  const { listForecasts } = await import('../symbolPlans/forecast');
+  const p = validProposal();
+  const withProb = {
+    ...p,
+    scenarioSelections: [
+      {
+        ...p.scenarioSelections[0],
+        subjectiveProbabilityPct: 65,
+        probabilityBasis: '周线多头排列且量能配合',
+      },
+    ],
+  };
+  const plan = svc.compileAndSavePlan(mkCompileInput(withProb));
+  assert.equal(plan.scenarios[0].subjectiveProbabilityPct, 65, '主观概率必须原样透传');
+  assert.equal(plan.scenarios[0].probabilityBasis, '周线多头排列且量能配合');
+
+  const rows = listForecasts(plan.id);
+  assert.equal(rows.length, 1, '报了概率的情景必须落一条预测记录，否则这个数永远没机会变准');
+  assert.equal(rows[0].probabilityPct, 65);
+  assert.equal(rows[0].outcome, null, '刚落库的预测不得带结果');
+  assert.ok(rows[0].basePrice > 0, '判定基准价必须落库冻结');
+
+  // 越界值一律丢弃而不是夹逼：夹到 100 会把「模型输出坏了」伪装成「模型很有把握」
+  const insane = {
+    ...p,
+    scenarioSelections: [{ ...p.scenarioSelections[0], subjectiveProbabilityPct: 480 }],
+  };
+  const plan2 = svc.compileAndSavePlan(mkCompileInput(insane));
+  assert.equal(plan2.scenarios[0].subjectiveProbabilityPct, undefined, '越界概率必须丢弃');
+  assert.equal(listForecasts(plan2.id).length, 0, '没有有效概率就不该落预测记录');
+}
+
 // ===== 15. 字符预算裁剪：首行本身超限时至少保住首行 =====
 
 {
@@ -657,7 +809,26 @@ assert.equal(marks.shouldRenderOnTimeframe('trend_line', null, 'day'), true, '�
   );
 }
 
+// ===== 失效计划回落读取不得污染业务判定 =====
+//
+// 面板要能看见失效计划（否则计划一失效界面整片空白，看不到原因也看不到内容），
+// 但 regenerate 靠 getActivePlan 判断「是否真落库了新版本」——
+// 若那里也回落到失效版，一次失败的重算会被记成成功，旧计划被悄悄留下。
+// 放在文件末尾：这里会把 159516 的生效计划改成 invalid，之后不能再有依赖它的断言。
+
+{
+  const live = repo.getActivePlan('159516')!;
+  assert.ok(live, 'fixture 应有生效计划，否则本节断言空转');
+  repo.updateStatus(live.id, 'invalid');
+
+  assert.equal(repo.getActivePlan('159516'), null, '判失效后 getActivePlan 必须返回 null');
+  const latest = repo.getLatestPlan('159516');
+  assert.ok(latest, 'getLatestPlan 必须仍能取到失效计划供界面展示失效原因');
+  assert.equal(latest.id, live.id, 'getLatestPlan 应取最新一版而非更早的历史版本');
+  assert.equal(latest.status, 'invalid', 'getLatestPlan 不得改写状态');
+}
+
 rmSync(tmpDir, { recursive: true, force: true });
 console.log(
-  '✅ 计划存储与编译自检通过（确定性字段不可篡改 · 伪造候选/角色/缺条件/跨快照被拒 · 失败零痕迹 · 版本递增且历史不删 · 同版本幂等 · 失效变灰保留 · 周期过滤 · draft 降级 · 重试指引 · 旧 spec 兼容与 live_only 拒绝 · 风险情景只收紧 · 板块闸门端到端接线 · 首行超限裁剪 · 账户未覆盖口吻）',
+  '✅ 计划存储与编译自检通过（确定性字段不可篡改 · 伪造候选/角色/缺条件/跨快照被拒 · 出生即失效被拒 · 失败零痕迹 · 版本递增且历史不删 · 同版本幂等 · 失效变灰保留 · 周期过滤 · draft 降级 · 重试指引 · 旧 spec 兼容与 live_only 拒绝 · 风险情景只收紧 · 板块闸门端到端接线 · 首行超限裁剪 · 账户未覆盖口吻 · 失效回落不污染 getActivePlan）',
 );

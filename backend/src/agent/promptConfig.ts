@@ -83,13 +83,13 @@ const SYMBOL_SESSION_PROMPT = `【当前跟踪标的】{code}{name}
 只是随手标一条线时，用 search_tools 检索「标注 打点」，再用 list_kline_marks 查重、add_kline_mark 打点）`;
 
 /**
- * 一键生成标的交易计划的标准指令：由 Agent 页签的两个快捷按钮触发，
- * 把 horizon 钉死在用户点的那条车道上，并要求必须真正落库，否则计划卡片仍是空的。
- * 占位符：{horizon} 车道枚举值、{horizonLabel} 车道中文名。
+ * 一键生成标的交易计划的标准指令：由 Agent 页签的快捷按钮触发，
+ * 要求必须真正落库，否则计划卡片仍是空的。无占位符。
  */
-const SYMBOL_PLAN_GENERATE_PROMPT = `## 本轮任务：生成 horizon={horizon}（{horizonLabel}）的技术交易计划
-- 本轮只处理 horizon={horizon} 这一条车道。get_symbol_technical_context 与 save_symbol_trade_plan 的 horizon 都必须传 {horizon}，禁止改成另一条车道，也禁止一轮里同时生成两条。
-- 工具序列固定，不可跳步：get_symbol_technical_context（horizon={horizon}）→ list_symbol_plan_candidates（catalog=levels 与 catalog=conditions 各取一次）→ save_symbol_trade_plan。三次调用必须用同一个 contextId。
+const SYMBOL_PLAN_GENERATE_PROMPT = `## 本轮任务：生成本标的的技术交易计划
+- 一个标的只有一份计划，不分期限。时间尺度由候选自身的 timeframe（week/day/60m）表达：
+  周线级的位子就是波段目标，60 分钟级的上穿就是次日盘中触发点。挑候选时按你要表达的时间尺度选对应周期的那条。
+- 工具序列固定，不可跳步：get_symbol_technical_context → list_symbol_plan_candidates（catalog=levels 与 catalog=conditions 各取一次）→ save_symbol_trade_plan。三次调用必须用同一个 contextId。
 - 阶段、趋势、风险、仓位、主动作全部由后端算定，你不能修改，只能解释。价位与条件只能按 candidateId 从候选目录里挑，禁止自己写价格数字、禁止发明条件。
 - 必须真正调用 save_symbol_trade_plan 才算完成本轮任务。只在对话里口述结论、没有落库的，视为未完成，要继续把提案提交上去；提案被拒就按返回的问题清单修正后重提。
 - summary 用一两句话说清「现在该做什么、什么条件下改变动作」；相对上一版有变化时写进 changes。
@@ -143,7 +143,7 @@ const DEFS: PromptDef[] = [
   {
     key: PROMPT_KEYS.symbolPlanGenerate,
     label: '标的计划一键生成指令',
-    hint: 'Agent 页签「生成下一交易日计划 / 1~4周波段计划」按钮注入的标准指令，钉死 horizon 并要求必须落库。占位符：{horizon} {horizonLabel}。',
+    hint: 'Agent 页签「生成技术交易计划」按钮注入的标准指令，要求必须落库。无占位符。',
     base: SYMBOL_PLAN_GENERATE_PROMPT,
   },
 ];

@@ -1,14 +1,18 @@
 import { createHash } from 'node:crypto';
 import type {
   CandidateCatalog,
+  ChanStructure,
+  DowStructure,
   EvidenceMeta,
   KlineBar,
   KlinePeriod,
+  PlanPeriod,
+  PriceLevels,
   RelativeStrengthReading,
   SymbolBenchmark,
-  SymbolPlanHorizon,
   SymbolTechnicalContext,
 } from '@stock-agent/shared';
+import { PLAN_PERIODS } from '@stock-agent/shared';
 import { getKline } from '../market/eastmoney';
 import { getPriceLevels } from '../market/levels';
 import { computeDowStructure, computeChanStructure } from './structure';
@@ -74,8 +78,8 @@ async function loadPeriod(
   }
   // 收完判定必须与求值层同一 helper：午休时段同样属于「当日 K 未收完」，
   // 否则 11:35 会拿半天成交额去和 20 日中位数比，得出「全天放量/缩量」的假确认
-  const completeBar = period === 'day' ? !isBarUnclosed(bars[bars.length - 1].time) : true;
-  if (!completeBar) warnings.push('当前日 K 未收完，量能与阶段结论按盘中口径降级');
+  const completeBar = !isBarUnclosed(period, bars[bars.length - 1].time);
+  if (!completeBar) warnings.push(`当前 ${period} K 未收完，量能与阶段结论按盘中口径降级`);
   return {
     period,
     bars,
@@ -163,7 +167,6 @@ export interface BuildContextInput {
   code: string;
   name?: string;
   secid?: string;
-  horizon: SymbolPlanHorizon;
   /** 上一版计划的阶段滞回状态。必须整体传入，只给 phase 会让滞回永远停在第 1 根 */
   prevPhase?: PhaseCarryOver | null;
   /** 已有计划与标注数，只放摘要 */
@@ -181,9 +184,9 @@ export interface BuiltContext {
   dayBars: KlineBar[];
 }
 
-/** contextId：绑定标的 + 期限 + 数据时点，跨快照混用时能被检出 */
-function makeContextId(code: string, horizon: string, asOf: string): string {
-  const h = createHash('sha1').update(`${code}|${horizon}|${asOf}|${EVIDENCE_VERSION}`).digest('hex');
+/** contextId：绑定标的 + 数据时点，跨快照混用时能被检出 */
+function makeContextId(code: string, asOf: string): string {
+  const h = createHash('sha1').update(`${code}|${asOf}|${EVIDENCE_VERSION}`).digest('hex');
   return `ctx:${code}:${h.slice(0, 12)}`;
 }
 
@@ -192,7 +195,7 @@ function makeContextId(code: string, horizon: string, asOf: string): string {
  * 核心证据（日线、结构、量价、ATR）缺失即 degraded；适配器证据缺失只进 warnings。
  */
 export async function buildTechnicalContext(input: BuildContextInput): Promise<BuiltContext> {
-  const { code, horizon } = input;
+  const { code } = input;
   const secid = input.secid;
   const assetType = inferAssetType(code, secid);
   const adapter = adapterFor(assetType);
@@ -222,20 +225,28 @@ export async function buildTechnicalContext(input: BuildContextInput): Promise<B
   const dayBars = dayData.bars;
   const identity = { code, name: input.name ?? code, secid };
 
-  // 2. 点位测算复用 levels.ts（含 ATR/枢轴/斐波/均线），不重算
-  const levelsRaw = await withDeadline(
-    getPriceLevels(code, 'day', secid),
-    CORE_DEADLINE_MS,
-    '点位测算',
-  ).catch((e: unknown) => {
-    warnings.push(`点位测算失败（${String(e).slice(0, 60)}），候选价位来源减少`);
-    return null;
-  });
-  // getPriceLevels 内部吞掉取数错误后返回 close=0 / asOf='' 的空壳，永远 truthy，
-  // 因此判空必须看内容——否则会拿空壳去建候选目录，而不是走观察计划兜底。
-  const levels = levelsRaw && levelsRaw.close > 0 && levelsRaw.asOf !== '' ? levelsRaw : null;
-  if (levelsRaw && !levels) {
-    warnings.push('点位测算返回空数据（上游取数失败），无候选价位，只能生成观察计划');
+  // 2. 点位测算复用 levels.ts（含 ATR/枢轴/斐波/均线），不重算。
+  //    三层各算一份：候选目录要分周期出位子，用日线的枢轴/斐波去冒充周线级别的位子是错的。
+  const levelsByPeriod = new Map<PlanPeriod, PriceLevels>();
+  await Promise.all(
+    PLAN_PERIODS.map(async (period) => {
+      const raw = await withDeadline(
+        getPriceLevels(code, period, secid),
+        CORE_DEADLINE_MS,
+        `${period} 点位测算`,
+      ).catch((e: unknown) => {
+        warnings.push(`${period} 点位测算失败（${String(e).slice(0, 60)}），该层候选价位缺省`);
+        return null;
+      });
+      // getPriceLevels 内部吞掉取数错误后返回 close=0 / asOf='' 的空壳，永远 truthy，
+      // 因此判空必须看内容——否则会拿空壳去建候选目录，而不是走观察计划兜底。
+      if (raw && raw.close > 0 && raw.asOf !== '') levelsByPeriod.set(period, raw);
+      else if (raw) warnings.push(`${period} 点位测算返回空数据（上游取数失败），该层无候选价位`);
+    }),
+  );
+  const levels = levelsByPeriod.get('day') ?? null;
+  if (!levels) {
+    warnings.push('日线点位测算不可用，无候选价位，只能生成观察计划');
   }
 
   // 3. 结构与量价（新增的确定性计算）
@@ -246,6 +257,16 @@ export async function buildTechnicalContext(input: BuildContextInput): Promise<B
   }
   const dow = computeDowStructure(dayBars, 'day');
   const chan = computeChanStructure(structBase.bars, structBase.period);
+  /** 各层自己的道氏/缠论结构，供候选目录分层取摆动点与中枢。缺该层 K 线就整层缺省 */
+  const structByPeriod = new Map<PlanPeriod, { dow: DowStructure | null; chan: ChanStructure | null }>();
+  for (const period of PLAN_PERIODS) {
+    const pd = periods.find((x) => x.period === period);
+    if (!pd) continue;
+    structByPeriod.set(period, {
+      dow: computeDowStructure(pd.bars, period),
+      chan: computeChanStructure(pd.bars, period),
+    });
+  }
   const volumePrice = computeVolumePrice({
     period: 'day',
     bars: dayBars,
@@ -297,7 +318,7 @@ export async function buildTechnicalContext(input: BuildContextInput): Promise<B
   });
 
   const asOf = dayData.meta.asOf;
-  const contextId = makeContextId(code, horizon, asOf);
+  const contextId = makeContextId(code, asOf);
 
   // 7. 候选目录
   const adapterLevels: Array<{ price: number; label: string; evidenceId: string }> = [];
@@ -315,22 +336,24 @@ export async function buildTechnicalContext(input: BuildContextInput): Promise<B
   const catalog = levels
     ? buildCandidateCatalog({
         contextId,
-        horizon,
-        bars: dayBars,
-        timeframe: 'day',
-        levels,
-        dow,
-        chan,
+        code,
+        periods: PLAN_PERIODS.flatMap((period) => {
+          const lv = levelsByPeriod.get(period);
+          const pd = periods.find((x) => x.period === period);
+          if (!lv || !pd) return [];
+          const st = structByPeriod.get(period);
+          return [{ period, bars: pd.bars, levels: lv, dow: st?.dow ?? null, chan: st?.chan ?? null }];
+        }),
         adapterLevels,
         createdAt: new Date().toISOString(),
-        // 次日计划的候选目录当日有效；波段给 3 天
-        expiresAt: new Date(Date.now() + (horizon === 'next_session' ? 1 : 3) * 86_400_000).toISOString(),
+        // 候选目录 1 天有效：合并车道后同一份计划里既有 60 分钟级触发也有周线级目标，
+        // 给 3 天会让短周期那部分的位子早已失真却仍能被引用
+        expiresAt: new Date(Date.now() + 86_400_000).toISOString(),
       })
     : {
         contextId,
         candidateModelVersion: CANDIDATE_MODEL_VERSION,
         catalogHash: 'no-levels',
-        horizon,
         levels: [],
         conditions: [],
         omittedCounts: {},
@@ -366,7 +389,6 @@ export async function buildTechnicalContext(input: BuildContextInput): Promise<B
     code,
     name: input.name ?? code,
     assetType,
-    horizon,
     asOf,
     dataStatus,
     periods: periodReadings,

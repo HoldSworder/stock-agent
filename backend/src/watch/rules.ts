@@ -266,17 +266,19 @@ function evalSymbolPlanTickSignals(ctx: QuoteCtx): WatchSignal[] {
         for (const cond of conds) {
           if (cadenceOf(cond) !== 'tick') continue;
           if (!evalTickCondition(cond, { price: ctx.price, prevPrice: ctx.prevPrice })) continue;
-          out.push(
-            mk(
+          out.push({
+            ...mk(
               ctx,
               isInvalid ? 'plan_stop' : 'plan_buy',
               isInvalid ? 'high' : 'medium',
+              // 不再写「需收盘确认」：tick 级条件（上穿/下破/触及）本就是盘中判定的，
+              // 要等收盘的是 holdAbove/均线/量价那些 bar 级条件，它们根本不会走到这里
               `标的计划 v${plan.version}（${sc.name}）${isInvalid ? '失效' : '触发'}条件命中：` +
-                `${cond.description}，现价 ${ctx.price.toFixed(2)}` +
-                `${isInvalid ? '' : '（盘中预警，需收盘确认）'}`,
+                `${cond.description}，现价 ${ctx.price.toFixed(2)}`,
               isInvalid ? 76 : 62,
             ),
-          );
+            planHit: { planId: plan.id, planVersion: plan.version, conditionId: cond.id },
+          });
         }
       };
       check(sc.conditions, false);

@@ -10,25 +10,46 @@ import type {
   KlineBar,
   KlinePeriod,
   PlaybookRule,
+  PlanPeriod,
   PriceLevels,
-  SymbolPlanHorizon,
   TradeLevelRole,
 } from '@stock-agent/shared';
-import { PLAYBOOK_RULE_CAPABILITY } from '@stock-agent/shared';
+import { PLAN_PERIODS, PLAYBOOK_RULE_CAPABILITY } from '@stock-agent/shared';
+// 直接用 playbook 的纯函数求值，不经 evaluate.ts：那边依赖 repo 与计划实例，
+// 从这里引会成环，且候选阶段根本没有计划可传
+import { buildSeries, evalRule, type Series } from '../playbook/rules';
+import { isBarUnclosed } from './sessionClock';
+import { TIME_STOP_BARS } from './risk';
 
 // 候选目录生成器（计划 4.11）。这是 R1 架构的阻塞级前置能力：
 // LLM 只能从这里挑 ID，不允许自由填价格，所以「候选够不够用」直接决定计划质量。
 // 全流程确定性：同一份 fixture 两次生成的 catalogHash / 候选ID / 排序必须完全一致。
 
 /** 候选模型版本：聚类容差、评分权重、上限、白名单任一变化都要递增 */
-export const CANDIDATE_MODEL_VERSION = 'candidate-v2';
+export const CANDIDATE_MODEL_VERSION = 'candidate-v5';
 
-/** 价位数量硬上限（4.11.2） */
-const LEVEL_CAP: Record<SymbolPlanHorizon, number> = { next_session: 12, swing: 16 };
-/** 单侧上限：原则上现价上下各不超过总量一半 */
-const SIDE_CAP: Record<SymbolPlanHorizon, number> = { next_session: 6, swing: 8 };
-/** 条件数量硬上限（4.11.3） */
-const CONDITION_CAP: Record<SymbolPlanHorizon, number> = { next_session: 24, swing: 32 };
+/**
+ * 分层配额。候选按 week/day/60m 三层各自产出，配额也按层分。
+ *
+ * 合计 21 个价位、40 条条件，是被 format.ts 的 CATALOG_SOFT_LIMIT=4000 字符反推出来的：
+ * 再多就会在格式化时被 capLines 从尾部裁掉，而**被裁掉的 candidateId LLM 根本看不见**，
+ * 却仍会因为「引用了不存在的候选」被 validateProposal 打回，表现为无限重试。
+ * 改这两个数必须同步跑 symbolPlanCandidates 自检里的「全部 candidateId 可见」硬断言。
+ *
+ * 层内配比按信息密度给：日线是主战场给最多，周线只要几个大级别边界，
+ * 60 分钟只用来给次日的触发/失效点，不需要铺满。
+ */
+const LEVEL_CAP: Record<PlanPeriod, number> = { week: 5, day: 10, '60m': 6 };
+/** 层内单侧上限：现价上下各不超过该层的一半 */
+const SIDE_CAP: Record<PlanPeriod, number> = { week: 3, day: 5, '60m': 3 };
+/** 条件总量硬上限（跨三层合计） */
+const CONDITION_CAP = 40;
+/**
+ * 各层「计划期内可触达」的 ATR 倍数，超出则距离分衰减。
+ * 一律以**日线 ATR** 为尺（三层共用同一把尺才可比）：60 分钟级别的位子应当近，
+ * 周线级别的位子远一点也算合理目标。
+ */
+const REACH_ATR: Record<PlanPeriod, number> = { week: 12, day: 6, '60m': 2 };
 /** 非价格条件按用途限量（4.11.3） */
 const PURPOSE_CAP: Record<CandidateConditionPurpose, number> = {
   price_level: Number.MAX_SAFE_INTEGER, // 由 LEVEL_CAP 间接限制
@@ -73,17 +94,30 @@ interface RawLevel {
   guaranteed?: boolean;
 }
 
-export interface CatalogInput {
-  contextId: string;
-  horizon: SymbolPlanHorizon;
-  /** 主周期（日线）K 线，用于触碰次数与现价 */
+/** 单层输入：该周期自己的 K 线、点位测算与结构 */
+export interface CatalogPeriodInput {
+  period: PlanPeriod;
   bars: KlineBar[];
-  timeframe: KlinePeriod;
   /** 复用 market/levels.ts 的产出，不在此重算 ATR/枢轴/斐波/均线 */
   levels: PriceLevels;
   dow: DowStructure | null;
   chan: ChanStructure | null;
-  /** 适配器给的执行位（涨跌停价、IOPV 闸门等），与技术支撑压力分开归类 */
+}
+
+export interface CatalogInput {
+  contextId: string;
+  /**
+   * 标的代码。用于建目录时判定「条件是否当下已成立」——
+   * 求值器要靠它区分 10% / 20% / 30% 涨跌幅板，拿 contextId 冒充会把创业板按主板算。
+   */
+  code: string;
+  /**
+   * 三层周期各自的结构与点位，缺哪层就少哪层的候选（不回退、不用别层的数据顶替）。
+   * 早先只从日线出候选，导致「周线级压力位」这种波段计划最需要的东西根本进不了目录，
+   * 只能靠 LLM 在描述里空口提一句，落不成可求值的条件。
+   */
+  periods: CatalogPeriodInput[];
+  /** 适配器给的执行位（涨跌停价、IOPV 闸门等），与技术支撑压力分开归类。只挂日线层 */
   adapterLevels?: Array<{ price: number; label: string; evidenceId: string }>;
   /** 有效期（ISO），到期后 contextId 失效 */
   expiresAt: string;
@@ -92,9 +126,13 @@ export interface CatalogInput {
 
 // ===== 4.11.1 原始候选来源 =====
 
-function collectRawLevels(input: CatalogInput): { raws: RawLevel[]; omitted: Record<string, number> } {
+function collectRawLevels(
+  input: CatalogPeriodInput,
+  price: number,
+  adapterLevels: CatalogInput['adapterLevels'],
+): { raws: RawLevel[]; omitted: Record<string, number> } {
   const { levels, dow, chan, bars } = input;
-  const price = levels.close;
+  const tf = input.period;
   const raws: RawLevel[] = [];
   const omitted: Record<string, number> = {};
   const countOmitted = (k: string, n: number): void => {
@@ -152,14 +190,14 @@ function collectRawLevels(input: CatalogInput): { raws: RawLevel[]; omitted: Rec
         price: hi,
         source: 'prev_extreme',
         label: `前高 ${hi.toFixed(3)}`,
-        evidenceId: `ext:high:${input.timeframe}`,
+        evidenceId: `ext:high:${tf}`,
         roles: ['resistance', 'entry_trigger', 'target'],
       });
       raws.push({
         price: lo,
         source: 'prev_extreme',
         label: `前低 ${lo.toFixed(3)}`,
-        evidenceId: `ext:low:${input.timeframe}`,
+        evidenceId: `ext:low:${tf}`,
         roles: ['support', 'invalidation', 'stop'],
       });
     }
@@ -181,7 +219,7 @@ function collectRawLevels(input: CatalogInput): { raws: RawLevel[]; omitted: Rec
       price: m.value,
       source: 'ma',
       label: `MA${m.period} ${m.value.toFixed(3)}`,
-      evidenceId: `ma:${input.timeframe}:${m.period}`,
+      evidenceId: `ma:${tf}:${m.period}`,
       roles: m.value > price ? ['resistance'] : ['support'],
     });
   }
@@ -197,7 +235,7 @@ function collectRawLevels(input: CatalogInput): { raws: RawLevel[]; omitted: Rec
         price: above[0],
         source: 'classic_pivot',
         label: `枢轴压力 ${above[0].toFixed(3)}`,
-        evidenceId: `pivot:${input.timeframe}:r`,
+        evidenceId: `pivot:${tf}:r`,
         roles: ['resistance'],
       });
     }
@@ -206,7 +244,7 @@ function collectRawLevels(input: CatalogInput): { raws: RawLevel[]; omitted: Rec
         price: below[0],
         source: 'classic_pivot',
         label: `枢轴支撑 ${below[0].toFixed(3)}`,
-        evidenceId: `pivot:${input.timeframe}:s`,
+        evidenceId: `pivot:${tf}:s`,
         roles: ['support'],
       });
     }
@@ -216,7 +254,7 @@ function collectRawLevels(input: CatalogInput): { raws: RawLevel[]; omitted: Rec
         price: p.pp,
         source: 'classic_pivot',
         label: `枢轴 PP ${p.pp.toFixed(3)}`,
-        evidenceId: `pivot:${input.timeframe}:pp`,
+        evidenceId: `pivot:${tf}:pp`,
         roles: ['support', 'resistance'],
       });
     }
@@ -233,7 +271,7 @@ function collectRawLevels(input: CatalogInput): { raws: RawLevel[]; omitted: Rec
       price: f.price,
       source: 'fibonacci',
       label: `斐波回撤 ${f.ratio} ${f.price.toFixed(3)}`,
-      evidenceId: `fib:retr:${f.ratio}`,
+      evidenceId: `fib:${tf}:retr:${f.ratio}`,
       roles: swingDir === 'up' ? ['support'] : ['resistance'],
     });
   }
@@ -247,14 +285,14 @@ function collectRawLevels(input: CatalogInput): { raws: RawLevel[]; omitted: Rec
         price: ext[0].price,
         source: 'fibonacci',
         label: `斐波扩展 ${ext[0].ratio} ${ext[0].price.toFixed(3)}`,
-        evidenceId: `fib:ext:${ext[0].ratio}`,
+        evidenceId: `fib:${tf}:ext:${ext[0].ratio}`,
         roles: ['target'],
       });
     }
   }
 
   // 适配器执行位：单独归类，不与技术支撑压力混淆
-  for (const a of input.adapterLevels ?? []) {
+  for (const a of adapterLevels ?? []) {
     raws.push({
       price: a.price,
       source: 'adapter',
@@ -279,9 +317,24 @@ const roundPrice = (p: number): number => Math.round(p * 1000) / 1000;
  * 分开成多个候选只会让计划挑出几条肉眼重合的辅助线。clusterLevels 的判据锚在 cur.low，
  * 簇宽被容差硬封顶，放大系数不会引发链式合并。
  */
-export function clusterTolerance(price: number, atr: number | null, tickSize = 0.001): number {
-  return Math.max(2 * tickSize, 0.35 * (atr ?? 0), price * 0.002);
+export function clusterTolerance(
+  price: number,
+  atr: number | null,
+  tickSize = 0.001,
+  scale = 1,
+): number {
+  return Math.max(2 * tickSize, 0.35 * (atr ?? 0) * scale, price * 0.002 * scale);
 }
+
+/**
+ * 各层聚类容差相对日线的倍数。
+ *
+ * 三层共用同一把日线 ATR 尺是为了让「距现价 N 个 ATR」在层间可比，但那把尺
+ * 直接拿来当聚类容差是两回事：60 分钟级的位子彼此本就密集，用整整 0.35 个日线 ATR
+ * 去合并会把一层的位子糊成两三条宽带，Phase 2 要的「精确到 60 分钟的触发点」
+ * 就退化成了带子中点。反过来周线级的位子天然疏散，容差小了只会切出一堆挨着的重复位。
+ */
+const TOLERANCE_SCALE: Record<PlanPeriod, number> = { week: 1.5, day: 1, '60m': 0.4 };
 
 interface Cluster {
   low: number;
@@ -332,15 +385,14 @@ function scoreCluster(
   bars: KlineBar[],
   price: number,
   atr: number | null,
-  horizon: SymbolPlanHorizon,
+  period: PlanPeriod,
 ): { score: number; parts: CandidateLevel['scoreParts']; atrDistance: number | null; touches: number } {
   const structureImportance = Math.max(...c.members.map((m) => SOURCE_IMPORTANCE[m.source]));
   const touches = historicalTouches(bars, c.low, c.high);
   const historicalTouch = clamp01(touches / 6);
 
   const atrDistance = atr && atr > 0 ? (c.price - price) / atr : null;
-  // 计划期限内可触达范围：次日约 2×ATR，波段约 6×ATR，超出则降分
-  const reach = horizon === 'next_session' ? 2 : 6;
+  const reach = REACH_ATR[period];
   const distance =
     atrDistance == null ? 0.5 : clamp01(1 - Math.abs(atrDistance) / (reach * 1.5));
 
@@ -376,8 +428,15 @@ const ROLE_CONDITIONS: Record<
     { relation: 'holdAbove', text: '收盘有效站上', suitableFor: ['trigger'] },
     { relation: 'crossUp', text: '盘中上穿预警', suitableFor: ['trigger'] },
   ],
+  // 支撑位的极性：求值层语义是「失效条件成立 ⇒ 计划失效」，
+  // 「收盘守住支撑」成立恰恰说明计划按预期走，只能作触发侧确认；
+  // 真正的失效是「收盘跌破」。价格常态在支撑上方，holdBelow 初始不成立，安全。
+  //
+  // 对称地，resistance 不能加 holdBelow 作失效：计划生效时价格本就在压力位下方，
+  // 那条会立即满足导致秒失效；「突破失败后跌回」需要「曾突破」的状态前提，当前规则 DSL 表达不了。
   support: [
-    { relation: 'holdAbove', text: '收盘保持上方', suitableFor: ['invalidation'] },
+    { relation: 'holdAbove', text: '收盘守住', suitableFor: ['trigger'] },
+    { relation: 'holdBelow', text: '收盘跌破', suitableFor: ['invalidation'] },
     { relation: 'crossDown', text: '盘中下穿风险', suitableFor: ['invalidation'] },
   ],
   entry_trigger: [
@@ -430,7 +489,6 @@ function mkCondition(
 /** 非价格条件：量价确认 / 结构确认 / 时间窗 / 闸门，各自限量 */
 function buildNonPriceConditions(
   base: { contextId: string; timeframe: KlinePeriod },
-  horizon: SymbolPlanHorizon,
   startSeq: number,
 ): CandidateCondition[] {
   const out: CandidateCondition[] = [];
@@ -457,12 +515,63 @@ function buildNonPriceConditions(
   add('structure_confirm', { kind: 'macd', signal: 'goldCross' }, 'MACD 金叉', ['trigger']);
   add('structure_confirm', { kind: 'macd', signal: 'deadCross' }, 'MACD 死叉', ['invalidation']);
 
-  // 时间窗（2 个）：live_only，仅用于计划有效期与时间止损
-  const bars = horizon === 'next_session' ? 1 : 10;
-  add('time_window', { kind: 'barsSincePlan', op: 'gte', value: bars }, `计划生效满 ${bars} 根仍未触发`, ['invalidation']);
-  add('time_window', { kind: 'barsSincePlan', op: 'gte', value: bars * 2 }, `计划生效满 ${bars * 2} 根（时间止损）`, ['invalidation']);
+  // 时间窗：live_only，只此一条，数值与 risk.timeStopBars 共用 TIME_STOP_BARS。
+  // 曾经并列产出 bars 与 bars*2 两条、还把后者叫「时间止损」，与 risk 字段的口径对不上。
+  const bars = TIME_STOP_BARS;
+  add('time_window', { kind: 'barsSincePlan', op: 'gte', value: bars }, `计划生效满 ${bars} 根日线仍未触发（时间止损）`, ['invalidation']);
 
   return out;
+}
+
+/**
+ * 标出「当下就已成立」的条件，并把它们从失效用途里摘掉。
+ *
+ * 求值口径必须与盘中复核一致（evaluate.ts）：用最后一根**已收完**的 bar。
+ * 差一根就会两边判不一样——目录说没成立、落库后第一次复核说成立，拦截等于漏网。
+ *
+ * planBars 传 0：候选阶段还没有计划，`barsSincePlan >= 10` 这类时间止损条件
+ * 自然判不成立，不会被误摘（它确实是「将来才会发生」的事）。
+ * entryPrice 传 0 同理——rules.ts 对 pnlPct 有 `entryPrice > 0` 的前置判断，
+ * 会把这种上下文当「无持仓」直接判否，不会算出 Infinity 之类的假成立。
+ */
+function markAlreadySatisfied(
+  conditions: CandidateCondition[],
+  barsByPeriod: Map<PlanPeriod, KlineBar[]>,
+  code: string,
+): void {
+  const seriesCache = new Map<PlanPeriod, { series: Series; i: number } | null>();
+  const prep = (period: PlanPeriod): { series: Series; i: number } | null => {
+    if (seriesCache.has(period)) return seriesCache.get(period) ?? null;
+    const all = barsByPeriod.get(period) ?? [];
+    const bars = isBarUnclosed(period, all[all.length - 1]?.time) ? all.slice(0, -1) : all;
+    const built =
+      bars.length > 0
+        ? {
+            series: buildSeries(code, bars, [
+              { mode: 'all' as const, rules: conditions.filter((c) => c.timeframe === period).map((c) => c.rule) },
+            ]),
+            i: bars.length - 1,
+          }
+        : null;
+    seriesCache.set(period, built);
+    return built;
+  };
+
+  for (const c of conditions) {
+    const ctx = prep(c.timeframe as PlanPeriod);
+    // 取不到 K 线时一律按「未成立」处理：宁可放过一条，也不能因为没数据
+    // 就把一批本可用的失效条件全摘掉，那会让整份计划无失效条件可选而降级成观察计划
+    if (!ctx) continue;
+    let ok = false;
+    try {
+      ok = evalRule(c.rule, ctx.series, ctx.i, { entryPrice: 0, heldBars: 0, planBars: 0 });
+    } catch {
+      ok = false;
+    }
+    if (!ok) continue;
+    c.alreadySatisfied = true;
+    c.suitableFor = c.suitableFor.filter((r) => r !== 'invalidation');
+  }
 }
 
 // ===== 生成入口 =====
@@ -478,9 +587,14 @@ function computeCatalogHash(levels: CandidateLevel[], conditions: CandidateCondi
 }
 
 export function buildCandidateCatalog(input: CatalogInput): CandidateCatalog {
-  const { horizon, bars, levels } = input;
-  const price = levels.close;
   const warnings: string[] = [];
+  // 三层共用同一个现价与同一把 ATR 尺：日线优先，缺日线才退到给得出现价的那层。
+  // 各层用各自的 close 会让「距现价 N 个 ATR」在层间不可比，排序与裁剪就失去意义。
+  const anchor =
+    input.periods.find((p) => p.period === 'day' && p.levels.close > 0) ??
+    input.periods.find((p) => p.levels.close > 0);
+  const price = anchor?.levels.close ?? 0;
+  const atr = anchor?.levels.atr ?? null;
 
   // 现价非法（取数失败时 computeLevels 会返回 close=0 的空壳）直接返回空目录：
   // 继续算下去容差会退化、评分会变 NaN，排序结果随引擎实现而变，catalogHash 不再可复现。
@@ -489,7 +603,6 @@ export function buildCandidateCatalog(input: CatalogInput): CandidateCatalog {
       contextId: input.contextId,
       candidateModelVersion: CANDIDATE_MODEL_VERSION,
       catalogHash: 'invalid-price',
-      horizon,
       levels: [],
       conditions: [],
       omittedCounts: {},
@@ -499,109 +612,133 @@ export function buildCandidateCatalog(input: CatalogInput): CandidateCatalog {
     };
   }
 
-  const { raws, omitted } = collectRawLevels(input);
+  const omitted: Record<string, number> = {};
+  const bump = (k: string, n: number): void => {
+    if (n > 0) omitted[k] = (omitted[k] ?? 0) + n;
+  };
 
-  if (raws.length === 0) {
+  const candidateLevels: CandidateLevel[] = [];
+  // 按 PLAN_PERIODS 的顺序遍历而不是按入参顺序，保证 candidateId 编号可复现
+  const byPeriod = new Map(input.periods.map((p) => [p.period, p]));
+  for (const period of PLAN_PERIODS) {
+    const pin = byPeriod.get(period);
+    if (!pin) {
+      warnings.push(`缺少 ${period} 层数据，该层无候选价位`);
+      continue;
+    }
+    // 适配器执行位（涨跌停价等）只挂日线层：它是当日的执行边界，挂到周线层没有意义
+    const { raws, omitted: omit } = collectRawLevels(
+      pin,
+      price,
+      period === 'day' ? input.adapterLevels : [],
+    );
+    for (const [k, v] of Object.entries(omit)) bump(`${period}.${k}`, v);
+    if (raws.length === 0) continue;
+
+    const clusters = clusterLevels(
+      raws,
+      clusterTolerance(price, atr, undefined, TOLERANCE_SCALE[period]),
+    );
+    const scored = clusters.map((c) => ({
+      cluster: c,
+      ...scoreCluster(c, pin.bars, price, atr, period),
+      sources: Array.from(new Set(c.members.map((m) => m.source))).sort() as CandidateLevelSource[],
+      roles: Array.from(new Set(c.members.flatMap((m) => m.roles))).sort() as TradeLevelRole[],
+      guaranteed: c.members.some((m) => m.guaranteed === true),
+    }));
+
+    // 排序：保底优先，其次总分降序，最后按价格保证稳定
+    scored.sort(
+      (a, b) =>
+        Number(b.guaranteed) - Number(a.guaranteed) ||
+        b.score - a.score ||
+        a.cluster.price - b.cluster.price,
+    );
+
+    // 层内单侧上限 + 层内总上限
+    let above = 0;
+    let below = 0;
+    const kept: typeof scored = [];
+    for (const sc of scored) {
+      if (kept.length >= LEVEL_CAP[period]) break;
+      const isAbove = sc.cluster.price >= price;
+      if (!sc.guaranteed) {
+        if (isAbove && above >= SIDE_CAP[period]) continue;
+        if (!isAbove && below >= SIDE_CAP[period]) continue;
+      }
+      if (isAbove) above += 1;
+      else below += 1;
+      kept.push(sc);
+    }
+    bump(`${period}.cap`, scored.length - kept.length);
+
+    kept.forEach((sc, i) => {
+      candidateLevels.push({
+        // id 必须带周期：三层可能给出价格相同的位子，不带周期就会撞 id，
+        // 而它们的 timeframe 不同（周线收盘守住 ≠ 60 分钟收盘守住），是两条不同的条件
+        // 价格精度与下面 priceLevel 规则取值一致（都是 3 位），否则第 4 位不同的两个价位
+        // 会得到不同 candidateId 却编译出完全相同的规则，白占条件配额
+        candidateId: `lvl:${period}:${i}:${roundPrice(sc.cluster.price).toFixed(3)}`,
+        contextId: input.contextId,
+        candidateModelVersion: CANDIDATE_MODEL_VERSION,
+        timeframe: period,
+        low: sc.cluster.low,
+        high: sc.cluster.high,
+        price: sc.cluster.price,
+        sources: sc.sources,
+        compatibleRoles: sc.roles,
+        score: sc.score,
+        scoreParts: sc.parts,
+        atrDistance: sc.atrDistance == null ? null : Math.round(sc.atrDistance * 100) / 100,
+        label: sc.cluster.members.map((m) => m.label).join(' + '),
+        description:
+          `${sc.cluster.low.toFixed(3)}~${sc.cluster.high.toFixed(3)}，来源 ${sc.sources.join('/')}，` +
+          `近${TOUCH_LOOKBACK}根${period}触碰 ${sc.touches} 次` +
+          (sc.atrDistance != null ? `，距现价 ${sc.atrDistance.toFixed(2)} ATR` : ''),
+        sourceEvidenceIds: Array.from(new Set(sc.cluster.members.map((m) => m.evidenceId))).sort(),
+        guaranteed: sc.guaranteed,
+      });
+    });
+  }
+
+  if (candidateLevels.length === 0) {
     warnings.push('无可用候选价位来源，计划只能给观察结论');
   }
 
-  const tolerance = clusterTolerance(price, levels.atr);
-  const clusters = clusterLevels(raws, tolerance);
-
-  // 打分
-  const scored = clusters.map((c) => {
-    const s = scoreCluster(c, bars, price, levels.atr, horizon);
-    const sources = Array.from(new Set(c.members.map((m) => m.source))).sort();
-    const roles = Array.from(new Set(c.members.flatMap((m) => m.roles))).sort();
-    return {
-      cluster: c,
-      ...s,
-      sources: sources as CandidateLevelSource[],
-      roles: roles as TradeLevelRole[],
-      guaranteed: c.members.some((m) => m.guaranteed === true),
-    };
-  });
-
-  // 排序：保底优先，其次总分降序，最后按价格保证稳定
-  scored.sort(
-    (a, b) =>
-      Number(b.guaranteed) - Number(a.guaranteed) ||
-      b.score - a.score ||
-      a.cluster.price - b.cluster.price,
-  );
-
-  // 单侧上限 + 总上限
-  const sideCap = SIDE_CAP[horizon];
-  let above = 0;
-  let below = 0;
-  const kept: typeof scored = [];
-  for (const s of scored) {
-    if (kept.length >= LEVEL_CAP[horizon]) break;
-    const isAbove = s.cluster.price >= price;
-    if (!s.guaranteed) {
-      if (isAbove && above >= sideCap) continue;
-      if (!isAbove && below >= sideCap) continue;
-    }
-    if (isAbove) above += 1;
-    else below += 1;
-    kept.push(s);
+  // 价位条件：只按角色白名单展开，不做笛卡尔积。timeframe 跟随各自价位所属的层。
+  //
+  // 遍历顺序按「层内名次」轮转（周线第1名 → 日线第1名 → 60分钟第1名 → 各层第2名 …），
+  // 而不是把一层铺完再铺下一层。原因见下面的 CONDITION_CAP 裁剪：
+  // 裁剪是从尾部砍的，按层铺的话 21 个价位展开出的 70 多条条件会稳定地把最后一层
+  // （60 分钟）整层剃光——实测 60m 层拿到 0 条条件，Phase 2 加这一层要的
+  // 「盘中触发点」根本进不了目录，只剩一批没有任何条件引用的空价位。
+  // 轮转之后每层砍掉的都是自己层内最靠后的低分位，三层都保得住头部。
+  const byRank: CandidateLevel[][] = [];
+  for (const period of PLAN_PERIODS) {
+    candidateLevels
+      .filter((l) => l.timeframe === period)
+      .forEach((lv, rank) => {
+        (byRank[rank] ??= []).push(lv);
+      });
   }
-  const droppedByCap = scored.length - kept.length;
-  if (droppedByCap > 0) omitted.cap = (omitted.cap ?? 0) + droppedByCap;
-
-  const candidateLevels: CandidateLevel[] = kept.map((s, i) => ({
-    // 与下面 priceLevel 规则的取值精度保持一致（都是 3 位），否则第 4 位不同的两个价位
-    // 会得到不同 candidateId 却编译出完全相同的规则，白占条件配额
-    candidateId: `lvl:${i}:${roundPrice(s.cluster.price).toFixed(3)}`,
-    contextId: input.contextId,
-    candidateModelVersion: CANDIDATE_MODEL_VERSION,
-    timeframe: input.timeframe,
-    low: s.cluster.low,
-    high: s.cluster.high,
-    price: s.cluster.price,
-    sources: s.sources,
-    compatibleRoles: s.roles,
-    score: s.score,
-    scoreParts: s.parts,
-    atrDistance: s.atrDistance == null ? null : Math.round(s.atrDistance * 100) / 100,
-    label: s.cluster.members.map((m) => m.label).join(' + '),
-    description:
-      `${s.cluster.low.toFixed(3)}~${s.cluster.high.toFixed(3)}，来源 ${s.sources.join('/')}，` +
-      `近${TOUCH_LOOKBACK}根触碰 ${s.touches} 次` +
-      (s.atrDistance != null ? `，距现价 ${s.atrDistance.toFixed(2)} ATR` : ''),
-    sourceEvidenceIds: Array.from(new Set(s.cluster.members.map((m) => m.evidenceId))).sort(),
-    guaranteed: s.guaranteed,
-  }));
-
-  // 价位条件：只按角色白名单展开，不做笛卡尔积
-  const base = { contextId: input.contextId, timeframe: input.timeframe };
-  const priceConditions: CandidateCondition[] = [];
+  /** 按价位分组，裁剪时整组进出，避免只留下失效条件却没了触发条件的半截价位 */
+  const groupsByLevel: CandidateCondition[][] = [];
   let seq = 0;
-  for (const lv of candidateLevels) {
+  for (const lv of byRank.flat()) {
+    const base = { contextId: input.contextId, timeframe: lv.timeframe };
+    const group: CandidateCondition[] = [];
     for (const role of lv.compatibleRoles) {
       for (const spec of ROLE_CONDITIONS[role] ?? []) {
-        const rule: PlaybookRule = {
-          kind: 'priceLevel',
-          level: roundPrice(lv.price),
-          relation: spec.relation,
-        };
         // 同一价位同一 relation 只保留一条，避免多角色重复展开
-        if (
-          priceConditions.some(
-            (c) =>
-              c.fromLevelCandidateId === lv.candidateId &&
-              c.rule.kind === 'priceLevel' &&
-              c.rule.relation === spec.relation,
-          )
-        ) {
+        if (group.some((c) => c.rule.kind === 'priceLevel' && c.rule.relation === spec.relation)) {
           continue;
         }
-        priceConditions.push(
+        group.push(
           mkCondition(
             base,
             'price_level',
-            rule,
-            `${spec.text} ${lv.price.toFixed(3)}（${lv.label}）`,
+            { kind: 'priceLevel', level: roundPrice(lv.price), relation: spec.relation },
+            `${spec.text} ${lv.price.toFixed(3)}`,
             spec.suitableFor,
             lv.candidateId,
             lv.sourceEvidenceIds,
@@ -610,18 +747,34 @@ export function buildCandidateCatalog(input: CatalogInput): CandidateCatalog {
         );
       }
     }
+    if (group.length > 0) groupsByLevel.push(group);
+  }
+  const priceConditions = groupsByLevel.flat();
+
+  // 非价格条件只产一份，锚在日线。
+  // 三层各复制一遍会让「MACD 金叉」这类条件占掉 3 倍配额，把价位条件挤出目录，
+  // 而周线 MACD 金叉与 60 分钟 MACD 金叉对同一份计划的增量信息远不如多几个可交易的价位。
+  const nonPrice = buildNonPriceConditions({ contextId: input.contextId, timeframe: 'day' }, seq);
+  let conditions = [...priceConditions, ...nonPrice];
+  if (conditions.length > CONDITION_CAP) {
+    // 超总量时裁价位条件。按整个价位为单位裁（groupsByLevel 已按层内名次轮转排好），
+    // 砍掉的就是各层名次最靠后的低分位，而不是某一层的全部。
+    const budget = Math.max(0, CONDITION_CAP - nonPrice.length);
+    const trimmedPrice: CandidateCondition[] = [];
+    for (const g of groupsByLevel) {
+      if (trimmedPrice.length + g.length > budget) break;
+      trimmedPrice.push(...g);
+    }
+    conditions = [...trimmedPrice, ...nonPrice];
+    bump('condition_cap', priceConditions.length - trimmedPrice.length);
   }
 
-  const nonPrice = buildNonPriceConditions(base, horizon, seq);
-  let conditions = [...priceConditions, ...nonPrice];
-  if (conditions.length > CONDITION_CAP[horizon]) {
-    // 超总量时先裁价位条件里靠后的（价位本身已按分数排序，靠后即低分）
-    const overflow = conditions.length - CONDITION_CAP[horizon];
-    const trimmedPrice = priceConditions.slice(0, Math.max(0, priceConditions.length - overflow));
-    conditions = [...trimmedPrice, ...nonPrice];
-    // 按实际裁掉的条数计，overflow 可能大于价位条件总数，直接用它会虚报
-    omitted.condition_cap =
-      (omitted.condition_cap ?? 0) + (priceConditions.length - trimmedPrice.length);
+  // 必须在算 catalogHash 之前标记：suitableFor 参与哈希，
+  // 「MA20 下方不可作失效条件」的目录与允许它的目录本就是两份不同的目录
+  markAlreadySatisfied(conditions, new Map(input.periods.map((p) => [p.period, p.bars])), input.code);
+  const alreadyTrue = conditions.filter((c) => c.alreadySatisfied).length;
+  if (alreadyTrue > 0) {
+    warnings.push(`${alreadyTrue} 条条件在建目录时已成立，已从失效用途中摘除（避免计划一落库即失效）`);
   }
 
   const liveOnly = conditions.filter((c) => c.capability === 'live_only').length;
@@ -633,7 +786,6 @@ export function buildCandidateCatalog(input: CatalogInput): CandidateCatalog {
     contextId: input.contextId,
     candidateModelVersion: CANDIDATE_MODEL_VERSION,
     catalogHash: computeCatalogHash(candidateLevels, conditions),
-    horizon,
     levels: candidateLevels,
     conditions,
     omittedCounts: omitted,
@@ -643,4 +795,11 @@ export function buildCandidateCatalog(input: CatalogInput): CandidateCatalog {
   };
 }
 
-export const CANDIDATE_LIMITS = { LEVEL_CAP, SIDE_CAP, CONDITION_CAP, PURPOSE_CAP };
+export const CANDIDATE_LIMITS = {
+  LEVEL_CAP,
+  SIDE_CAP,
+  CONDITION_CAP,
+  PURPOSE_CAP,
+  REACH_ATR,
+  TOLERANCE_SCALE,
+};

@@ -75,7 +75,16 @@ export async function fetchDailyAdjusted(
 ): Promise<KlineBar[]> {
   const period = opts.period ?? 'day';
   const bars = await fetchKlineRaw(code, period, limit, secid);
-  return frontAdjustDaily(bars, opts.quiet ? undefined : `${lastServed.kline ?? '未知源'} ${code}`);
+  // 周线额外开 bar 内检测：除权发生在周中时跳空被吸收进那根 bar 内部，跨 bar 看不到，
+  // 不补这一条周线波段锚点会取到折算前的高点，黄金分割整套失真（详见 INTRABAR_SPLIT_GAP）。
+  //
+  // 月线**不开**：INTRABAR_SPLIT_GAP=0.45 的物理依据是「一周 5 个交易日按 ±10% 算最多跌 41%，
+  // 跌破 45% 只可能是除权」，这条推理对 20 个交易日的月线完全不成立——连续跌停的个股
+  // 单月跌 45% 是真实行情。在月线上开等于把一次暴跌误判成折算，把那之前的全部历史整体缩放。
+  // 月线漏掉月中折算只影响月线图这一个视图（PLAN_PERIODS 不含月线），代价远小于污染历史。
+  return frontAdjustDaily(bars, opts.quiet ? undefined : `${lastServed.kline ?? '未知源'} ${code}`, {
+    intrabar: period === 'week',
+  });
 }
 
 /**
@@ -88,6 +97,7 @@ export async function getKline(
   period: KlinePeriod = 'day',
   limit = 250,
   secid?: string,
+  opts: { fresh?: boolean } = {},
 ): Promise<KlineBar[]> {
   // 日线走本地缓存（盘前预热 + 盘中增量）：命中即秒回，回源失败时用旧缓存顶住，
   // 避免上游一慢就让板块宽度/情绪/纪律体检等模块整块降级。分钟线不缓存（量大且时效强）。
@@ -95,10 +105,15 @@ export async function getKline(
     // 缓存身份必须带 secid：大盘指数与同码个股（如 1.000001 上证指数 / 0.000001 平安银行）
     // 若共用 code 做键会互相覆盖，读出来的可能根本不是这只标的的 K 线。
     // 回源走 fetchDailyAdjusted，写进缓存的即修正后数据，故读出口不再重复修正
-    return getDailyCached(code, secid ?? toSecid(code), limit, () =>
-      fetchDailyAdjusted(code, secid, limit),
+    return getDailyCached(
+      code,
+      secid ?? toSecid(code),
+      limit,
+      () => fetchDailyAdjusted(code, secid, limit),
+      opts,
     );
   }
+  // 非日线本就不缓存，fresh 对它们天然是空操作，不必再分支
   // 周/月线不缓存，取数后与日线共用同一条修正出口
   if (!isMinutePeriod(period)) return fetchDailyAdjusted(code, secid, limit, { period });
   const bars = await fetchKlineRaw(code, period, limit, secid);

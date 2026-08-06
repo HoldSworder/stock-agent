@@ -223,23 +223,35 @@ export function writeCachedDaily(
  * 带缓存的日线读取：命中且新鲜则直接返回，否则回源并落库。
  * @param secid 来源身份（指数与同码个股靠它区分），缓存命中与写入都以 (code, secid) 为准
  * @param fetcher 回源函数（由 scheduler 传入原始多源链路，避免本模块反向依赖 providers）
+ * @param opts.fresh 跳过新鲜度判定强制回源。给前台看盘用：INTRADAY_MAX_AGE_MS 是 10 分钟，
+ *   而盘中那根 bar 又是 appendIntradayBars 用批量报价合成的近似值（open 取昨收、
+ *   high/low 取 max/min(现价,参考价)、量由成交额反推）。K 线弹窗 10 秒轮询一次却拿同一份缓存，
+ *   看到的就是一根十分钟不动且振幅失真的当日线。强制回源拿的是上游真实 OHLC，
+ *   且成功后照常 writeCachedDaily 写回——缓存没被绕坏，反而被真实 bar 刷热。
+ *   只应由前台单只标的的轮询触发，批量取数路径不要带，否则缓存等于没有。
  */
 export async function getDailyCached(
   code: string,
   secid: string,
   limit: number,
   fetcher: () => Promise<KlineBar[]>,
+  opts: { fresh?: boolean } = {},
 ): Promise<KlineBar[]> {
   const cached = readCachedDaily(code, secid, limit);
   const newest = cached[cached.length - 1];
-  if (cached.length >= limit && newest && isFresh(newest.updatedAt, new Date(), newest.provisional === 1)) {
+  if (
+    !opts.fresh &&
+    cached.length >= limit &&
+    newest &&
+    isFresh(newest.updatedAt, new Date(), newest.provisional === 1)
+  ) {
     return adjustedFromCache(cached);
   }
   try {
-    const fresh = await fetcher();
-    if (fresh.length > 0) {
-      writeCachedDaily(code, secid, fresh);
-      return fresh;
+    const fetched = await fetcher();
+    if (fetched.length > 0) {
+      writeCachedDaily(code, secid, fetched);
+      return fetched;
     }
   } catch (e) {
     // 回源失败时，有旧缓存就先顶上（这正是本模块要消灭的整块降级），无缓存才继续抛

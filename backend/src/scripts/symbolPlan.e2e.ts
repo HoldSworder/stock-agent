@@ -1,7 +1,7 @@
 // 端到端验收：对个股 / 境内行业 ETF / 跨境 ETF 三类标的，走真实取数装配技术上下文与候选目录，
 // 再用「从候选里挑」的方式提交一份计划，验证全链路可用与字符预算达标。
 //
-// 一律跑在临时 sqlite 上：提交计划会 supersedeOthers 把这三只标的在同一车道上的 active 计划全部作废、
+// 一律跑在临时 sqlite 上：提交计划会 supersedeOthers 把这三只标的的 active 计划全部作废、
 // 标注转 historical，而清理只能把新建的置 expired、恢复不了被顶掉的旧计划——
 // 跑一次验收就静默作废用户真实计划。真实取数与临时库不冲突。
 // 运行：cd backend && pnpm exec tsx src/scripts/symbolPlan.e2e.ts
@@ -9,7 +9,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import type { SymbolPlanHorizon, SymbolTradePlanProposal, TradeLevelRole } from '@stock-agent/shared';
+import type { SymbolTradePlanProposal, TradeLevelRole } from '@stock-agent/shared';
 
 const tmpDir = mkdtempSync(join(tmpdir(), 'symbolplan-e2e-'));
 process.env.DATABASE_PATH = join(tmpDir, 'test.sqlite');
@@ -30,14 +30,13 @@ const TARGETS: Array<{ code: string; name: string; kind: string }> = [
   { code: '513180', name: '恒生科技指数ETF', kind: '跨境ETF' },
 ];
 
-const HORIZON: SymbolPlanHorizon = 'next_session';
 const created: string[] = [];
 let failures = 0;
 
 for (const t of TARGETS) {
   console.log(`\n===== ${t.kind}：${t.code} ${t.name} =====`);
   try {
-    const snap = await prepareContext({ code: t.code, name: t.name, horizon: HORIZON });
+    const snap = await prepareContext({ code: t.code, name: t.name });
     const c = snap.context;
 
     console.log(
@@ -98,7 +97,6 @@ for (const t of TARGETS) {
       contextId: c.contextId,
       candidateModelVersion: snap.catalog.candidateModelVersion,
       catalogHash: snap.catalog.catalogHash,
-      horizon: HORIZON,
       summary: `端到端验收计划：阶段 ${c.phase.phase}，按后端算定动作 ${snap.primaryAction} 执行`,
       changes: ['端到端验收生成'],
       levelSelections: selections,

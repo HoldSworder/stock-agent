@@ -7,7 +7,7 @@ import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
 import type { ChatCompletionMessageParam } from 'openai/resources/chat/completions';
-import type { ScheduledTaskInput, StreamEvent, SymbolPlanHorizon } from '@stock-agent/shared';
+import type { ScheduledTaskInput, StreamEvent } from '@stock-agent/shared';
 import { config } from './config';
 import { ensureSchema } from './db/migrate';
 import {
@@ -58,6 +58,7 @@ import {
   getIndexFundFlows,
 } from './market/eastmoney';
 import { getStockIndicators } from './market/indicators';
+import { getPriceLevels } from './market/levels';
 import { getChipDistribution } from './market/chip';
 import {
   buildOverview,
@@ -730,7 +731,15 @@ async function main() {
   });
 
   // ===== K 线（个股 / 板块 / 大盘指数）=====
-  app.get<{ Querystring: { code?: string; secid?: string; period?: string; limit?: string } }>(
+  app.get<{
+    Querystring: {
+      code?: string;
+      secid?: string;
+      period?: string;
+      limit?: string;
+      fresh?: string;
+    };
+  }>(
     '/api/kline',
     async (req, reply) => {
       const code = req.query?.code ?? '';
@@ -748,13 +757,43 @@ async function main() {
         ? (req.query!.period as KlinePeriod)
         : 'day';
       const limit = Math.min(Math.max(Number(req.query?.limit) || 250, 30), 800);
+      // fresh=1 跳过日线缓存的新鲜度窗口直接回源，只给前台 K 线弹窗的轮询用：
+      // 缓存窗口是 10 分钟，弹窗却 10 秒一刷，不绕过就会盯着一根不动的当日线（详见 getDailyCached）
+      const fresh = req.query?.fresh === '1';
       try {
-        const data: KlineBar[] = await getKline(code, period, limit, secid);
+        const data: KlineBar[] = await getKline(code, period, limit, secid, { fresh });
         return { ok: true, data };
       } catch (e) {
         return reply
           .code(502)
           .send({ ok: false, error: e instanceof Error ? e.message : String(e) });
+      }
+    },
+  );
+
+  // ===== S10 点位测算：黄金分割/枢轴/均线/ATR（KlineDialog 点位图层）=====
+  // 与 /api/kline 同一套身份校验：指数须显式 secid，其余按 code（个股 6 位 / 板块 BKxxxx）。
+  // period 必须收：波段窗口是「最近 60 根」，换周期即换时间跨度，日线给短期波段、周线给中长期波段。
+  app.get<{ Params: { code: string }; Querystring: { period?: string; secid?: string } }>(
+    '/api/stock/:code/levels',
+    async (req, reply) => {
+      const code = String(req.params.code || '').trim();
+      const secid = req.query?.secid;
+      if (secid) {
+        if (!/^\d+\.[A-Za-z0-9]+$/.test(secid)) {
+          return reply.code(400).send({ ok: false, error: '非法 secid' });
+        }
+      } else if (!/^(\d{6}|BK\d+)$/i.test(code)) {
+        return reply.code(400).send({ ok: false, error: '非法标的代码' });
+      }
+      const allowed: KlinePeriod[] = ['day', 'week', 'month', '5m', '15m', '30m', '60m', '120m'];
+      const period = allowed.includes(req.query?.period as KlinePeriod)
+        ? (req.query!.period as KlinePeriod)
+        : 'day';
+      try {
+        return { ok: true, data: await getPriceLevels(code, period, secid) };
+      } catch (e) {
+        return reply.code(502).send({ ok: false, error: e instanceof Error ? e.message : String(e) });
       }
     },
   );
@@ -1003,7 +1042,7 @@ async function main() {
         thinking?: boolean;
         action?: string;
         /** 标的详情快捷按钮的一键生成意图，仅对标的专属会话生效 */
-        planIntent?: SymbolPlanHorizon;
+        planIntent?: boolean;
       };
       try {
         payload = JSON.parse(raw.toString());
@@ -1026,7 +1065,7 @@ async function main() {
       addMessage(sessionId, 'user', content);
 
       // 标的专属会话：给模型前置标的上下文，使其无需追问即可取数、并知道可往 K 线图上打点。
-      // 带 planIntent 时再叠一段钉死 horizon 的标准计划指令。落库的用户消息仍是原文，不含这些注入。
+      // 带 planIntent 时再叠一段固定工具序列的标准计划指令。落库的用户消息仍是原文，不含这些注入。
       const session = getSession(sessionId);
       const prompt = buildChatPrompt({
         refCode: session?.refCode,

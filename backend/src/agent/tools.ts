@@ -1994,13 +1994,8 @@ export const tools: ToolDef[] = [
             code: { type: 'string', description: '标的代码，如 600519 / 159516' },
             name: { type: 'string', description: '标的名称，可选' },
             secid: { type: 'string', description: '指数需传 secid，可选' },
-            horizon: {
-              type: 'string',
-              enum: ['next_session', 'swing'],
-              description: 'next_session 下一交易日计划 / swing 1~4 周波段计划',
-            },
           },
-          required: ['code', 'horizon'],
+          required: ['code'],
         },
       },
     },
@@ -2010,7 +2005,6 @@ export const tools: ToolDef[] = [
           code: asString(args.code).trim(),
           name: args.name ? asString(args.name) : undefined,
           secid: args.secid ? asString(args.secid) : undefined,
-          horizon: asString(args.horizon) === 'swing' ? 'swing' : 'next_session',
         });
         return preview(formatTechnicalContext(snap), 6000);
       } catch (e) {
@@ -2060,7 +2054,6 @@ export const tools: ToolDef[] = [
             contextId: { type: 'string' },
             candidateModelVersion: { type: 'string', description: '来自 contextId 对应上下文' },
             catalogHash: { type: 'string', description: '来自候选目录，防跨快照混用' },
-            horizon: { type: 'string', enum: ['next_session', 'swing'] },
             summary: { type: 'string', description: '一句话说清当前阶段与该做什么' },
             changes: {
               type: 'array',
@@ -2094,6 +2087,16 @@ export const tools: ToolDef[] = [
                   conditionCandidateIds: { type: 'array', items: { type: 'string' } },
                   invalidConditionCandidateIds: { type: 'array', items: { type: 'string' } },
                   targetCandidateLevelIds: { type: 'array', items: { type: 'string' } },
+                  subjectiveProbabilityPct: {
+                    type: 'number',
+                    description:
+                      '你对该情景兑现的主观概率 0~100。只用于展示并留待事后校准，不参与仓位/止损/告警任何计算。' +
+                      '没把握就省略，不要为了填满字段而给 50。',
+                  },
+                  probabilityBasis: {
+                    type: 'string',
+                    description: '给出该概率的依据，一句话。给不出依据就连概率一起省略',
+                  },
                 },
                 required: ['rank', 'name', 'conditionCandidateIds', 'invalidConditionCandidateIds'],
               },
@@ -2105,7 +2108,6 @@ export const tools: ToolDef[] = [
             'contextId',
             'candidateModelVersion',
             'catalogHash',
-            'horizon',
             'summary',
             'levelSelections',
             'scenarioSelections',

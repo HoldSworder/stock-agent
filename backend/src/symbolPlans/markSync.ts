@@ -68,8 +68,10 @@ function mergeLevelsByPrice(levels: TradeLevel[]): MergedMark[] {
     const points = pointsOf(lv);
     if (!points) continue;
     if (!ROLE_STYLE[lv.role]) continue;
-    // 用最终绘制点位当分组键：画在同一位置的才合并，语义不同但位置不同的一律各画各的
-    const key = points.map((p) => p.price.toFixed(4)).join('~');
+    // 分组键 = 周期 + 最终绘制点位：画在同一位置的才合并，语义不同但位置不同的一律各画各的。
+    // 必须带 timeframe——三层候选常给出价格相同的位子（周线压力位与日线压力位重合），
+    // 不带周期就会被合成一条线，图表按周期过滤时它要么整条消失、要么在小周期图上冒出来。
+    const key = `${lv.timeframe}|${points.map((p) => p.price.toFixed(4)).join('~')}`;
     const hit = groups.get(key);
     if (hit) hit.levels.push(lv);
     else groups.set(key, { points, levels: [lv] });
@@ -85,18 +87,15 @@ function mergeLevelsByPrice(levels: TradeLevel[]): MergedMark[] {
  * 必须在调用方的事务内执行，保证「计划落库」与「图上线」同时成功或同时不发生。
  */
 export function syncPlanMarks(plan: SymbolTradePlan): { inserted: number; historized: number } {
-  // 1. 同标的**同期限**的旧版本计划标注转 historical（不删）。
-  //    计划按 (code, horizon) 分车道，只按 code 过滤会让 next_session 与 swing 互清对方的线。
-  //    symbol_marks 无 horizon 列，故先取同车道的计划 id 集合再按 planId 过滤。
+  // 1. 同标的其他计划的标注转 historical（不删）。
+  //    期限车道合并后不再按 horizon 过滤：一个标的只有一份生效计划，
+  //    遗留的 next_session / swing 老计划的线也要在这里一起归档，
+  //    否则它们会连同被 supersedeOthers 置为 superseded 的计划一起，把陈旧的线永远挂在图上。
+  //    symbol_marks 无 code 列，故先取该标的的计划 id 集合再按 planId 过滤。
   const sameLanePlanIds = db
     .select({ id: schema.symbolTradePlans.id })
     .from(schema.symbolTradePlans)
-    .where(
-      and(
-        eq(schema.symbolTradePlans.code, plan.code),
-        eq(schema.symbolTradePlans.horizon, plan.horizon),
-      ),
-    )
+    .where(eq(schema.symbolTradePlans.code, plan.code))
     .all()
     .map((r) => r.id)
     .filter((id) => id !== plan.id);

@@ -29,12 +29,15 @@ import type {
   KlinePeriod,
   SymbolMark,
   SymbolMarkKind,
-  SymbolPlanHorizon,
   TrendPoint,
   TrendsResult,
   StockIndicators,
+  PriceLevels,
   VolumeReadout,
+  SymbolPlanProjection,
+  SymbolTradePlan,
 } from '@stock-agent/shared';
+import { isPlanLineVisible } from '@stock-agent/shared';
 
 /** 弹窗标签：分时 + 日/周/月 K 线 */
 type Tab = 'trend' | KlinePeriod;
@@ -76,17 +79,22 @@ function labelX(slot: number, width: number): number {
   return Math.max(LABEL_X0, Math.min(LABEL_X0 + slot * LABEL_SLOT_PX, width - LABEL_SLOT_PX));
 }
 
-/** overlay 的 extendData 载荷：文案 + 防重叠槽位 */
+/** overlay 的 extendData 载荷：文案 + 防重叠槽位 + 推演折线向右延伸几根 bar */
 interface MarkExtend {
   text: string;
   slot: number;
+  steps?: number;
 }
 
 /** 读 extendData（旧数据可能是裸字符串，兜底成 slot 0） */
 function readExtend(raw: unknown): MarkExtend {
   if (raw && typeof raw === 'object' && 'text' in raw) {
     const e = raw as Partial<MarkExtend>;
-    return { text: String(e.text ?? ''), slot: Number(e.slot ?? 0) || 0 };
+    return {
+      text: String(e.text ?? ''),
+      slot: Number(e.slot ?? 0) || 0,
+      steps: Number(e.steps ?? 0) || 0,
+    };
   }
   return { text: String(raw ?? ''), slot: 0 };
 }
@@ -151,6 +159,66 @@ registerOverlay({
   },
 });
 
+/**
+ * 波动率锥：从最后一根 bar 向右张开的 ±1σ / ±2σ 区间。
+ *
+ * 点位传法是「全部锚在最后一根 bar 的时间上，只借它算 y」，x 由 barSpace 自己推。
+ * 不用未来时间戳：那要求图表能把不存在的时间映射成坐标，跨周期（尤其分钟线跨日）
+ * 很容易算到收盘时段里去，画出来的锥会在右边莫名其妙地断一截。
+ *
+ * coordinates 约定：[0] 锚点，其后每 4 个一组对应第 n 步的 p2High/p1High/p1Low/p2Low。
+ */
+registerOverlay({
+  name: 'SM_CONE',
+  totalStep: 2,
+  needDefaultPointFigure: false,
+  needDefaultXAxisFigure: false,
+  needDefaultYAxisFigure: false,
+  createPointFigures: ({ coordinates, barSpace }: OverlayCreateFiguresCallbackParams): OverlayFigure[] => {
+    const anchor = coordinates[0];
+    const n = Math.floor((coordinates.length - 1) / 4);
+    if (!anchor || n < 1) return [];
+    const xOf = (step: number): number => anchor.x + step * barSpace.bar;
+    const band = (hiIdx: number, loIdx: number): Array<{ x: number; y: number }> => {
+      const up: Array<{ x: number; y: number }> = [{ x: anchor.x, y: anchor.y }];
+      const down: Array<{ x: number; y: number }> = [];
+      for (let i = 0; i < n; i += 1) {
+        const base = 1 + i * 4;
+        up.push({ x: xOf(i + 1), y: coordinates[base + hiIdx].y });
+        down.unshift({ x: xOf(i + 1), y: coordinates[base + loIdx].y });
+      }
+      return [...up, ...down];
+    };
+    return [
+      { type: 'polygon', attrs: { coordinates: band(0, 3) }, styles: { style: 'fill' } },
+      { type: 'polygon', attrs: { coordinates: band(1, 2) }, styles: { style: 'fill' } },
+    ];
+  },
+});
+
+/** 情景折线：从现价斜拉到目标/失效位。刻意画成折线而不是蜡烛，一眼看出这是分支示意而非预测行情 */
+registerOverlay({
+  name: 'SM_PATH',
+  totalStep: 3,
+  needDefaultPointFigure: false,
+  needDefaultXAxisFigure: false,
+  needDefaultYAxisFigure: false,
+  createPointFigures: ({ coordinates, barSpace, overlay }: OverlayCreateFiguresCallbackParams): OverlayFigure[] => {
+    const [a, b] = coordinates;
+    if (!a || !b) return [];
+    const { text, steps } = readExtend(overlay.extendData);
+    const x2 = a.x + Math.max(1, steps ?? 1) * barSpace.bar;
+    return [
+      { type: 'line', attrs: { coordinates: [{ x: a.x, y: a.y }, { x: x2, y: b.y }] } },
+      {
+        type: 'text',
+        ignoreEvent: true,
+        attrs: { x: x2, y: b.y - 2, text, align: 'right', baseline: 'bottom' },
+      },
+    ];
+  },
+});
+
 registerOverlay({
   name: 'SM_RANGE',
   totalStep: 3,
@@ -204,6 +272,8 @@ const trend = ref<TrendsResult | null>(null);
 const indicators = ref<StockIndicators | null>(null);
 // agent 打在图上的标注（价位线/点位/区间/趋势线），K 线视图叠加展示，只读
 const marks = ref<SymbolMark[]>([]);
+// S10 点位测算（黄金分割/枢轴/均线/ATR），点位图层与「距现价 ATR」读数的数据源，跟随当前周期
+const levels = ref<PriceLevels | null>(null);
 // 右侧页签：交易计划为默认，Agent 对话保留
 const sideTab = ref<'plan' | 'agent'>('plan');
 // 对话栏懒挂载标记：首次切到 Agent 页签才建 WS 与会话
@@ -219,20 +289,16 @@ function onAgentDone(): void {
   planKey.value += 1;
 }
 const chatRef = ref<InstanceType<typeof SymbolChatPanel> | null>(null);
-// 计划面板的车道由弹窗持有：面板被 planKey 重挂后车道不至于被重置回下一交易日
-const planHorizon = ref<SymbolPlanHorizon>('next_session');
 /**
  * 计划页签空状态点「生成」：切到 Agent 页签跑同一套流程，
  * 让用户能看到取数与落库的完整轨迹，而不是对着一个转圈干等。
  */
-async function onGeneratePlan(horizon: SymbolPlanHorizon): Promise<void> {
-  // 记住这次生成的车道，跑完切回计划页签直接落在对应那条上
-  planHorizon.value = horizon;
+async function onGeneratePlan(): Promise<void> {
   agentEverOpened.value = true;
   sideTab.value = 'agent';
   // 对话栏是懒挂载的，要等它渲染出来才拿得到实例
   await nextTick();
-  await chatRef.value?.genPlan(horizon);
+  await chatRef.value?.genPlan();
 }
 
 let chart: Chart | null = null;
@@ -459,10 +525,13 @@ async function loadKline(silent = false) {
   try {
     const period = tab.value === 'trend' ? 'day' : tab.value;
     const limit = MINUTE_TABS.includes(tab.value) ? 320 : 250;
-    const bars = await api.getKline(code.value, period, limit, secid.value || undefined);
+    // silent 即轮询刷新，此时强制后端回源：日线走本地缓存，10 分钟才换一次，
+    // 且盘中那根是批量报价合成的近似 bar，不绕过就等于盯着一根不动且振幅失真的当日线。
+    // 首屏（silent=false）仍走缓存，保证打开即出图。
+    const bars = await api.getKline(code.value, period, limit, secid.value || undefined, silent);
     if (token !== reqToken || !chart) return;
     // applyNewData 会清空图上 overlay，数据落地后再重绘标注
-    chart.applyNewData(bars.map(toKLineData), false, renderMarks);
+    chart.applyNewData(bars.map(toKLineData), false, renderOverlays);
     if (silent) error.value = '';
   } catch (e) {
     if (token !== reqToken || silent) return;
@@ -484,6 +553,10 @@ const MARK_OVERLAY: Record<SymbolMarkKind, { overlay: string; color: string; lab
 
 /** 同一组 groupId，便于整组清除后重画 */
 const MARK_GROUP = 'symbol_marks';
+/** 确定性点位（黄金分割/枢轴）单独一组：与计划标注互不清除，图层开关各自控制 */
+const DET_GROUP = 'det_levels';
+/** 走势推演（波动率锥 + 情景折线）单独一组：画在右侧留白，与实际行情严格分开 */
+const PROJ_GROUP = 'projection';
 
 /**
  * 价格文案（标注与分时盘口共用）：低价标的（ETF、低价股）两位小数分不出档位，
@@ -536,13 +609,266 @@ function markTimestamp(time?: string | null): number | undefined {
   return ts;
 }
 
-/** 图层开关（计划 10.4）：默认只开当前计划与支撑压力，避免图上信息过载 */
+/**
+ * 图层开关（计划 10.4）：默认只开当前计划与支撑压力，避免图上信息过载。
+ * fib/pivot 是确定性点位测算（S10），默认关——一次全开有 14 条线会糊满主图。
+ */
 const layers = ref({
   currentPlan: true,
   supportResistance: true,
-  structure: false,
+  fib: false,
+  pivot: false,
   manual: true,
   history: false,
+  // 走势推演默认关：它画在图右侧的留白里，会挤掉一块看盘面积，且是推演不是行情
+  projection: false,
+});
+
+/** 点位线配色：黄金分割走金色系、枢轴走冷灰蓝，与计划线（红/绿/蓝/橙/紫）明显区分 */
+const FIB_COLOR = '#c9a227';
+const FIB_EXT_COLOR = '#d9b45c';
+const PIVOT_COLOR = '#6b7f9e';
+
+/** 一条确定性点位线（不落库，纯前端按当前周期算出来画） */
+interface DetLine {
+  id: string;
+  price: number;
+  label: string;
+  color: string;
+  /** 清单分组用 */
+  group: '黄金分割' | '枢轴';
+  note: string;
+}
+
+/**
+ * 由 S10 点位测算派生的水平线。
+ * 均线刻意不画：主图已有 MA5/10/30/60 曲线，再画水平线是同一信息画两遍，
+ * 只会挤占标签位；均线的支撑/压力读数放在清单里给。
+ */
+const detLines = computed<DetLine[]>(() => {
+  const lv = levels.value;
+  if (!lv || tab.value === 'trend') return [];
+  const out: DetLine[] = [];
+  const dir = lv.swing?.direction === 'down' ? '反弹' : '回撤';
+  if (layers.value.fib) {
+    for (const f of lv.fibRetracements) {
+      out.push({
+        id: `fib:r:${f.ratio}`,
+        price: f.price,
+        label: `${f.ratio} ${fmtPrice(f.price)}`,
+        color: FIB_COLOR,
+        group: '黄金分割',
+        note: `${dir}位 ${f.ratio}`,
+      });
+    }
+    for (const f of lv.fibExtensions) {
+      out.push({
+        id: `fib:e:${f.ratio}`,
+        price: f.price,
+        label: `扩展${f.ratio} ${fmtPrice(f.price)}`,
+        color: FIB_EXT_COLOR,
+        group: '黄金分割',
+        note: `顺势扩展目标 ${f.ratio}`,
+      });
+    }
+  }
+  if (layers.value.pivot && lv.pivot) {
+    const p = lv.pivot;
+    const rows: Array<[string, number, string]> = [
+      ['PP', p.pp, '枢轴中枢'],
+      ['R1', p.r1, '枢轴压力1'],
+      ['R2', p.r2, '枢轴压力2'],
+      ['R3', p.r3, '枢轴压力3'],
+      ['S1', p.s1, '枢轴支撑1'],
+      ['S2', p.s2, '枢轴支撑2'],
+      ['S3', p.s3, '枢轴支撑3'],
+    ];
+    for (const [k, v, note] of rows) {
+      out.push({
+        id: `pivot:${k}`,
+        price: v,
+        label: `${k} ${fmtPrice(v)}`,
+        color: PIVOT_COLOR,
+        group: '枢轴',
+        note,
+      });
+    }
+  }
+  return out.filter((l) => Number.isFinite(l.price) && l.price > 0);
+});
+
+/**
+ * 判定「这条金色分割线与那条计划线是同一条」的价格容差。
+ * 取 0.15% 与 0.12 ATR 的较大者：纯百分比在高波动标的上会漏判，纯 ATR 在停牌后 ATR 塌缩时会失效。
+ */
+const LEVEL_MATCH_PCT = 0.0015;
+const LEVEL_MATCH_ATR = 0.12;
+
+/**
+ * 确定性点位与计划价位线的重合匹配。
+ *
+ * 不做这一步的话，打开黄金分割图层后图上会出现两条几乎重合的线——一条金色虚线、一条计划实线，
+ * 而用户无从判断计划采纳的正是这条 0.618，只会觉得线更多更乱。
+ * 匹配上的金线不再单独画，改成把它的用途缀到计划线标签上（「触发线 13.45 · 0.618 回撤」），
+ * 既去掉了视觉重影，又回答了「这条计划线是怎么来的」。
+ *
+ * 按价格匹配而不是靠后端给对应关系：计划价位是候选聚类后的中值，与前端按当前周期实时算出的
+ * 分割价本就不会逐位相等，给不出精确的 id 对应；而是不是同一条线，看的本来也就是「画在不画得出区别的位置」。
+ */
+const detPlanMatch = computed(() => {
+  const byDet = new Map<string, string>();
+  const byMark = new Map<string, string[]>();
+  const lv = levels.value;
+  const tol = Math.max((lv?.close ?? 0) * LEVEL_MATCH_PCT, (lv?.atr ?? 0) * LEVEL_MATCH_ATR);
+  if (!(tol > 0) || detLines.value.length === 0) return { byDet, byMark };
+  const planLines = marks.value
+    .filter(
+      (m) => m.kind === 'price_line' && (m.status ?? 'active') === 'active' && isMarkVisible(m),
+    )
+    .map((m) => ({ id: m.id, price: horizontalMarkAnchor(m) ?? 0 }))
+    .filter((p) => p.price > 0);
+  for (const d of detLines.value) {
+    let best: { id: string; diff: number } | null = null;
+    for (const p of planLines) {
+      const diff = Math.abs(p.price - d.price);
+      if (diff <= tol && (best == null || diff < best.diff)) best = { id: p.id, diff };
+    }
+    if (!best) continue;
+    byDet.set(d.id, best.id);
+    const notes = byMark.get(best.id);
+    if (notes) notes.push(d.note);
+    else byMark.set(best.id, [d.note]);
+  }
+  return { byDet, byMark };
+});
+
+/** 计划线标签上的来源后缀（该线与哪几条确定性点位重合） */
+function sourceSuffix(markId: string): string {
+  const notes = detPlanMatch.value.byMark.get(markId);
+  return notes && notes.length > 0 ? ` · ${notes.join(' / ')}` : '';
+}
+
+/**
+ * 关键位距现价多少 ATR：最能说明「这条线够不够得到」，故只把这一个数补到线上。
+ * 来源/触碰次数留在下方清单——标签越长越容易触发错位。
+ */
+function atrDistanceText(price: number): string {
+  const lv = levels.value;
+  if (!lv?.atr || lv.atr <= 0 || !(lv.close > 0)) return '';
+  const d = (price - lv.close) / lv.atr;
+  if (!Number.isFinite(d)) return '';
+  return ` ${d >= 0 ? '+' : ''}${d.toFixed(1)}ATR`;
+}
+
+// 点位测算的自增 token：与标注同理，切标的/切周期后旧请求的结果不得画到新视图上
+let levelsToken = 0;
+
+/**
+ * 拉取当前周期的确定性点位（失败静默）。
+ * 无条件拉而不是等图层打开才拉：ATR 还要供计划线的「距现价」读数用，
+ * 且预先拉好可让图层开关点了就立刻出线，不必等一次网络往返。
+ */
+async function loadLevels(): Promise<void> {
+  const token = ++levelsToken;
+  if (!code.value || tab.value === 'trend') {
+    levels.value = null;
+    return;
+  }
+  try {
+    const data = await api.priceLevels(code.value, tab.value, secid.value || undefined);
+    if (token !== levelsToken) return;
+    levels.value = data;
+  } catch {
+    if (token !== levelsToken) return;
+    levels.value = null;
+  }
+  renderOverlays();
+}
+
+/**
+ * 走势推演数据（计划 S5）。两层刻意分开：
+ * cone 是纯算术的散布范围（不含方向判断），plan.scenarios 的概率是模型主观估计（未经校准）。
+ * 概率在这里只用于折线标签文案，不参与任何坐标或阈值计算。
+ */
+const projection = ref<SymbolPlanProjection | null>(null);
+const projectionPlan = ref<SymbolTradePlan | null>(null);
+let projectionToken = 0;
+
+/** 向右推演几根 bar。5 个交易日 = 一周，与计划面板「短期 = 本周内」同口径 */
+const PROJECTION_STEPS = 5;
+
+/** 推演只对日线口径有意义：σ 是按日收益估的，画到 60 分钟图上尺度对不上 */
+const canProject = computed(() => tab.value === 'day' && !!code.value);
+
+/** 拉推演数据（失败静默，图层自动空着而不是弹错打断看盘） */
+async function loadProjection(): Promise<void> {
+  const token = ++projectionToken;
+  if (!layers.value.projection || !canProject.value) {
+    projection.value = null;
+    projectionPlan.value = null;
+    return;
+  }
+  try {
+    const [proj, plan] = await Promise.all([
+      api.symbolPlans.projection(code.value, PROJECTION_STEPS, secid.value || undefined),
+      api.symbolPlans.active(code.value),
+    ]);
+    if (token !== projectionToken) return;
+    projection.value = proj;
+    projectionPlan.value = plan;
+  } catch {
+    if (token !== projectionToken) return;
+    projection.value = null;
+    projectionPlan.value = null;
+  }
+  renderOverlays();
+}
+
+/** 推演区口径说明。锥是量级参考不是置信区间，情景概率是模型主观估计，两句都必须写明 */
+const projectionNote = computed(() => {
+  if (!canProject.value) return '走势推演按日线波动估算，仅在日 K 视图可用';
+  const cone = projection.value?.cone;
+  if (!cone) return '样本不足，未生成波动率锥';
+  const pct = (cone.sigmaDaily * 100).toFixed(2);
+  const paths = scenarioPaths.value.length;
+  return (
+    `未来 ${PROJECTION_STEPS} 个交易日波动率锥：按近 ${cone.sampleSize} 日波动（日 σ ${pct}%）张开，` +
+    `内浅外深两层为 ±1σ / ±2σ，是量级参考而非置信区间` +
+    (paths > 0 ? `；${paths} 条虚线为计划情景示意，所标概率为模型主观估计、未经校准` : '')
+  );
+});
+
+/** 情景折线配色：主路径蓝、备选灰、风险橙，与计划线同一套语义 */
+const PATH_COLOR: Record<'primary' | 'alternative' | 'risk', string> = {
+  primary: '#1f6feb',
+  alternative: '#8b93a7',
+  risk: '#ffb000',
+};
+
+/**
+ * 情景折线：从最后收盘价拉到该情景的目标位。
+ * 概率只进标签文案；取不到目标位的情景不画——凭空给一条线的终点等于编一个目标价。
+ */
+const scenarioPaths = computed(() => {
+  const plan = projectionPlan.value;
+  const base = projection.value?.cone?.basePrice;
+  if (!plan || !(base && base > 0)) return [];
+  const pctById = new Map(projection.value?.scenarios.map((s) => [s.id, s.probabilityPct]) ?? []);
+  const out: Array<{ id: string; from: number; to: number; text: string; color: string }> = [];
+  for (const sc of plan.scenarios) {
+    const lv = plan.levels.find((l) => sc.targetLevelIds.includes(l.id));
+    const to = lv?.price ?? lv?.zoneHigh ?? lv?.zoneLow ?? null;
+    if (to == null || !(to > 0)) continue;
+    const pct = pctById.get(sc.id);
+    out.push({
+      id: sc.id,
+      from: base,
+      to,
+      text: `${sc.name} ${fmtPrice(to)}${pct == null ? '' : ` · 模型主观 ${pct}%`}`,
+      color: PATH_COLOR[sc.rank],
+    });
+  }
+  return out;
 });
 
 // 标注独立于 K 线数据的自增 token：切标的时旧标的的标注若后到，不能画到新标的的图上
@@ -563,10 +889,10 @@ async function loadMarks(): Promise<void> {
     if (token !== marksToken) return;
     marks.value = [];
   }
-  renderMarks();
+  renderOverlays();
 }
 
-/** 标注是否应在当前视图渲染：图层开关 + 周期过滤（price_line 可跨周期） */
+/** 标注是否应在当前视图渲染：图层开关 + 周期过滤 */
 function isMarkVisible(m: SymbolMark): boolean {
   const status = m.status ?? 'active';
   const isPlan = !!m.planId;
@@ -580,10 +906,16 @@ function isMarkVisible(m: SymbolMark): boolean {
   if (isPlan && (m.role === 'support' || m.role === 'resistance') && !layers.value.supportResistance) {
     return false;
   }
-  if (m.role === 'structure' && !layers.value.structure) return false;
-  // 周期过滤：价位线跨周期可见，其余只在所属周期
-  if (m.kind !== 'price_line' && m.timeframe && m.timeframe !== tab.value) return false;
-  return true;
+  // 周期过滤。价位线按「本周期及更大周期都画、更小周期不画」：
+  // 计划分周线/日线/60 分钟三层出位子后，若仍让价位线一律跨周期可见，
+  // 周线图上会被一堆 60 分钟级触发线糊满；反过来 60 分钟图上仍需看到周线压力位这个边界。
+  // 非价位线（区间、箭头等）语义绑死在所属周期，仍只在本周期画。
+  if (!m.timeframe) return true;
+  // 分时图比任何 K 线周期都细，三层的位子在盘中都是有效参考，全画
+  if (tab.value === 'trend') return m.kind === 'price_line';
+  return m.kind === 'price_line'
+    ? isPlanLineVisible(tab.value, m.timeframe)
+    : m.timeframe === tab.value;
 }
 
 /**
@@ -595,7 +927,9 @@ function isMarkVisible(m: SymbolMark): boolean {
  */
 const LABEL_NEAR_RATIO = 0.025;
 
-function assignLabelSlots(items: Array<{ id: string; price: number }>): Map<string, number> {
+function assignLabelSlots(
+  items: Array<{ id: string; price: number; priority: number }>,
+): Map<string, number> {
   const slots = new Map<string, number>();
   if (items.length === 0) return slots;
   const data = chart?.getDataList() ?? [];
@@ -611,31 +945,70 @@ function assignLabelSlots(items: Array<{ id: string; price: number }>): Map<stri
   }
   const span = hi - lo;
   const near = span > 0 ? span * LABEL_NEAR_RATIO : 0;
+  // 先按价格聚成「会互相压」的簇
   const sorted = [...items].sort((a, b) => a.price - b.price);
-  let slot = 0;
+  const clusters: Array<typeof sorted> = [];
   let prev: number | null = null;
   for (const it of sorted) {
-    if (prev != null && it.price - prev < near) slot += 1;
-    else slot = 0;
-    slots.set(it.id, slot);
+    if (prev != null && it.price - prev < near) clusters[clusters.length - 1].push(it);
+    else clusters.push([it]);
     prev = it.price;
+  }
+  // 簇内按优先级发槽位：靠左（槽位 0）最不容易被夹出可视区，要留给计划线。
+  // 若只按价格发，一条斐波那契线就能把更重要的计划线标签挤到右边甚至挤没。
+  for (const c of clusters) {
+    [...c]
+      .sort((a, b) => a.priority - b.priority)
+      .forEach((it, i) => slots.set(it.id, i));
   }
   return slots;
 }
 
-/** 按当前 marks 重绘 overlay；分时视图不叠加标注（点位坐标以 K 线为基准） */
-function renderMarks(): void {
+/**
+ * 重绘图上全部 overlay：计划标注组 + 确定性点位组。
+ * 两组必须同一个函数画，因为标签防重叠要跨组统一分槽——分开画各自算槽位，
+ * 两组的标签就会互相压在一起。分时视图不叠加（点位坐标以 K 线为基准）。
+ */
+function renderOverlays(): void {
   if (!chart) return;
   chart.removeOverlay({ groupId: MARK_GROUP });
+  chart.removeOverlay({ groupId: DET_GROUP });
+  chart.removeOverlay({ groupId: PROJ_GROUP });
   if (tab.value === 'trend') return;
+  renderProjection();
   const visible = marks.value.filter(isMarkVisible);
-  // 只有水平标注（价位线/价格带）会因价格接近而叠标签，其余按时间轴分散，无需错位
+  // 与计划线重合的点位不再单独画，其用途已缀到对应计划线的标签上（见 detPlanMatch）
+  const dets = detLines.value.filter((d) => !detPlanMatch.value.byDet.has(d.id));
+  // 只有水平线（价位线/价格带/点位线）会因价格接近而叠标签，其余按时间轴分散，无需错位
+  // priority：计划线优先占左侧槽位，点位线是参考背景，被挤到右边可以接受
   const slots = assignLabelSlots(
-    visible
-      .filter((m) => m.kind === 'price_line')
-      .map((m) => ({ id: m.id, price: horizontalMarkAnchor(m) ?? 0 }))
-      .filter((it) => it.price > 0),
+    [
+      ...visible
+        .filter((m) => m.kind === 'price_line')
+        .map((m) => ({ id: m.id, price: horizontalMarkAnchor(m) ?? 0, priority: 0 })),
+      ...dets.map((d) => ({ id: d.id, price: d.price, priority: 1 })),
+    ].filter((it) => it.price > 0),
   );
+  for (const d of dets) {
+    chart.createOverlay({
+      name: 'SM_PRICE_LINE',
+      groupId: DET_GROUP,
+      points: [{ value: d.price }],
+      lock: true,
+      extendData: { text: d.label, slot: slots.get(d.id) ?? 0 } satisfies MarkExtend,
+      // 一律细虚线 + 小号标签：它们是参考背景，不能在视觉上盖过计划结论
+      styles: {
+        line: { color: d.color, size: 1, style: LineType.Dashed },
+        text: {
+          color: d.color,
+          size: 10,
+          backgroundColor: 'rgba(20,24,33,0.7)',
+          paddingLeft: 3,
+          paddingRight: 3,
+        },
+      },
+    });
+  }
   for (const m of visible) {
     const cfg = MARK_OVERLAY[m.kind];
     if (!cfg) continue;
@@ -663,7 +1036,12 @@ function renderMarks(): void {
       // 只读展示：锁定禁止拖动，标注的增删改统一由 agent 在对话中完成
       lock: true,
       extendData: {
-        text: `${m.label}${priceSuffix(m)}${statusSuffix(m)}`,
+        // 补「距现价多少 ATR」：判断这条线够不够得到，比来源/触碰次数更即时可用
+        text:
+          `${m.label}${priceSuffix(m)}` +
+          `${m.kind === 'price_line' ? atrDistanceText(horizontalMarkAnchor(m) ?? 0) : ''}` +
+          `${sourceSuffix(m.id)}` +
+          `${statusSuffix(m)}`,
         slot: slots.get(m.id) ?? 0,
       } satisfies MarkExtend,
       styles: {
@@ -687,15 +1065,85 @@ function renderMarks(): void {
   }
 }
 
-/** 标注清单（图表下方只读列表）：形态标签 + 点位描述 */
+/**
+ * 画走势推演。放在最后一根 bar 右侧的留白区，并临时把右偏移撑开到容得下推演步数——
+ * 不撑开的话锥会被挤在 y 轴外面，看起来像图表画崩了。
+ * 关掉图层时把右偏移还原成 8，不留下一块莫名其妙的空白。
+ */
+function renderProjection(): void {
+  if (!chart) return;
+  const cone = projection.value?.cone;
+  const on = layers.value.projection && canProject.value;
+  const bars = chart.getDataList();
+  const lastTs = bars[bars.length - 1]?.timestamp;
+  if (!on || !cone || lastTs == null) {
+    chart.setOffsetRightDistance(8);
+    return;
+  }
+  // 留白 = 推演步数 × 当前 bar 宽 + 一点余量给标签。
+  // 必须读实时 bar 宽而不是默认值：overlay 的 x 是按当前 barSpace 推的，
+  // 用默认值算留白的话用户一缩放，锥就画到留白外面去了。
+  // ponytail: 留白只在重绘时按当前 bar 宽算一次，缩放后不跟着变，锥可能压到边缘。
+  // 要彻底跟手得订阅缩放事件重算留白，代价是每帧一次 setOffsetRightDistance。
+  const space = chart.getBarSpace() || defaultBarSpace;
+  chart.setOffsetRightDistance((PROJECTION_STEPS + 1) * space + 40);
+
+  const conePoints = [{ timestamp: lastTs, value: cone.basePrice }];
+  for (const s of cone.steps) {
+    conePoints.push(
+      { timestamp: lastTs, value: s.p2High },
+      { timestamp: lastTs, value: s.p1High },
+      { timestamp: lastTs, value: s.p1Low },
+      { timestamp: lastTs, value: s.p2Low },
+    );
+  }
+  chart.createOverlay({
+    name: 'SM_CONE',
+    groupId: PROJ_GROUP,
+    points: conePoints,
+    lock: true,
+    // 两层都用同一个极淡的灰蓝：叠加处自然更深，正好表达「越靠中间越常见」，
+    // 不用两种颜色是为了不让它看起来像在指方向
+    styles: { polygon: { color: 'rgba(107,127,158,0.10)', borderColor: 'transparent' } },
+  });
+
+  for (const p of scenarioPaths.value) {
+    chart.createOverlay({
+      name: 'SM_PATH',
+      groupId: PROJ_GROUP,
+      points: [
+        { timestamp: lastTs, value: p.from },
+        { timestamp: lastTs, value: p.to },
+      ],
+      lock: true,
+      extendData: { text: p.text, slot: 0, steps: PROJECTION_STEPS } satisfies MarkExtend,
+      styles: {
+        line: { color: p.color, size: 1, style: LineType.Dashed },
+        text: {
+          color: p.color,
+          size: 10,
+          backgroundColor: 'rgba(20,24,33,0.8)',
+          paddingLeft: 3,
+          paddingRight: 3,
+        },
+      },
+    });
+  }
+}
+
+/** 图下方只读清单的一行：形态标签 + 价位 + 距现价 + 说明 */
 interface MarkRow {
   id: string;
   kindLabel: string;
   color: string;
   label: string;
   where: string;
+  /** 距现价多少 ATR，与图上标签同一个数 */
+  dist: string;
   note: string;
 }
+
+/** 计划标注行 */
 const markRows = computed<MarkRow[]>(() =>
   marks.value.filter(isMarkVisible).map((m) => {
     const cfg = MARK_OVERLAY[m.kind];
@@ -712,12 +1160,52 @@ const markRows = computed<MarkRow[]>(() =>
       id: m.id,
       kindLabel: cfg?.label ?? m.kind,
       color: m.color || cfg?.color || FLAT_COLOR,
-      label: m.label,
+      label: `${m.label}${sourceSuffix(m.id)}`,
       where,
+      dist: m.kind === 'price_line' ? atrDistanceText(horizontalMarkAnchor(m) ?? 0).trim() : '',
       note: m.note || '',
     };
   }),
 );
+
+/**
+ * 确定性点位行。与计划标注分开列，并在类型标签上写明分组，
+ * 让人一眼看出这些是「算出来的参考位」而不是「计划给的结论」。
+ */
+const detRows = computed<MarkRow[]>(() =>
+  detLines.value
+    .filter((d) => !detPlanMatch.value.byDet.has(d.id))
+    .map((d) => ({
+      id: d.id,
+      kindLabel: d.group,
+      color: d.color,
+      label: d.label,
+      where: '',
+      dist: atrDistanceText(d.price).trim(),
+      note: d.note,
+    })),
+);
+
+/** 清单最终渲染的行：计划标注在前、确定性点位在后（模板里不做 spread，免得每次渲染新建数组） */
+const allRows = computed<MarkRow[]>(() => [...markRows.value, ...detRows.value]);
+
+/** 均线支撑压力只进读数不上图（主图已有均线曲线），与波段锚点一起作为点位图层的说明行 */
+const detSummary = computed<string>(() => {
+  const lv = levels.value;
+  if (!lv || (!layers.value.fib && !layers.value.pivot)) return '';
+  const parts: string[] = [];
+  if (lv.swing) {
+    const dir = lv.swing.direction === 'up' ? '上行' : '下行';
+    parts.push(`锚定${dir}波段 ${fmtPrice(lv.swing.low)}~${fmtPrice(lv.swing.high)}`);
+  }
+  if (lv.ma) {
+    parts.push(`均线${lv.ma.alignment}`);
+    if (lv.ma.supportMa) parts.push(`支撑 MA${lv.ma.supportMa.period} ${fmtPrice(lv.ma.supportMa.value)}`);
+    if (lv.ma.resistanceMa) parts.push(`压力 MA${lv.ma.resistanceMa.period} ${fmtPrice(lv.ma.resistanceMa.value)}`);
+  }
+  if (lv.atr != null) parts.push(`ATR ${lv.atr}（${lv.atrPct ?? '—'}%）`);
+  return parts.join(' · ');
+});
 
 /** 加载 S9 技术指标读数（仅 A 股个股；失败静默，不影响图表） */
 async function loadIndicators(): Promise<void> {
@@ -803,7 +1291,7 @@ function applyView() {
     // 分时锁定为全天框架：禁用缩放与拖动
     chart.setZoomEnabled(false);
     chart.setScrollEnabled(false);
-    renderMarks(); // 分时不叠加标注，此处即清除上一个视图的 overlay
+    renderOverlays(); // 分时不叠加标注，此处即清除上一个视图的 overlay
     void loadTrends();
   } else {
     trend.value = null; // 离开分时清空盘口数据条
@@ -837,6 +1325,7 @@ function setupChart() {
   chart.createIndicator('VOL', false, { id: 'vol_pane', height: subPaneHeight() });
   applyView();
   void loadMarks();
+  void loadLevels();
   observeResize();
 }
 
@@ -879,12 +1368,12 @@ function onClosed() {
   trend.value = null;
   indicators.value = null;
   marks.value = [];
+  levels.value = null;
   tab.value = 'day';
   // 不重置的话，只要打开过一次 Agent 页签，此后每次开弹窗都会立刻挂载对话栏、
   // 建 WS 并 find-or-create 会话，懒挂载从第二次起就失效了
   sideTab.value = 'plan';
   agentEverOpened.value = false;
-  planHorizon.value = 'next_session';
 }
 
 const tipText = computed(() =>
@@ -995,11 +1484,21 @@ const trendStats = computed<TrendStat[] | null>(() => {
 
 const showStats = computed(() => tab.value === 'trend' && trendStats.value !== null);
 
-// 标签切换：切换主图形态并重载数据
-watch(tab, () => applyView());
+// 标签切换：切换主图形态并重载数据；点位测算按周期取（日线短期波段、周线中长期波段），需重拉
+watch(tab, () => {
+  applyView();
+  void loadLevels();
+});
 
-// 图层开关变化只需重绘，不必重取数据
-watch(layers, () => renderMarks(), { deep: true });
+// 图层开关变化只需重绘，不必重取数据（点位已随周期预先拉好）。
+// 推演是唯一例外：它按需取数，打开时才拉，避免每次开弹窗都白跑两个请求
+watch(layers, () => renderOverlays(), { deep: true });
+watch(
+  () => layers.value.projection,
+  () => void loadProjection(),
+);
+// 切周期后推演可能从「可用」变「不可用」（σ 是日线口径），重判一次
+watch(tab, () => void loadProjection());
 
 // 切到资金面/筹码再切回图表时容器尺寸变过，重算一次副图高度
 watch(viewMode, (m) => {
@@ -1010,12 +1509,16 @@ watch(viewMode, (m) => {
 watch([code, secid], () => {
   viewMode.value = 'chart'; // 切标的回到图表视图
   marks.value = [];
+  levels.value = null;
   if (visible.value && chart) void loadMarks();
   if (tab.value !== 'day') {
-    tab.value = 'day'; // 触发 watch(tab) → applyView
+    tab.value = 'day'; // 触发 watch(tab) → applyView + loadLevels
     return;
   }
-  if (visible.value && chart) applyView();
+  if (visible.value && chart) {
+    applyView();
+    void loadLevels();
+  }
 });
 </script>
 
@@ -1088,23 +1591,39 @@ watch([code, secid], () => {
           <div ref="chartEl" class="kline-chart" />
           <div v-if="error" class="kline-error">{{ error }}</div>
         </div>
-        <!-- 图层开关：默认只开当前计划与支撑压力 -->
-        <div v-if="viewMode === 'chart' && marks.length" class="kline-layers">
+        <!--
+          图层开关。计划相关的几档只在有标注时才有意义，故按 marks.length 显示；
+          黄金分割/枢轴是算出来的，与有没有计划无关，只要在图表视图就常驻可选。
+        -->
+        <div v-if="viewMode === 'chart' && tab !== 'trend'" class="kline-layers">
           <span class="kline-layers__label">图层</span>
-          <el-checkbox v-model="layers.currentPlan" size="small">当前计划</el-checkbox>
-          <el-checkbox v-model="layers.supportResistance" size="small">支撑/压力</el-checkbox>
-          <el-checkbox v-model="layers.structure" size="small">结构</el-checkbox>
-          <el-checkbox v-model="layers.manual" size="small">手工标注</el-checkbox>
-          <el-checkbox v-model="layers.history" size="small">历史/失效</el-checkbox>
+          <template v-if="marks.length">
+            <el-checkbox v-model="layers.currentPlan" size="small">当前计划</el-checkbox>
+            <el-checkbox v-model="layers.supportResistance" size="small">支撑/压力</el-checkbox>
+            <el-checkbox v-model="layers.manual" size="small">手工标注</el-checkbox>
+            <el-checkbox v-model="layers.history" size="small">历史/失效</el-checkbox>
+          </template>
+          <el-checkbox v-model="layers.fib" size="small">黄金分割</el-checkbox>
+          <el-checkbox v-model="layers.pivot" size="small">枢轴</el-checkbox>
+          <el-checkbox v-model="layers.projection" :disabled="!canProject" size="small">
+            走势推演
+          </el-checkbox>
         </div>
-        <!-- 标注清单（只读；增删改由对话中的 agent 完成） -->
-        <div v-if="viewMode === 'chart' && markRows.length" class="kline-marks">
-          <div v-for="m in markRows" :key="m.id" class="kline-marks__row">
+        <!-- 推演口径说明。措辞刻意不写「95% 概率落在」：锥是按历史波动外推的量级参考，不是置信区间 -->
+        <div v-if="viewMode === 'chart' && layers.projection && projectionNote" class="kline-det-sum">
+          {{ projectionNote }}
+        </div>
+        <!-- 点位测算说明：波段锚点 + 均线支撑压力 + ATR（均线只给读数，不上图） -->
+        <div v-if="viewMode === 'chart' && detSummary" class="kline-det-sum">{{ detSummary }}</div>
+        <!-- 只读清单：上半是计划标注（增删改由对话中的 agent 完成），下半是确定性点位 -->
+        <div v-if="viewMode === 'chart' && allRows.length" class="kline-marks">
+          <div v-for="m in allRows" :key="m.id" class="kline-marks__row">
             <span class="kline-marks__kind" :style="{ color: m.color, borderColor: m.color }">
               {{ m.kindLabel }}
             </span>
             <span class="kline-marks__label">{{ m.label }}</span>
-            <span class="kline-marks__where num">{{ m.where }}</span>
+            <span v-if="m.where" class="kline-marks__where num">{{ m.where }}</span>
+            <span v-if="m.dist" class="kline-marks__dist num">{{ m.dist }}</span>
             <span v-if="m.note" class="kline-marks__note">{{ m.note }}</span>
           </div>
         </div>
@@ -1120,7 +1639,6 @@ watch([code, secid], () => {
           <SymbolTradePlanPanel
             v-if="sideTab === 'plan'"
             :key="planKey"
-            v-model:horizon="planHorizon"
             :code="code"
             :name="name"
             @generate="onGeneratePlan"
@@ -1395,6 +1913,18 @@ watch([code, secid], () => {
 }
 .kline-marks__where {
   flex-shrink: 0;
+  color: var(--text-2);
+}
+.kline-marks__dist {
+  flex-shrink: 0;
+  color: var(--text-2);
+  opacity: 0.85;
+}
+/* 点位测算说明行：比清单更轻，作为图层的一句话交代 */
+.kline-det-sum {
+  margin-top: 8px;
+  font-size: 11px;
+  line-height: 1.6;
   color: var(--text-2);
 }
 .kline-marks__note {

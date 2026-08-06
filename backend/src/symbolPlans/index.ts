@@ -1,32 +1,37 @@
 import type { FastifyInstance } from 'fastify';
-import type { SymbolPlanHorizon } from '@stock-agent/shared';
 import * as repo from './repo';
 import { listPlanMarks } from './markSync';
 import { evaluateAllLivePlans, evaluatePlanById } from './evaluate';
 import { prepareContext } from './orchestrator';
+import { regenerateStalePlans } from './regenerate';
 import { CAPABILITIES, CAPABILITY_PROBED_AT } from './capability';
+import { CONE_STEPS, buildCone } from './projection';
+import { calibrationOf, settleDueForecasts } from './forecast';
+import { getKline } from '../market/eastmoney';
 import { defineModuleSchedules } from '../scheduling/defineModuleSchedules';
 
 // 标的技术交易计划模块：证据层 + 候选目录 + 计划版本 + 条件求值。
 // 计划生成由 agent 工具触发（走统一 gateway），本模块只提供只读与复核路由。
 // 一行 registerSymbolPlansModule(app) 接入，删除即整模块下线。
-/** horizon 白名单：非法值不得静默按 3 天有效期处理 */
-const HORIZONS: SymbolPlanHorizon[] = ['next_session', 'swing'];
-const parseHorizon = (v: unknown): SymbolPlanHorizon | null =>
-  typeof v === 'string' && HORIZONS.includes(v as SymbolPlanHorizon) ? (v as SymbolPlanHorizon) : null;
-
 export function registerSymbolPlansModule(app: FastifyInstance): void {
   /** 当前生效计划 */
-  app.get<{ Querystring: { code?: string; horizon?: SymbolPlanHorizon } }>(
-    '/api/symbol-plans/active',
-    (req, reply) => {
-      const code = req.query?.code?.trim();
-      if (!code) return reply.code(400).send({ ok: false, error: '缺少 code' });
-      const horizon = parseHorizon(req.query?.horizon ?? 'next_session');
-      if (!horizon) return reply.code(400).send({ ok: false, error: 'horizon 非法' });
-      return { ok: true, data: repo.getActivePlan(code, horizon) };
-    },
-  );
+  app.get<{ Querystring: { code?: string } }>('/api/symbol-plans/active', (req, reply) => {
+    const code = req.query?.code?.trim();
+    if (!code) return reply.code(400).send({ ok: false, error: '缺少 code' });
+    return { ok: true, data: repo.getActivePlan(code) };
+  });
+
+  /**
+   * 最新一版计划，含失效 / 过期 / 被替代。**只给展示**，业务判定用 /active。
+   *
+   * 面板必须走这个口：/active 在计划失效后返回 null，照它渲染就会把
+   * 「计划刚失效、原因在这儿」显示成「你还没生成过计划」，用户视角是计划凭空消失。
+   */
+  app.get<{ Querystring: { code?: string } }>('/api/symbol-plans/latest', (req, reply) => {
+    const code = req.query?.code?.trim();
+    if (!code) return reply.code(400).send({ ok: false, error: '缺少 code' });
+    return { ok: true, data: repo.getLatestPlan(code) };
+  });
 
   /** 历史版本（不可覆盖，全部保留） */
   app.get<{ Querystring: { code?: string; limit?: string } }>(
@@ -53,19 +58,16 @@ export function registerSymbolPlansModule(app: FastifyInstance): void {
    * 预备上下文与候选目录（只读，不生成计划）。
    * 供前端「生成计划」前预览证据，也供调试。真正生成走 agent 工具。
    */
-  app.post<{ Body: { code?: string; name?: string; secid?: string; horizon?: SymbolPlanHorizon } }>(
+  app.post<{ Body: { code?: string; name?: string; secid?: string } }>(
     '/api/symbol-plans/prepare',
     async (req, reply) => {
       const code = req.body?.code?.trim();
       if (!code) return reply.code(400).send({ ok: false, error: '缺少 code' });
-      const horizon = parseHorizon(req.body?.horizon ?? 'next_session');
-      if (!horizon) return reply.code(400).send({ ok: false, error: 'horizon 非法' });
       try {
         const snap = await prepareContext({
           code,
           name: req.body?.name,
           secid: req.body?.secid,
-          horizon,
         });
         return {
           ok: true,
@@ -131,6 +133,42 @@ export function registerSymbolPlansModule(app: FastifyInstance): void {
     return { ok: true };
   });
 
+  /**
+   * 走势推演：波动率锥（纯算术）+ 各情景的模型主观概率与历史记录条数。
+   *
+   * 概率原样回传但不参与任何计算，前端必须标注「模型主观估计，未经校准」。
+   * 锥与概率放同一个响应只是省一次往返，两者语义完全独立：
+   * 锥说的是「按历史波动会散到哪」，概率说的是「模型觉得往哪走」。
+   */
+  app.get<{ Querystring: { code?: string; steps?: string; secid?: string } }>(
+    '/api/symbol-plans/projection',
+    async (req, reply) => {
+      const code = req.query?.code?.trim();
+      if (!code) return reply.code(400).send({ ok: false, error: '缺少 code' });
+      const steps = Math.min(60, Math.max(1, Number(req.query?.steps ?? CONE_STEPS.short) || 5));
+      try {
+        // 指数/ETF 只能按 secid 取，缺了会按 code 猜到另一只标的上
+        const bars = await getKline(code, 'day', 200, req.query?.secid?.trim() || undefined);
+        const cone = buildCone(bars, steps);
+        const plan = repo.getActivePlan(code);
+        const scenarios = (plan?.scenarios ?? [])
+          .filter((s) => s.subjectiveProbabilityPct != null)
+          .map((s) => ({
+            id: s.id,
+            rank: s.rank,
+            name: s.name,
+            probabilityPct: s.subjectiveProbabilityPct!,
+            basis: s.probabilityBasis ?? null,
+            calibration: calibrationOf(s.subjectiveProbabilityPct!),
+          }));
+        return { ok: true, data: { cone, scenarios } };
+      } catch (e) {
+        req.log.error(e);
+        return reply.code(500).send({ ok: false, error: '推演取数失败，请稍后重试' });
+      }
+    },
+  );
+
   /** 能力矩阵：前端据此显示「未覆盖范围」 */
   app.get('/api/symbol-plans/capabilities', () => ({
     ok: true,
@@ -159,6 +197,34 @@ export function registerSymbolPlansModule(app: FastifyInstance): void {
         defaultEnabled: true,
         run: async () => {
           await evaluateAllLivePlans();
+        },
+      },
+      // 必须排在 closeEval 之后：失效/过期是那一步判定并落库的，
+      // 抢在它前面跑的话每天都只会重算「昨天就已失效」的那批，今天新失效的要等到明天。
+      {
+        id: 'symbolPlans.closeRegenerate',
+        label: '标的计划收盘后自动重算失效计划（15:30）',
+        defaultCron: '30 15 * * 1-5',
+        defaultEnabled: true,
+        run: async () => {
+          const s = await regenerateStalePlans();
+          console.log(
+            `[symbolPlans] 收盘重算：待重算 ${s.stale}，成功 ${s.regenerated}，失败 ${s.failed}，顺延 ${s.deferred}`,
+          );
+        },
+      },
+      // 概率预测核对。放在收盘之后，用的是已收出的日线；
+      // 这一步不改变界面上的任何结论，只是让模型报的那个数以后有机会变准——不记录就永远没机会。
+      {
+        id: 'symbolPlans.settleForecasts',
+        label: '情景概率预测核对（15:45）',
+        defaultCron: '45 15 * * 1-5',
+        defaultEnabled: true,
+        run: async () => {
+          const s = await settleDueForecasts();
+          console.log(
+            `[symbolPlans] 预测核对：待判 ${s.checked}，兑现 ${s.settled.hit}，落空 ${s.settled.miss}，超时 ${s.settled.timeout}`,
+          );
         },
       },
     ],

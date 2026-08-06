@@ -1,7 +1,6 @@
 import type {
   CandidateCatalog,
   SymbolPhaseReading,
-  SymbolPlanHorizon,
   SymbolTechnicalContext,
   SymbolTradePlan,
   SymbolTradePlanProposal,
@@ -81,7 +80,6 @@ export interface PrepareInput {
   code: string;
   name?: string;
   secid?: string;
-  horizon: SymbolPlanHorizon;
   /**
    * 账户权益与持股。可不传——不传时本函数自取实时持仓，
    * 因为调用方（agent 工具、HTTP 路由）都拿不到这两个值，依赖调用方传参等于永远算不出仓位。
@@ -222,7 +220,7 @@ function buildPositionContext(acc: AccountReading, risk: SymbolTradePlan['risk']
  * 阶段/动作/风险全部在这里由代码算定，LLM 之后只能挑候选 ID。
  */
 export async function prepareContext(input: PrepareInput): Promise<CachedContext> {
-  const active = repo.getActivePlan(input.code, input.horizon);
+  const active = repo.getActivePlan(input.code);
   const existingMarks = listMarks(input.code).length;
 
   // 大盘阶段：读已有快照（不触发重算，避免拖慢工具）。取不到按未知处理，
@@ -246,7 +244,6 @@ export async function prepareContext(input: PrepareInput): Promise<CachedContext
     code: input.code,
     name: input.name,
     secid: input.secid,
-    horizon: input.horizon,
     boardStage: board.boardStage,
     // 必须把整份滞回状态回传：只给 phase 会让 pendingBars 永远停在 1，
     // requiredBars=2 的四个阶段（筑底/修复/上升/加速）就永远无法迁移。
@@ -260,7 +257,6 @@ export async function prepareContext(input: PrepareInput): Promise<CachedContext
     context: built.context,
     catalog: built.catalog,
     dayBars: built.dayBars,
-    horizon: input.horizon,
     totalEquity: account.totalEquity,
     currentShares: account.currentShares,
   });
@@ -341,10 +337,10 @@ export function submitProposal(
     ]);
   }
   const validFrom = new Date().toISOString();
-  const expiresAt =
-    proposal.horizon === 'next_session'
-      ? new Date(Date.now() + 2 * 86_400_000).toISOString()
-      : new Date(Date.now() + 28 * 86_400_000).toISOString();
+  // 计划有效期固定 4 周。合并车道前次日计划只给 2 天，波段给 28 天；
+  // 现在一份计划同时装着 60 分钟级触发与周线级目标，按短的算会让周线部分刚生效就过期，
+  // 短周期那部分的过时风险改由时间止损（TIME_STOP_BARS 根日线）与每日复核兜住。
+  const expiresAt = new Date(Date.now() + 28 * 86_400_000).toISOString();
 
   const compileInput: CompileInput = {
     context: snap.context,
@@ -364,11 +360,7 @@ export function submitProposal(
   return compileAndSavePlan(compileInput);
 }
 
-/**
- * 二次失败后的降级：落观察计划。
- * horizon 取快照自身的，不接受调用方传入——传错会让 supersedeOthers 去清另一条车道的真实计划，
- * 正是 validateProposal 里 horizon 校验要堵的洞，降级路径不能绕开。
- */
+/** 二次失败后的降级：落观察计划 */
 export function fallbackDraft(
   contextId: string,
   reason: string,
@@ -378,7 +370,6 @@ export function fallbackDraft(
   if (!snap) return null;
   return saveDraftObservationPlan({
     context: snap.context,
-    horizon: snap.context.horizon,
     risk: snap.risk,
     positionContext: snap.context.positionContext,
     execution: snap.execution,

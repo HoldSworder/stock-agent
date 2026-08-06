@@ -5,7 +5,7 @@ import { api } from '@/api';
 import AgentTrace from '@/components/AgentTrace.vue';
 import { useChatStream, type UIMsg } from '@/composables/chatStream';
 import type { Step } from '@/composables/agentTrace';
-import type { ChatMessage, SymbolPlanHorizon } from '@stock-agent/shared';
+import type { ChatMessage } from '@stock-agent/shared';
 
 /**
  * 标的专属对话栏：按 code find-or-create 一个长期跟踪会话，历史随标的常驻。
@@ -102,26 +102,22 @@ function quickAsk(text: string): void {
   void send({ content: text });
 }
 
-/** 一键生成计划的两条车道：气泡里只显示短句，完整指令由后端按 planIntent 注入 */
-const PLAN_BUTTONS: Array<{ horizon: SymbolPlanHorizon; label: string; ask: string }> = [
-  { horizon: 'next_session', label: '下一交易日计划', ask: '生成下一交易日的技术交易计划' },
-  { horizon: 'swing', label: '1~4周波段计划', ask: '生成未来 1~4 周波段的技术交易计划' },
-];
+/** 气泡里只显示这句短话，完整的工具序列指令由后端按 planIntent 注入 */
+const PLAN_ASK = '生成本标的的技术交易计划';
 
 /**
- * 生成指定车道的计划。供本组件按钮与父组件（计划页签空状态）调用。
- * 本组件按钮 busy 时已置灰，但父组件那两个按钮够不到这个状态，
+ * 生成技术交易计划。供本组件按钮与父组件（计划页签空状态）调用。
+ * 本组件按钮 busy 时已置灰，但父组件那个按钮够不到这个状态，
  * 所以在飞时要出声——否则用户点完只看到页签切过去、没有新气泡，像是点了个坏按钮。
  */
-async function genPlan(horizon: SymbolPlanHorizon): Promise<void> {
+async function genPlan(): Promise<void> {
   // 父组件刚切过来时会话可能还在建，等它落定再发
   if (!busy.value) await loadPromise;
   if (busy.value) {
     ElMessage.warning('当前对话还在运行，等它结束或点「停止」后再生成');
     return;
   }
-  const ask = PLAN_BUTTONS.find((b) => b.horizon === horizon)?.ask ?? '生成技术交易计划';
-  await send({ content: ask, planIntent: horizon });
+  await send({ content: PLAN_ASK, planIntent: true });
 }
 
 watch(
@@ -176,16 +172,14 @@ defineExpose({ genPlan });
     <div class="sym-chat__composer">
       <div class="sym-chat__plan">
         <el-button
-          v-for="b in PLAN_BUTTONS"
-          :key="b.horizon"
           size="small"
           type="primary"
           plain
           :disabled="busy || loading"
           class="sym-chat__plan-btn"
-          @click="genPlan(b.horizon)"
+          @click="genPlan()"
         >
-          生成{{ b.label }}
+          生成技术交易计划
         </el-button>
       </div>
       <el-input

@@ -219,6 +219,69 @@ export const symbolTradePlanEvents = sqliteTable(
   }),
 );
 
+/**
+ * 事件类条件的锁存记录。金叉、上穿这类条件只在发生的那一根为真，
+ * 而情景要求全部触发条件同时成立——不锁存的话「周线金叉 + 日线突破」永远凑不齐。
+ *
+ * 唯一键是 (plan_id, condition_id)：锁存语义是「这份计划的这个条件此生已达成一次」，
+ * bar_time 只作记录不进键。进了键就变成每根 bar 各锁一条，锁存也就不成其为锁存。
+ * 不随版本号清理：新版本本来就是新 plan_id，天然隔离。
+ */
+export const symbolPlanConditionLatches = sqliteTable(
+  'symbol_plan_condition_latches',
+  {
+    id: text('id').primaryKey(),
+    planId: text('plan_id').notNull(),
+    conditionId: text('condition_id').notNull(),
+    /** 命中时所在的 bar 时间，仅供复盘 */
+    barTime: text('bar_time'),
+    latchedAt: text('latched_at').notNull(),
+  },
+  (t) => ({
+    byPlanCond: uniqueIndex('idx_plan_latch_plan_cond').on(t.planId, t.conditionId),
+  }),
+);
+
+/**
+ * 情景概率预测记录（计划 S5）。
+ *
+ * 模型报的主观概率是个未经校准的数——界面已经这么标注了，但只标注不记录，
+ * 它就永远只是个未经校准的数。每份计划的每个情景在这里存一行，到期由收盘任务
+ * 自动比对实际走势判定 hit / miss，攒够样本才有可能算出「模型报 70% 时实际兑现多少」。
+ *
+ * 唯一键 (plan_id, scenario_id)：同一份计划的同一情景只记一次预测。
+ * 计划出新版本就是新 plan_id，天然隔离，不必按版本清理。
+ * outcome 为 null 表示尚未到期，settled_at 记判定时间。
+ */
+export const symbolPlanForecasts = sqliteTable(
+  'symbol_plan_forecasts',
+  {
+    id: text('id').primaryKey(),
+    planId: text('plan_id').notNull(),
+    planVersion: integer('plan_version').notNull(),
+    code: text('code').notNull(),
+    scenarioId: text('scenario_id').notNull(),
+    scenarioRank: text('scenario_rank').notNull(),
+    /** 模型报的主观概率 0~100 */
+    probabilityPct: real('probability_pct').notNull(),
+    probabilityBasis: text('probability_basis'),
+    /** 判定用的目标价与失效价，落库时冻结，事后不受计划改版影响 */
+    targetPrice: real('target_price'),
+    invalidPrice: real('invalid_price'),
+    basePrice: real('base_price').notNull(),
+    /** 到期日（含），过了这天无论如何都要判定 */
+    dueDate: text('due_date').notNull(),
+    /** hit=先到目标价，miss=先破失效价，timeout=到期都没到 */
+    outcome: text('outcome'),
+    settledAt: text('settled_at'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({
+    byPlanScenario: uniqueIndex('idx_plan_forecast_plan_scenario').on(t.planId, t.scenarioId),
+    byPending: index('idx_plan_forecast_pending').on(t.outcome, t.dueDate),
+  }),
+);
+
 /** 自选股镜像 */
 export const watchlist = sqliteTable('watchlist', {
   code: text('code').primaryKey(),

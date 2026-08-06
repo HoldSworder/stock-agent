@@ -3406,6 +3406,12 @@ export interface WatchSignal {
   at: string;
   /** 本信号在确定性管道中的去向（广播时附带，纯展示用） */
   disposition?: WatchDisposition;
+  /**
+   * 命中的标的计划条件来源。仅 tick 级计划条件的信号带此字段，
+   * 供 engine 把命中回写进计划事件流——rules 层是纯函数不落库，
+   * 不带上这几个 id 的话盘中触发只会飘过一条告警，计划详情里查不到任何痕迹。
+   */
+  planHit?: { planId: string; planVersion: number; conditionId: string };
 }
 
 /** 个股盯盘执行动作（可闭眼照做的明确动作） */
@@ -6217,6 +6223,37 @@ export const PLAYBOOK_RULE_CAPABILITY: Record<string, PlaybookRuleCapability> = 
 };
 
 /**
+ * 规则的时间语义。
+ * `state`：可持续成立，每轮按最新 bar 重算即可（收盘在 MA20 上方、MACD 柱在零轴上方…）。
+ * `event`：只在发生的那一根为真（金叉、上穿、触及）。多条件情景里若不做锁存，
+ * 「周线金叉 + 日线站上压力位」这种组合只要不落在同一根 bar 上就永远凑不齐。
+ */
+export type PlaybookRuleSemantics = 'state' | 'event';
+
+/**
+ * 判定规则语义。**必须按 relation / signal 判，不能按 kind 判**——
+ * 同一个 kind 下两种语义都有：macd 的 goldCross 是事件而 barAbove0 是状态，
+ * ma 的 crossUp 是事件而 above 是状态，priceLevel 五个 relation 混合。
+ * 按 kind 建表会把 macd 整体误判成事件，让「MACD 柱在零轴上方」被永久锁存。
+ */
+export function semanticsOf(rule: PlaybookRule): PlaybookRuleSemantics {
+  switch (rule.kind) {
+    case 'macd':
+    case 'kdj':
+      return rule.signal === 'goldCross' || rule.signal === 'deadCross' ? 'event' : 'state';
+    case 'ma':
+      return rule.relation === 'crossUp' || rule.relation === 'crossDown' ? 'event' : 'state';
+    case 'priceLevel':
+      return rule.relation === 'holdAbove' || rule.relation === 'holdBelow' ? 'state' : 'event';
+    case 'limit':
+      // 涨跌停是当根发生的事件，次日不再成立
+      return 'event';
+    default:
+      return 'state';
+  }
+}
+
+/**
  * 规则组：all=全部满足，any=任一满足。
  * MVP 不改这个 JSON 形状，已落库的 PlaybookSpec 无需迁移即可继续读取与回测（R18）。
  */
@@ -6521,8 +6558,66 @@ export interface SymbolPhaseReading {
   phaseModelVersion: string;
 }
 
-/** 计划期限：下一交易日 / 1-4 周波段 */
-export type SymbolPlanHorizon = 'next_session' | 'swing';
+/**
+ * 计划涉及的 K 线周期，由大到小。**周期序与可见性规则的唯一事实源**，
+ * 前端图表过滤、候选分层、风险锚定都必须从这里取，不许各处自己排一遍。
+ *
+ * 早先计划分 next_session / swing 两条期限车道，同一标的要生成两份互不相干的计划，
+ * 各自有一套有效期、时间止损与 triggerMode，用户还得在界面上手动切。
+ * 现在合并为一份：时间尺度改由每条价位/条件自己的 timeframe 表达
+ * —— 周线级压力位就是波段目标，60 分钟级上穿就是次日盘中触发，无需再分车道。
+ */
+export const PLAN_PERIODS = ['week', 'day', '60m'] as const;
+export type PlanPeriod = (typeof PLAN_PERIODS)[number];
+
+/**
+ * 全部 K 线周期由粗到细。仅用于比大小，与 PLAN_PERIODS（只有这三层会产候选）不是一回事：
+ * 图表可以停在月线或 15 分钟这些不产候选的周期上，可见性照样要判得出来。
+ */
+const PERIOD_ORDER: readonly KlinePeriod[] = [
+  'month',
+  'week',
+  'day',
+  '120m',
+  '60m',
+  '30m',
+  '15m',
+  '5m',
+];
+
+/** 周期粗细排名：数字越小周期越大 */
+export function planPeriodRank(p: KlinePeriod): number {
+  const i = PERIOD_ORDER.indexOf(p);
+  return i < 0 ? PERIOD_ORDER.length : i;
+}
+
+/**
+ * 图表处于 chartPeriod 时，timeframe=linePeriod 的计划线该不该画。
+ * 规则：**本周期及更大周期的线都画，更小周期的不画**。
+ * 看周线图时不该被一堆 60 分钟级触发线糊满；看 60 分钟图时周线压力位仍是有效边界。
+ */
+export function isPlanLineVisible(chartPeriod: KlinePeriod, linePeriod: KlinePeriod): boolean {
+  return planPeriodRank(linePeriod) <= planPeriodRank(chartPeriod);
+}
+
+/**
+ * 持有时长口径：短期 = 次日到本周内要完成的动作，中长期 = 数周到数月的仓位安排。
+ *
+ * 界面按这个分栏而不是按 K 线周期，是因为「60 分钟」「周线」说的是判定用哪根 bar，
+ * 回答不了「这条线是让我明天就动手，还是拿几个月」——而后者才是决定要不要现在下单的问题。
+ * 唯一事实源放在这里，禁止前端各页各判一遍。
+ */
+export type PlanSpan = 'short' | 'long';
+
+export function planSpanOf(tf: KlinePeriod): PlanSpan {
+  // 比日线更粗的（周、月）才算中长期；日线及更细的都在一周内要有结论
+  return planPeriodRank(tf) < planPeriodRank('day') ? 'long' : 'short';
+}
+
+export const PLAN_SPAN_LABEL: Record<PlanSpan, string> = {
+  short: '短期（次日到本周内）',
+  long: '中长期（数周到数月）',
+};
 
 export type SymbolPlanAction = 'wait' | 'probe' | 'add' | 'hold' | 'reduce' | 'exit';
 
@@ -6534,6 +6629,19 @@ export type SymbolPlanStatus =
   | 'completed'
   | 'expired'
   | 'superseded';
+
+/**
+ * 「仍然生效」的状态。盘中引擎求值、图上挂辅助线、给可下单指令都只认这几种。
+ *
+ * 放在 shared 作唯一事实源：前端要用它区分「计划刚失效」和「从未生成过计划」——
+ * 两者都拿不到生效计划，但一个该显示失效原因，另一个该引导去生成，
+ * 各写一套白名单迟早对不上，用户看到的就是「计划无缘无故消失了」。
+ */
+export const PLAN_LIVE_STATUSES: readonly SymbolPlanStatus[] = ['draft', 'active', 'triggered'];
+
+export function isPlanLive(status: SymbolPlanStatus): boolean {
+  return PLAN_LIVE_STATUSES.includes(status);
+}
 
 export type TradeLevelRole =
   | 'support'
@@ -6554,6 +6662,17 @@ export interface TradeLevel {
   label: string;
   rationale: string;
   evidenceIds: string[];
+  /**
+   * 该价位由哪些来源汇聚而成，原样透传自被选中的 CandidateLevel.sources。
+   *
+   * 不带这个字段的话，图上的黄金分割虚线与计划价位线就是两套互不相认的东西：
+   * 用户打开分割图层后多出一堆虚线，却无从判断哪条正是计划采纳的触发线来源。
+   * candidateId（形如 lvl:week:0:12.340）只编码了周期与排名，反查不出来源。
+   *
+   * 可选：本字段晚于计划表上线，历史行解析出来是 undefined，此时前端不显示溯源即可，
+   * 设成必填等于对老计划撒谎。
+   */
+  sources?: CandidateLevelSource[];
 }
 
 /** 计划条件直接包装并扩展现有 PlaybookRule，不发明第二套 DSL */
@@ -6566,6 +6685,64 @@ export interface PlanCondition {
   evidenceIds: string[];
 }
 
+/**
+ * 条件求值频率。放在 shared 是因为前端也要据此逐条件显示「盘中触发 / 收盘确认」
+ * —— 早先这个信息是计划级的单个 execution.triggerMode，由 horizon 一刀切定成
+ * swing=收盘确认、next_session=盘中预警，跟条件实际怎么判完全脱节：
+ * 一份 swing 计划里的「上穿 12.30」明明是 tick 级触发，界面却写着收盘确认。
+ *
+ * 只有 priceLevel 的 crossUp/crossDown/touch 能按 tick 做 O(1) 比较；
+ * holdAbove/holdBelow 是收盘口径，与均线/MACD/量价一样必须等整根 bar 收完。
+ */
+export function cadenceOf(cond: PlanCondition): 'tick' | 'bar' {
+  if (cond.rule.kind === 'priceLevel') {
+    return cond.rule.relation === 'holdAbove' || cond.rule.relation === 'holdBelow' ? 'bar' : 'tick';
+  }
+  return 'bar';
+}
+
+/**
+ * 把按基准价算出的股数等比换算到另一个成交价（向下取整到整手，A 股最小交易单位）。
+ *
+ * 风险金额 = 股数 × (成交价 − 止损价) 是固定的，就是风险预算本身，所以股数与
+ * 「成交价到止损的距离」成反比。计划的建仓股数在准备上下文时按现价算出，
+ * 那时 LLM 还没挑触发价；若照搬到更高的触发价上下单，实际风险距离变大，
+ * 亏损会同比例超出预算——一次就能把「单笔最多亏 1%」变成亏 1.5%。
+ *
+ * @returns 换算后的整手股数；入参不成立（价格非正、成交价不在止损上方）时返回 null，不猜。
+ */
+export function rescaleSharesToEntry(
+  shares: number,
+  basisPrice: number,
+  entryPrice: number,
+  stopPrice: number,
+): number | null {
+  if (!(shares > 0) || !(basisPrice > stopPrice) || !(entryPrice > stopPrice) || !(stopPrice > 0)) {
+    return null;
+  }
+  return Math.floor((shares * (basisPrice - stopPrice)) / (entryPrice - stopPrice) / 100) * 100;
+}
+
+/**
+ * 主路径触发条件的待办进度：排序 + 计数 + 还差哪几条。
+ *
+ * 放在 shared 而不是组件里，是为了让「只统计触发条件」这条不变式能被自检锁住——
+ * 失效条件是反向语义，满足它意味着计划作废，一旦混进「已满足 M/N」就会把
+ * 「快触发了」和「快作废了」显示成同一件事。
+ *
+ * @param conditions 主路径的**触发**条件（不要传失效条件）
+ * @param satisfied 逐条件的命中判定；尚未复核时传 () => undefined
+ */
+export function planConditionProgress(
+  conditions: PlanCondition[],
+  satisfied: (id: string) => boolean | undefined,
+): { ordered: PlanCondition[]; done: number; total: number; missing: PlanCondition[] } {
+  // 必要条件置顶：required 决定「非它不可」还是「锦上添花」，不排在前面等于没这个字段
+  const ordered = [...conditions].sort((a, b) => Number(b.required) - Number(a.required));
+  const missing = ordered.filter((c) => !satisfied(c.id));
+  return { ordered, done: ordered.length - missing.length, total: ordered.length, missing };
+}
+
 export interface TradeScenario {
   id: string;
   rank: 'primary' | 'alternative' | 'risk';
@@ -6574,6 +6751,46 @@ export interface TradeScenario {
   action: SymbolPlanAction;
   invalidConditions: PlanCondition[];
   targetLevelIds: string[];
+  /** 模型主观概率，只展示不参与计算；口径见 SymbolTradePlanProposal.scenarioSelections */
+  subjectiveProbabilityPct?: number;
+  probabilityBasis?: string;
+}
+
+/**
+ * 波动率锥：按 σ_N = σ_日 × √N 张开的未来价格区间。
+ * 纯算术，不含任何模型判断——它回答的是「按历史波动，价格大致会散到哪」，
+ * 不回答「会往哪走」。方向那一层由情景折线表达，两者刻意分开画。
+ */
+export interface ProjectionCone {
+  /** 计算基准价（最后一根收盘） */
+  basePrice: number;
+  /** 日对数收益标准差（小数，非百分比） */
+  sigmaDaily: number;
+  /** 参与估计的样本根数 */
+  sampleSize: number;
+  /** 未来第 step 根（1-based）的上下轨 */
+  steps: Array<{
+    step: number;
+    p1Low: number;
+    p1High: number;
+    p2Low: number;
+    p2High: number;
+  }>;
+}
+
+/** 走势推演响应：算术锥 + 模型主观概率，两层语义独立，界面上必须分开表述 */
+export interface SymbolPlanProjection {
+  cone: ProjectionCone | null;
+  scenarios: Array<{
+    id: string;
+    rank: 'primary' | 'alternative' | 'risk';
+    name: string;
+    /** 模型主观估计，未经校准。只展示，不参与计算 */
+    probabilityPct: number;
+    basis: string | null;
+    /** 同档位历史记录数与已判定/兑现数，样本不足时界面只显示记录数 */
+    calibration: { recorded: number; settled: number; hit: number };
+  }>;
 }
 
 /** 基准角色 */
@@ -6665,8 +6882,20 @@ export interface CandidateCondition {
   description: string;
   /** 由哪个候选价位展开而来（非价位类条件为 null） */
   fromLevelCandidateId: string | null;
-  /** 该条件适合承担的角色（触发 / 失效 / 目标） */
+  /**
+   * 该条件适合承担的角色（触发 / 失效 / 目标）。
+   * 已成立的条件会被摘掉 'invalidation'，见 alreadySatisfied。
+   */
   suitableFor: Array<'trigger' | 'invalidation' | 'target'>;
+  /**
+   * 建目录时这条规则**当下就已成立**。
+   *
+   * 存在的意义是拦住「出生即失效」的计划：失效条件的语义是「将来若发生则计划作废」，
+   * 拿一个已经发生的事实当失效条件，计划一落库、第一次复核就判失效——
+   * 用户看到的是一份写着 exit 却当场作废的计划，收盘重算还会每天再产一份。
+   * 对触发条件不是问题（「已经站上均线」本就可以是入场依据），故只摘 invalidation 用途。
+   */
+  alreadySatisfied?: boolean;
   evidenceIds: string[];
   capability: PlaybookRuleCapability;
 }
@@ -6676,7 +6905,6 @@ export interface CandidateCatalog {
   candidateModelVersion: string;
   /** 目录内容哈希，用于检测跨快照混用 */
   catalogHash: string;
-  horizon: SymbolPlanHorizon;
   levels: CandidateLevel[];
   conditions: CandidateCondition[];
   /** 各来源被裁掉的数量，禁止静默截断 */
@@ -6694,7 +6922,6 @@ export interface SymbolTechnicalContext {
   code: string;
   name: string;
   assetType: SymbolAssetType;
-  horizon: SymbolPlanHorizon;
   asOf: string;
   dataStatus: 'complete' | 'provisional' | 'degraded';
   /** 每周期一行读数，不含原始 K 线数组 */
@@ -6736,7 +6963,6 @@ export interface SymbolTradePlanProposal {
   contextId: string;
   candidateModelVersion: string;
   catalogHash: string;
-  horizon: SymbolPlanHorizon;
   summary: string;
   changes: string[];
   levelSelections: Array<{
@@ -6750,6 +6976,19 @@ export interface SymbolTradePlanProposal {
     conditionCandidateIds: string[];
     invalidConditionCandidateIds: string[];
     targetCandidateLevelIds: string[];
+    /**
+     * 模型对该情景的主观概率（0~100）。**只用于展示，禁止参与任何计算**。
+     *
+     * 这是一个未经校准的数：LLM 报 70% 时并不意味着这类判断长期兑现七成。
+     * 一旦它流进仓位、止损或告警的计算，事后就再也分不清某次超配是模型看错了
+     * 还是这个数本身没根——所以 risk.ts / evaluate.ts / 告警链路一律不读它，
+     * 由 selfcheck 扫源码强制（见 symbolPlanProjection.selfcheck.ts）。
+     *
+     * 每次落库 symbol_plan_forecasts，到期自动核对，这个数才有机会变准。
+     */
+    subjectiveProbabilityPct?: number;
+    /** 模型给出该概率的依据，一句话。空着就不显示，不编 */
+    probabilityBasis?: string;
   }>;
 }
 
@@ -6762,6 +7001,17 @@ export interface SymbolTradePlanRisk {
   suggestedPositionPct: number | null;
   timeStopBars: number | null;
   gapRiskNote: string | null;
+  /**
+   * 风险预算允许的持股数（已向下取整到整手）与需减持股数，直接取自 computeSizing。
+   * 只给百分比等于把「换算成能下单的量」甩给用户心算，而这一步恰恰最容易算错。
+   * 账户未接入时为 null——此时只能给百分比，界面必须照实说，不能拿 0 冒充。
+   */
+  allowedShares: number | null;
+  reduceShares: number | null;
+  /** 有效损失距离 %（结构位与 2×ATR 取大，再叠加跳空与费用缓冲） */
+  effectiveLossPct: number | null;
+  /** 上面这些股数按哪个价算出。实际挂单价不同于它时必须等比换算，见 rescaleSharesToEntry */
+  sizingBasisPrice: number | null;
 }
 
 export interface SymbolTradePlanExitPlan {
@@ -6773,7 +7023,7 @@ export interface SymbolTradePlanExitPlan {
 }
 
 export interface SymbolTradePlanExecution {
-  triggerMode: 'intraday_alert' | 'close_confirmed';
+  // 无 triggerMode：触发口径按条件粒度由 cadenceOf(cond) 决定，见该函数注释
   chaseGuardAtr: number | null;
   maxPremiumPct: number | null;
   maxSpreadPct: number | null;
@@ -6786,7 +7036,6 @@ export interface SymbolTradePlan {
   code: string;
   name: string;
   assetType: SymbolAssetType;
-  horizon: SymbolPlanHorizon;
   status: SymbolPlanStatus;
   asOf: string;
   validFrom: string;

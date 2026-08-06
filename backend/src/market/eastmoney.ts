@@ -499,8 +499,9 @@ export function getKline(
   period: KlinePeriod = 'day',
   limit = 250,
   secid?: string,
+  opts: { fresh?: boolean } = {},
 ): Promise<KlineBar[]> {
-  return scheduleKline(code, period, limit, secid);
+  return scheduleKline(code, period, limit, secid, opts);
 }
 
 /**

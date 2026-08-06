@@ -10,8 +10,8 @@ import type {
   ChatSession,
   SymbolMark,
   SymbolPlanEvaluation,
+  SymbolPlanProjection,
   SymbolPlanEvent,
-  SymbolPlanHorizon,
   SymbolTradePlan,
   DailyPlanDetail,
   DailyPlanEvent,
@@ -71,6 +71,7 @@ import type {
   KlineBar,
   KlineCacheStats,
   KlinePeriod,
+  PriceLevels,
   BacktestRun,
   BacktestRunInput,
   BacktestRunListItem,
@@ -344,10 +345,22 @@ export const api = {
     unwrap<StockSuggest[]>(http.get('/search/suggest', { params: { q }, timeout: 8000 })),
   searchBoard: (q: string) =>
     unwrap<StockSuggest[]>(http.get('/search/board', { params: { q }, timeout: 8000 })),
-  getKline: (code: string, period: KlinePeriod = 'day', limit = 250, secid?: string) =>
+  /** @param fresh 跳过后端日线缓存的 10 分钟新鲜度窗口直接回源，仅供前台看盘轮询使用 */
+  getKline: (
+    code: string,
+    period: KlinePeriod = 'day',
+    limit = 250,
+    secid?: string,
+    fresh = false,
+  ) =>
     unwrap<KlineBar[]>(
       http.get('/kline', {
-        params: secid ? { secid, period, limit } : { code, period, limit },
+        params: {
+          ...(secid ? { secid } : { code }),
+          period,
+          limit,
+          ...(fresh ? { fresh: 1 } : {}),
+        },
         timeout: 15000,
       }),
     ),
@@ -749,6 +762,13 @@ export const api = {
   stockChips: (code: string) =>
     unwrap<StockChipDistribution>(http.get(`/stock/${code}/chips`, { timeout: 30000 })),
 
+  // S10 点位测算（黄金分割回撤/扩展、经典枢轴、均线结构、ATR）。
+  // period 必传：波段锚点取最近 60 根，日线给短期波段、周线给中长期波段。
+  priceLevels: (code: string, period: KlinePeriod, secid?: string) =>
+    unwrap<PriceLevels>(
+      http.get(`/stock/${code}/levels`, { params: { period, secid }, timeout: 30000 }),
+    ),
+
   // 数据源中心（统一管理外部取数：健康/配置/启停/统计）
   datasource: {
     list: () => unwrap<DataSourceInfo[]>(http.get('/datasource/list', { timeout: 20000 })),
@@ -964,8 +984,11 @@ export const api = {
 
   // 标的技术交易计划（生成走 agent 工具，这里只读 + 复核）
   symbolPlans: {
-    active: (code: string, horizon: SymbolPlanHorizon = 'next_session') =>
-      unwrap<SymbolTradePlan | null>(http.get('/symbol-plans/active', { params: { code, horizon } })),
+    active: (code: string) =>
+      unwrap<SymbolTradePlan | null>(http.get('/symbol-plans/active', { params: { code } })),
+    /** 最新一版（含失效/过期）。只用于展示，判定「有没有可执行计划」仍用 active */
+    latest: (code: string) =>
+      unwrap<SymbolTradePlan | null>(http.get('/symbol-plans/latest', { params: { code } })),
     history: (code: string, limit = 20) =>
       unwrap<SymbolTradePlan[]>(http.get('/symbol-plans/history', { params: { code, limit } })),
     detail: (id: string) =>
@@ -980,6 +1003,16 @@ export const api = {
     capabilities: () =>
       unwrap<{ probedAt: string; capabilities: Record<string, { verdict: string; note: string }> }>(
         http.get('/symbol-plans/capabilities'),
+      ),
+    /** 走势推演：波动率锥（算术）+ 情景的模型主观概率（只展示，不参与任何计算） */
+    projection: (code: string, steps: number, secid?: string) =>
+      unwrap<SymbolPlanProjection>(
+        http.get('/symbol-plans/projection', {
+          // secid 必须透传：指数/ETF 的日线只能按 secid 取，缺了会退化成按 code 取到另一只标的，
+          // 画出来的锥不是当前这张图的波动
+          params: { code, steps, ...(secid ? { secid } : {}) },
+          timeout: 20000,
+        }),
       ),
   },
 };

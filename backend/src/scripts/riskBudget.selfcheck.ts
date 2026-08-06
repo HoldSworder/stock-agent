@@ -1,7 +1,7 @@
 // 风险预算反推仓位自检（无框架，assert 断言）。
 // 运行：cd backend && ./node_modules/.bin/tsx src/scripts/riskBudget.selfcheck.ts
 import assert from 'node:assert/strict';
-import type { KlineBar } from '@stock-agent/shared';
+import { rescaleSharesToEntry, type KlineBar } from '@stock-agent/shared';
 import { atr, budgetForPhase, computeSizing, downGapP95 } from '../positions/riskBudget';
 
 /** 造一段平稳日线：每日振幅固定 amp（元），无跳空 */
@@ -101,4 +101,29 @@ assert.ok(capped.allowedWeightPct <= 10, '固定上限必须约束允许权重')
 assert.ok(capped.allowedWeightPct <= etf.allowedWeightPct, '加了固定上限只能更紧');
 assert.ok(capped.reduceShares > etf.reduceShares, '固定上限更紧时应要求减更多');
 
-console.log('✅ 风险预算反推仓位自检通过');
+// 9. 挂单价换算：股数按现价算出，但计划要求在更高的触发价才进场。
+// 不换算就照搬，实际亏损会同比例超出「单笔最多亏 x%」的约定——这条锁住的就是那次超配。
+{
+  const stop = 10;
+  const basis = 11; // 现价距止损 1 元
+  const entry = 12; // 触发价距止损 2 元，风险距离翻倍
+  const base = 2400;
+  assert.equal(
+    rescaleSharesToEntry(base, basis, basis, stop),
+    base,
+    '挂单价与基准价相同时股数不应变化',
+  );
+  const scaled = rescaleSharesToEntry(base, basis, entry, stop)!;
+  assert.equal(scaled, 1200, '风险距离翻倍时股数应减半');
+  assert.ok(
+    scaled * (entry - stop) <= base * (basis - stop),
+    '换算后的风险金额不得超过原风险预算',
+  );
+  assert.equal(scaled % 100, 0, '必须是整手');
+  // 触发价贴着止损时不得放大到天文数字之外的非法输入一律返回 null，不猜
+  assert.equal(rescaleSharesToEntry(base, basis, stop, stop), null, '成交价等于止损应返回 null');
+  assert.equal(rescaleSharesToEntry(base, basis, entry, 0), null, '止损价非正应返回 null');
+  assert.equal(rescaleSharesToEntry(0, basis, entry, stop), null, '基准股数为 0 应返回 null');
+}
+
+console.log('✅ 风险预算反推仓位自检通过（含挂单价股数换算）');

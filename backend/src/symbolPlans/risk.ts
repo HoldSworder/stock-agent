@@ -2,11 +2,12 @@ import type {
   CandidateCatalog,
   CandidateLevel,
   KlineBar,
+  KlinePeriod,
   MarketRegimePhase,
-  SymbolPlanHorizon,
   SymbolTechnicalContext,
   SymbolTradePlan,
 } from '@stock-agent/shared';
+import { planPeriodRank } from '@stock-agent/shared';
 import { budgetForPhase, computeSizing } from '../positions/riskBudget';
 
 const REGIME_PHASES: MarketRegimePhase[] = ['主升', '退潮', '反弹', '震荡'];
@@ -15,8 +16,17 @@ const REGIME_PHASES: MarketRegimePhase[] = ['主升', '退潮', '反弹', '震�
 // 结构止损 vs 2×ATR 取大、个股跳空 P95 缓冲、费用缓冲、按大盘阶段分层的单票上限。
 // 本文件只负责「从候选价位取结构止损」和「拼装 risk / execution」，不重算风险公式。
 
-/** 时间止损：次日计划 1 根，波段 10 根 */
-const TIME_STOP_BARS: Record<SymbolPlanHorizon, number> = { next_session: 1, swing: 10 };
+/**
+ * 时间止损根数，口径固定为**日线**。
+ * 候选目录的时间窗条件必须复用这份常量——两边各写一套的话，
+ * risk 字段说 10 根、候选却把 20 根标成「时间止损」，用户看到的是两个互相打架的数。
+ *
+ * 合并期限车道前这是 {next_session:1, swing:10}。次日车道的 1 根本身就有问题：
+ * 计划生效满 1 根日线就判时间止损，等于当天不触发就作废，
+ * 而 60 分钟级的触发条件根本没机会在一根日线内走完。
+ * 现在统一按日线 10 根，短周期条件靠自己的 timeframe 表达急迫程度。
+ */
+export const TIME_STOP_BARS = 10;
 
 /** 追涨保护：次日高开超过该 ATR 倍数不追（计划 9.5） */
 const CHASE_GUARD_ATR = 1.5;
@@ -28,11 +38,20 @@ export interface RiskInput {
   context: SymbolTechnicalContext;
   catalog: CandidateCatalog;
   dayBars: KlineBar[];
-  horizon: SymbolPlanHorizon;
   /** 账户总权益；未接入时传 0，此时只给风险距离不给建议仓位 */
   totalEquity: number;
   currentShares: number;
 }
+
+/**
+ * 结构止损的最细锚定周期。**只认日线及更大周期的支撑**。
+ *
+ * 候选目录改为 week/day/60m 三层出货后，离现价最近的支撑几乎总是 60 分钟级的。
+ * 而止损距离是反推仓位的分母：60 分钟级支撑常常只离现价 0.5%，
+ * 据此算出的仓位会比按日线支撑算的放大好几倍，一根日内长阴就能同时打穿止损和仓位上限。
+ * 60 分钟级的位子适合当盘中触发点，不能当「证明这笔交易逻辑错了」的证据。
+ */
+const STOP_ANCHOR_PERIOD: KlinePeriod = 'day';
 
 /**
  * 结构止损取值：优先用保底的最近确认摆动低点，其次用最近的支撑类候选。
@@ -43,7 +62,12 @@ export interface RiskInput {
  */
 export function pickStructuralStop(levels: CandidateLevel[], price: number): number | null {
   const supports = levels
-    .filter((l) => l.low < price && l.compatibleRoles.some((r) => r === 'support' || r === 'invalidation' || r === 'stop'))
+    .filter(
+      (l) =>
+        l.low < price &&
+        planPeriodRank(l.timeframe) <= planPeriodRank(STOP_ANCHOR_PERIOD) &&
+        l.compatibleRoles.some((r) => r === 'support' || r === 'invalidation' || r === 'stop'),
+    )
     .sort((a, b) => b.low - a.low); // 距现价最近的支撑在前
   // 保底候选（最近确认摆动低点）优先
   const guaranteed = supports.find((l) => l.guaranteed);
@@ -56,7 +80,7 @@ export interface AssembledRisk {
 }
 
 export function assembleRisk(input: RiskInput): AssembledRisk {
-  const { context, dayBars, horizon } = input;
+  const { context, dayBars } = input;
   const lastBar = dayBars[dayBars.length - 1];
   // 无行情时回落成全 null 的风险读数：这条路径本该降级成观察计划，
   // 直接解引用会把「准备上下文」整个打挂。
@@ -69,15 +93,18 @@ export function assembleRisk(input: RiskInput): AssembledRisk {
         atrPct: null,
         maxAccountRiskPct: budgetForPhase(null).singleTradeRiskPct,
         suggestedPositionPct: null,
-        timeStopBars: TIME_STOP_BARS[horizon],
+        timeStopBars: TIME_STOP_BARS,
         gapRiskNote: '无有效行情，未计算风险距离',
+        allowedShares: null,
+        reduceShares: null,
+        effectiveLossPct: null,
+        sizingBasisPrice: null,
       },
       execution: {
-        triggerMode: 'close_confirmed',
         chaseGuardAtr: null,
         maxPremiumPct: null,
         maxSpreadPct: null,
-        nextReviewAt: nextReviewAt(horizon),
+        nextReviewAt: nextReviewAt(),
       },
     };
   }
@@ -134,23 +161,34 @@ export function assembleRisk(input: RiskInput): AssembledRisk {
       atrPct,
       maxAccountRiskPct: budget.singleTradeRiskPct,
       suggestedPositionPct: sizing?.allowedWeightPct ?? null,
-      timeStopBars: TIME_STOP_BARS[horizon],
+      timeStopBars: TIME_STOP_BARS,
       gapRiskNote: gapNote,
+      // 股数是 computeSizing 早就算好的，此前只取了权重百分比就把它丢了，
+      // 于是界面只能给「占 8%」，用户还得自己拿总资产去乘、再除股价、再凑整手
+      allowedShares: sizing?.allowedShares ?? null,
+      reduceShares: sizing?.reduceShares ?? null,
+      effectiveLossPct: sizing?.effectiveLossPct ?? null,
+      // 记下算股数用的是哪个价：实际挂单价（触发价）通常高于现价，界面必须据此等比缩减
+      sizingBasisPrice: sizing ? Math.round(price * 1000) / 1000 : null,
     },
     execution: {
-      // 波段买点原则上收盘确认；次日计划允许盘中预警
-      triggerMode: horizon === 'swing' ? 'close_confirmed' : 'intraday_alert',
+      // 触发口径不再是计划级的一个值：同一份计划里 tick 级上穿与周线收盘确认并存，
+      // 由每条条件的 cadenceOf(cond) 逐条决定，前端也照此逐条显示
       chaseGuardAtr: CHASE_GUARD_ATR,
       maxPremiumPct: context.assetType === 'etf' ? MAX_PREMIUM_PCT : null,
       // 五档不可用，价差闸门保持 null 并由 executionQuality 显式标缺失
       maxSpreadPct: null,
-      nextReviewAt: nextReviewAt(horizon),
+      nextReviewAt: nextReviewAt(),
     },
   };
 }
 
-/** 下次复核时间：次日计划在下一交易日收盘后，波段在一周后 */
-function nextReviewAt(horizon: SymbolPlanHorizon): string {
-  const days = horizon === 'next_session' ? 1 : 7;
-  return new Date(Date.now() + days * 86_400_000).toISOString();
+/**
+ * 下次复核时间：下一交易日收盘后。
+ * 合并车道后不再按期限拉长到一周——计划里既有 60 分钟级条件，
+ * 一周才复核一次意味着短周期那部分整周处于无人看管状态。
+ * 真正的长期有效性由 expiresAt 与时间止损负责。
+ */
+function nextReviewAt(): string {
+  return new Date(Date.now() + 86_400_000).toISOString();
 }

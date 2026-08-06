@@ -26,6 +26,7 @@ import { resolveProfile, ETF_MID_PROFILE, isStrategyMonitored } from './strategy
 import { getActivePlanItems } from '../plan/service';
 import type { QuoteCtx, RollState } from './types';
 import { listLivePlans, livePlansRevision } from '../symbolPlans/repo';
+import { recordTickHit } from '../symbolPlans/evaluate';
 import type { DailyPlanItem, StrategySellProfile, SymbolTradePlan } from '@stock-agent/shared';
 
 // Pulse 层：常驻轮询循环（纯计算，无 LLM）。仅交易时段拉快照评估，命中信号交 dispatcher。
@@ -481,7 +482,22 @@ async function tick(cfg: WatchConfig): Promise<void> {
       planItem: m.planItem,
       symbolPlans: plansByCode.get(q.code) ?? null,
     };
-    signals.push(...evalQuoteSignals(ctx, cfg));
+    const quoteSignals = evalQuoteSignals(ctx, cfg);
+    signals.push(...quoteSignals);
+
+    // tick 级计划条件命中回写。rules 是纯函数不落库，这一步不做的话盘中触发
+    // 只飘过一条告警，计划详情的事件流与条件锁存里查不到任何痕迹，
+    // 「穿了又跌回去」的日内上穿到收盘更是彻底看不出来。
+    // 去重靠锁存表的唯一索引，10 秒一轮的反复命中只会写第一次。
+    for (const s of quoteSignals) {
+      if (!s.planHit) continue;
+      try {
+        recordTickHit({ ...s.planHit, note: s.detail });
+      } catch (e) {
+        // 回写失败不能拖垮整轮轮询：告警已经发出去了，命中痕迹下一轮还会重试
+        console.warn(`[watch] 计划 ${s.planHit.planId} tick 命中回写失败:`, e);
+      }
+    }
 
     // 尾盘了结：到达战法档案 eodCutoffMin 后，每日一次提示该战法持仓不过夜
     // （中线档 eodCutoffMin=0 表示持有过夜，不产尾盘了结）
