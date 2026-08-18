@@ -1,6 +1,7 @@
 import type { BoardKind, BoardStockPick } from '@stock-agent/shared';
 import { fetchBoardConstituents } from '../breadth/data';
 import { fetchMarketSnapshot } from '../screener/snapshot';
+import { isTradableAShare } from '../screener/filter';
 import { enrichTrendFactors } from '../screener/trend';
 
 // 板块标的解析（确定性排序，不调 LLM）：把板块成分股解析成「龙头 / 补涨」两类可执行标的。
@@ -30,10 +31,15 @@ export async function resolveBoardPicks(
   const codes = await fetchBoardConstituents(kind, boardName).catch(() => [] as string[]);
   if (codes.length === 0) return { leaders: [], laggards: [] };
 
-  // 全市场快照（含市值/涨幅/行业），映射成分 code → 行情行
+  // 全市场快照（含市值/涨幅/行业），映射成分 code → 行情行。
+  // 与选股同一把可交易性尺子（剔科创/北交/ST/退）：半导体、芯片类板块成分里科创板占比很高，
+  // 不过这道口径会把用户根本买不了的票推成「龙头」。
   const snapshot = await fetchMarketSnapshot().catch(() => []);
   const rowByCode = new Map(snapshot.map((r) => [r.code, r]));
-  const inBoard = codes.filter((c) => rowByCode.has(c));
+  const inBoard = codes.filter((c) => {
+    const r = rowByCode.get(c);
+    return r != null && isTradableAShare(r);
+  });
   if (inBoard.length === 0) return { leaders: [], laggards: [] };
 
   // 按市值降序取前 N 只做逐只因子取数（趋势 + 资金），控制取数量

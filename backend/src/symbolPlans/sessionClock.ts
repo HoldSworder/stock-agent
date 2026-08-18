@@ -1,4 +1,5 @@
 import type { KlinePeriod } from '@stock-agent/shared';
+import { isTradingDay } from '../market/calendar';
 import { shanghaiClock, shanghaiToday } from '../util';
 
 // 「当根 K 线是否已收完」的唯一判据。求值层与证据层必须共用，
@@ -40,6 +41,26 @@ function mondayOf(date: string): string {
   const back = wd === 0 ? 6 : wd - 1;
   d.setUTCDate(d.getUTCDate() - back);
   return d.toISOString().slice(0, 10);
+}
+
+/**
+ * 下一个交易日的收盘时刻（ISO）。计划复核期与观察计划到期日共用。
+ *
+ * 必须走交易日历而不是「+24 小时」：周五生成的计划会给出周六，那天既没有行情也没有收盘，
+ * 到期判定与收盘重算都落不到实处。当天若在收盘前，「下一个」仍指今天的收盘。
+ *
+ * @param from 基准时刻，默认现在
+ */
+export function nextTradingClose(from: Date = new Date()): string {
+  const d = new Date(from);
+  // 收盘前算今天，收盘后（含 15:00 整）从明天起找
+  if (!(isTradingDay(d) && nowMinute(d) < CLOSE_MINUTE)) {
+    do {
+      d.setUTCDate(d.getUTCDate() + 1);
+      // 回看窗口够跨过最长的春节假期；正常 1~4 天内命中
+    } while (!isTradingDay(d) && d.getTime() - from.getTime() < 30 * 24 * 3600_000);
+  }
+  return new Date(`${shanghaiToday(d)}T15:00:00+08:00`).toISOString();
 }
 
 /**

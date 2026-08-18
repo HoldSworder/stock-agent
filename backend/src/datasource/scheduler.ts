@@ -105,9 +105,16 @@ export async function getKline(
     // 缓存身份必须带 secid：大盘指数与同码个股（如 1.000001 上证指数 / 0.000001 平安银行）
     // 若共用 code 做键会互相覆盖，读出来的可能根本不是这只标的的 K 线。
     // 回源走 fetchDailyAdjusted，写进缓存的即修正后数据，故读出口不再重复修正
+    const sid = secid ?? toSecid(code);
+    // 调用方只给 secid 时（前端 K 线弹窗对指数就是这么调的）code 为空，
+    // 而缓存身份是 (code, secid)：空 code 会写出一批按真实 code 永远读不回来的行，
+    // 使缓存对指数完全失效，还让每轮预热拿空代码去取数必然失败。
+    // 只用于缓存身份，不能回填进取数参数——astockdata 源忽略 secid、只认 code，
+    // 填回去会让指数命中同码个股（详见 server.ts 的 /api/kline 注释）。
+    const cacheCode = code || sid.slice(sid.indexOf('.') + 1);
     return getDailyCached(
-      code,
-      secid ?? toSecid(code),
+      cacheCode,
+      sid,
       limit,
       () => fetchDailyAdjusted(code, secid, limit),
       opts,

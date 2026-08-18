@@ -4,6 +4,7 @@ import { getMeta, setMeta } from '../settings';
 import { sendTelegram } from '../notify/telegram';
 import { nowIso } from '../util';
 import { withJobLock } from './locks';
+import { previousScheduledSlot } from './cronSlots';
 
 /** 本进程锁持有者标识（区分 dev 双开 / 多进程） */
 const LOCK_OWNER = `module-${process.pid}`;
@@ -129,6 +130,8 @@ export async function triggerModuleJob(id: string): Promise<boolean> {
  * 启动时 missed-run 检查：对每个已启用 job，若其「今日最近一次应触发时刻」已过、当天非节假日、
  * 且其后无成功记录，则判为「停机期间错过」。默认只 Telegram 提示不自动补跑，用持久化水位线幂等防重复告警。
  * 须在各模块 register（注册 job）之后调用。
+ * 「应触发时刻」由 previousScheduledSlot 从 cron 表达式推算——croner 的 previousRun() 只回
+ * 该实例实际跑过的上一次，注册后立刻调用时恒为 null，整条判定会静默失效。
  */
 export async function catchUpModuleMissedRuns(): Promise<void> {
   const now = new Date();
@@ -141,12 +144,7 @@ export async function catchUpModuleMissedRuns(): Promise<void> {
 
   for (const { def, cron } of jobs.values()) {
     if (!def.enabled || !cron) continue;
-    let prev: Date | null = null;
-    try {
-      prev = cron.previousRun();
-    } catch {
-      prev = null;
-    }
+    const prev = previousScheduledSlot(def.cronExpr, def.tz, now);
     if (!prev) continue;
     if (shanghaiDateStr(prev) !== todayStr) continue;
     if (def.skipHoliday && shouldSkipForHoliday(prev)) continue;

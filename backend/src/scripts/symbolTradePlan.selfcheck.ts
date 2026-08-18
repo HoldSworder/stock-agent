@@ -10,9 +10,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type {
   CandidateCatalog,
+  CandidateCondition,
   KlineBar,
   PriceLevels,
   SymbolTechnicalContext,
+  SymbolTradePlan,
   SymbolTradePlanProposal,
   TradeLevelRole,
 } from '@stock-agent/shared';
@@ -108,6 +110,7 @@ const CONTEXT: SymbolTechnicalContext = {
   code: '159516',
   name: '半导体设备ETF',
   assetType: 'etf',
+  secid: '0.159516',
   asOf: dayAt(39),
   dataStatus: 'complete',
   periods: [
@@ -573,11 +576,10 @@ assert.ok(ev1.some((e) => e.kind === 'activated'), '应写 activated 事件');
 }
 
 // ===== 9. 各周期渲染过滤 =====
-
-assert.equal(marks.shouldRenderOnTimeframe('price_line', 'day', '60m'), true, '价位线可跨周期');
-assert.equal(marks.shouldRenderOnTimeframe('point', 'day', '60m'), false, '点位只在所属周期');
-assert.equal(marks.shouldRenderOnTimeframe('range', 'day', 'day'), true);
-assert.equal(marks.shouldRenderOnTimeframe('trend_line', null, 'day'), true, '无周期信息的老数据放行');
+//
+// 曾断言 markSync.shouldRenderOnTimeframe「价位线可跨周期」。该函数与实际渲染依据
+// shared 的 isPlanLineVisible 相互矛盾且生产无调用方，断言等于把废弃规则锁成契约，
+// 已随函数一并删除。可见性口径的唯一来源是 isPlanLineVisible。
 
 // ===== 10. 降级观察计划：无价位无标注 =====
 
@@ -600,6 +602,10 @@ assert.equal(marks.shouldRenderOnTimeframe('trend_line', null, 'day'), true, '�
   assert.equal(draft.primaryAction, 'wait', '观察计划动作必须是等待');
   assert.equal(marks.listPlanMarks(draft.id).length, 0, '观察计划不得产生辅助线');
   assert.ok(draft.marketPhase === phase.phase, '观察计划仍保留后端确定性阶段');
+  // 必须有到期日：draft 在 PLAN_LIVE_STATUSES 内，expiresAt=null 时它既判不了过期、
+  // 也进不了 listStalePlans 的重算队列，收盘重算从此永远不再认领这个标的（第 12 条）
+  assert.ok(draft.expiresAt, '观察计划必须带到期日，否则该标的被永久踢出自动重算流水线');
+  assert.ok(draft.expiresAt > draft.validFrom, '到期日必须晚于生效时刻');
 }
 
 // ===== 11. 结构化重试指引可读 =====
@@ -616,9 +622,11 @@ assert.equal(marks.shouldRenderOnTimeframe('trend_line', null, 'day'), true, '�
 // ===== 12. R18：旧版 spec 可读可回测，含 live_only 的被拒 =====
 
 {
-  // 旧形状 spec（只用原有规则）应通过校验
+  // 旧形状 spec（只用原有规则）应通过校验。
+  // codes 必须是字符串数组：生产侧 backtest.ts 直接 `codes.map(c => c.trim())`，
+  // 早先这里写成 [{ code }] 只是被 `as never` 盖住了，真跑会在 trim 上崩。
   assertRunnableSpec({
-    universe: { kind: 'codes', codes: [{ code: '600519' }] },
+    universe: { kind: 'codes', codes: ['600519'] },
     period: 'day',
     barLimit: 250,
     entry: { mode: 'all', rules: [{ kind: 'ma', maType: 'sma', left: 'close', period: 20, relation: 'crossUp' }] },
@@ -632,7 +640,7 @@ assert.equal(marks.shouldRenderOnTimeframe('trend_line', null, 'day'), true, '�
 
   // 新增的可回测规则也应通过
   assertRunnableSpec({
-    universe: { kind: 'codes', codes: [{ code: '600519' }] },
+    universe: { kind: 'codes', codes: ['600519'] },
     period: 'day',
     barLimit: 250,
     entry: { mode: 'all', rules: [{ kind: 'amountRatio', days: 20, op: 'gte', value: 1.2 }] },
@@ -648,7 +656,7 @@ assert.equal(marks.shouldRenderOnTimeframe('trend_line', null, 'day'), true, '�
   assert.throws(
     () =>
       assertRunnableSpec({
-        universe: { kind: 'codes', codes: [{ code: '600519' }] },
+        universe: { kind: 'codes', codes: ['600519'] },
         period: 'day',
         barLimit: 250,
         entry: { mode: 'all', rules: [{ kind: 'barsSincePlan', op: 'gte', value: 3 }] },
@@ -809,6 +817,442 @@ assert.equal(marks.shouldRenderOnTimeframe('trend_line', null, 'day'), true, '�
   );
 }
 
+// ===== 17. 风险情景可表达（第 1 条）=====
+//
+// 目录里若没有 suitableFor 含 trigger 的看跌条件，rank='risk' 情景在结构上就无法表达：
+// 每个情景都必填触发条件，LLM 把「收盘跌破支撑」放进风险情景触发数组必被 purpose_mismatch
+// 打回，两次即降级观察计划，减仓/清仓车道整体失效。
+
+{
+  const bearish = CATALOG.conditions.find(
+    (c) =>
+      c.suitableFor.includes('trigger') &&
+      c.rule.kind === 'priceLevel' &&
+      (c.rule.relation === 'holdBelow' || c.rule.relation === 'crossDown'),
+  );
+  assert.ok(bearish, '目录必须含可作触发的看跌价位条件，否则风险情景填不出触发数组');
+
+  const p = validProposal();
+  const risky: SymbolTradePlanProposal = {
+    ...p,
+    scenarioSelections: [
+      ...p.scenarioSelections,
+      {
+        rank: 'risk' as const,
+        name: '跌破支撑减仓',
+        // 同一个事实：作风险情景的触发，也作多头计划的失效
+        conditionCandidateIds: [bearish.candidateId],
+        invalidConditionCandidateIds: [bearish.candidateId],
+        targetCandidateLevelIds: p.scenarioSelections[0].targetCandidateLevelIds,
+      },
+    ],
+  };
+  const issues = svc.validateProposal(mkCompileInput(risky));
+  assert.deepEqual(
+    issues.filter((it) => it.code === 'purpose_mismatch'),
+    [],
+    '看跌条件作风险情景触发条件不得被 purpose_mismatch 拒绝',
+  );
+  // 风险情景动作是 reduce，看跌触发与它同向，极性护栏不得误伤
+  assert.deepEqual(
+    issues.filter((it) => it.code === 'trigger_polarity_mismatch'),
+    [],
+    '风险情景（reduce）配看跌触发条件方向一致，极性护栏不得误伤',
+  );
+}
+
+// ===== 17b. 已成立的条件不得作为触发条件被接受（第二轮 H2）=====
+//
+// 看跌关系改成双用途之后，目录侧只摘 invalidation 会把「当下就已成立」的看跌条件
+// 降级成一条合法的触发条件（最典型的是价位在现价上方的 holdBelow，它恒为真），
+// 计划一落库、第一次复核就判触发，风险路径凭空启动。
+// 这里直接把「摘漏了」的目录状态喂进校验层，锁住编译侧这道兜底。
+
+{
+  const p = validProposal();
+  const bearishAlready: CandidateCondition = {
+    candidateId: 'cond:price_level:already-bearish',
+    contextId: CATALOG.contextId,
+    candidateModelVersion: CATALOG.candidateModelVersion,
+    purpose: 'price_level',
+    // 价位远在现价上方，「收盘跌破」当下恒为真
+    rule: { kind: 'priceLevel', level: CLOSE * 2, relation: 'holdBelow' },
+    timeframe: 'day',
+    description: '收盘跌破（价位在现价上方，当下已成立）',
+    fromLevelCandidateId: null,
+    suitableFor: ['trigger', 'invalidation'],
+    evidenceIds: [],
+    capability: 'backtest',
+    alreadySatisfied: true,
+  };
+  // 只加条件、不改 catalogHash：模拟目录侧摘漏了用途的情形，校验层必须自己拦住
+  const catalog = { ...CATALOG, conditions: [...CATALOG.conditions, bearishAlready] };
+  const bad: SymbolTradePlanProposal = {
+    ...p,
+    scenarioSelections: [
+      { ...p.scenarioSelections[0], conditionCandidateIds: [bearishAlready.candidateId] },
+    ],
+  };
+  const issues = svc.validateProposal({ ...mkCompileInput(bad), catalog });
+  const it = issues.find((x) => x.code === 'trigger_already_true');
+  assert.ok(
+    it,
+    `已成立的看跌条件当触发条件必须被拒，实际问题码：${issues.map((x) => x.code).join(',') || '（无）'}`,
+  );
+  assert.ok(it.message.includes('尚未成立'), '拒绝理由须说明触发条件应当尚未成立');
+  assert.ok(
+    (it.availableCandidateIds ?? []).length > 0,
+    '必须回传仍可用的触发候选，否则模型无从修正',
+  );
+  assert.deepEqual(
+    svc.validateProposal(mkCompileInput(p)).filter((x) => x.code === 'trigger_already_true'),
+    [],
+    '合法提案不得被这条护栏误杀',
+  );
+}
+
+// ===== 17c. 触发条件极性必须与情景动作一致（第二轮 M1）=====
+//
+// 双用途拆掉了「看跌条件物理上进不了触发数组」这道唯一的结构性护栏：
+// 现在 rank='primary'、action='add' 的情景可以合法地写「收盘跌破支撑 → 加仓」，全程无人拦截。
+
+{
+  const p = validProposal();
+  const bearish = CATALOG.conditions.find(
+    (c) =>
+      c.suitableFor.includes('trigger') &&
+      c.rule.kind === 'priceLevel' &&
+      (c.rule.relation === 'holdBelow' || c.rule.relation === 'crossDown'),
+  )!;
+  assert.ok(bearish, 'fixture 应含可作触发的看跌条件，否则本节断言空转');
+  const bad: SymbolTradePlanProposal = {
+    ...p,
+    scenarioSelections: [
+      { ...p.scenarioSelections[0], rank: 'primary' as const, conditionCandidateIds: [bearish.candidateId] },
+    ],
+  };
+  // marketAction=add：主情景动作即加仓，「收盘跌破」与它反向
+  const issues = svc.validateProposal({ ...mkCompileInput(bad), marketAction: 'add', primaryAction: 'add' });
+  assert.ok(
+    issues.some((x) => x.code === 'trigger_polarity_mismatch'),
+    `买入类情景配看跌触发条件必须被拒，实际问题码：${issues.map((x) => x.code).join(',') || '（无）'}`,
+  );
+
+  // 反向同样要拦：减仓情景不得由「收盘站上/金叉」这类看多条件触发
+  const bullish = CATALOG.conditions.find(
+    (c) =>
+      c.suitableFor.includes('trigger') &&
+      !c.alreadySatisfied &&
+      c.rule.kind === 'priceLevel' &&
+      (c.rule.relation === 'holdAbove' || c.rule.relation === 'crossUp'),
+  )!;
+  assert.ok(bullish, 'fixture 应含可作触发的看多条件，否则本节断言空转');
+  const bad2: SymbolTradePlanProposal = {
+    ...p,
+    scenarioSelections: [
+      { ...p.scenarioSelections[0], rank: 'primary' as const, conditionCandidateIds: [bullish.candidateId] },
+    ],
+  };
+  assert.ok(
+    svc
+      .validateProposal({ ...mkCompileInput(bad2), marketAction: 'exit', primaryAction: 'exit' })
+      .some((x) => x.code === 'trigger_polarity_mismatch'),
+    '减仓/清仓情景配看多触发条件必须被拒',
+  );
+
+  // 方向一致的组合不得被误伤
+  assert.deepEqual(
+    svc
+      .validateProposal({ ...mkCompileInput(bad2), marketAction: 'add', primaryAction: 'add' })
+      .filter((x) => x.code === 'trigger_polarity_mismatch'),
+    [],
+    '买入类情景配看多触发条件必须放行',
+  );
+}
+
+// ===== 18. 目标价位必须出现在 levelSelections 里（第 4 条）=====
+
+{
+  const p = validProposal();
+  const selected = new Set(p.levelSelections.map((s) => s.candidateLevelId));
+  const orphan = CATALOG.levels.find((l) => !selected.has(l.candidateId));
+  assert.ok(orphan, 'fixture 应有未被选中的候选价位，否则本节断言空转');
+  const bad: SymbolTradePlanProposal = {
+    ...p,
+    scenarioSelections: [
+      { ...p.scenarioSelections[0], targetCandidateLevelIds: [orphan.candidateId] },
+    ],
+  };
+  const issues = svc.validateProposal(mkCompileInput(bad));
+  assert.ok(
+    issues.some((it) => it.code === 'target_not_selected'),
+    '目标价位没进 levelSelections 时必须拒绝：落库后 plan.levels 里查不到它，预测永远判不出 hit',
+  );
+}
+
+// ===== 19. 买入类计划必须 entry > stop（第 20 条）=====
+
+{
+  const p = validProposal();
+  const sorted = [...CATALOG.levels].sort((a, b) => a.price - b.price);
+  const low = sorted[0];
+  const high = sorted[sorted.length - 1];
+  assert.ok(low && high && high.price > low.price, 'fixture 应有高低两个价位，否则本节断言空转');
+  // 故意把入场挂在低位、止损挂在高位：按它算「单笔最大亏损」会得到负数
+  const inverted: SymbolTradePlanProposal = {
+    ...p,
+    levelSelections: [
+      { candidateLevelId: low.candidateId, role: 'entry_trigger' as const },
+      { candidateLevelId: high.candidateId, role: 'stop' as const },
+      ...p.levelSelections.filter(
+        (s) => s.candidateLevelId !== low.candidateId && s.candidateLevelId !== high.candidateId,
+      ),
+    ],
+  };
+  const issues = svc.validateProposal(mkCompileInput(inverted));
+  assert.ok(
+    issues.some((it) => it.code === 'entry_below_stop'),
+    '入场价不高于止损价的买入类计划必须被拒，否则会算出负数的单笔最大亏损',
+  );
+  // 正常提案不得被这条误伤
+  assert.deepEqual(
+    svc.validateProposal(mkCompileInput(p)).filter((it) => it.code === 'entry_below_stop'),
+    [],
+    '合法提案不得被 entry>stop 校验误伤',
+  );
+}
+
+// ===== 20. 指数不得保存交易计划（第 7 条）=====
+
+{
+  const issues = svc.validateProposal({
+    ...mkCompileInput(validProposal()),
+    context: { ...CONTEXT, assetType: 'index' as const },
+  });
+  assert.ok(
+    issues.some((it) => it.code === 'asset_not_tradable'),
+    '指数类标的必须被拒：全链路按 code 定位，000300 会取到同码个股的行情',
+  );
+  assert.ok(
+    issues.find((it) => it.code === 'asset_not_tradable')?.message.includes('撞码'),
+    '拒绝原因必须写清楚，否则 LLM 只会换个姿势重试',
+  );
+}
+
+// ===== 21. secid 全链路落库（第 7 条）=====
+
+{
+  const plan = repo.getLatestPlan('159516');
+  assert.ok(plan, 'fixture 应已落过计划');
+  assert.equal(plan.secid, CONTEXT.secid, '计划必须落 secid，否则求值只能按 code 取 K 线');
+  const { listForecasts } = await import('../symbolPlans/forecast');
+  const rows = listForecasts(plan.id);
+  for (const r of rows) {
+    assert.equal(r.secid, CONTEXT.secid, '预测记录必须带 secid，结算才不会猜市场');
+  }
+}
+
+// ===== 22. 风险情景失效条件命中 → 触发 reduce 而非整份失效（第 8 条）=====
+
+{
+  const { evaluatePlan } = await import('../symbolPlans/evaluate');
+  const base: SymbolTradePlan = {
+    ...repo.getLatestPlan('159516')!,
+    expiresAt: null,
+    status: 'active',
+    scenarios: [
+      {
+        id: 'sc:0:risk',
+        rank: 'risk' as const,
+        name: '跌破支撑减仓',
+        action: 'reduce' as const,
+        // 触发条件恒不满足（价位远在上方），只让失效条件成立
+        conditions: [
+          {
+            id: 'c-trig',
+            rule: { kind: 'priceLevel' as const, level: CLOSE * 5, relation: 'holdAbove' as const },
+            timeframe: 'day' as const,
+            description: '恒不成立的触发条件',
+            required: true,
+            evidenceIds: [],
+          },
+        ],
+        invalidConditions: [
+          {
+            id: 'c-inval',
+            rule: { kind: 'priceLevel' as const, level: CLOSE * 1.5, relation: 'holdBelow' as const },
+            timeframe: 'day' as const,
+            description: '收盘跌破（当前必然成立）',
+            required: true,
+            evidenceIds: [],
+          },
+        ],
+        targetLevelIds: [],
+      },
+    ],
+  };
+  const ev = evaluatePlan({ plan: base, barsByPeriod: new Map([['day', BARS]]), force: true });
+  assert.equal(
+    ev.invalidated,
+    false,
+    '风险情景的失效条件命中不得把整份计划判失效——那样价格真跌下来时用户看到的是作废计划而非减仓指令',
+  );
+  assert.equal(ev.triggered, true, '风险情景失效条件命中应判为触发（风险路径已启动）');
+  const hit = ev.triggeredScenarios.find((s) => s.rank === 'risk');
+  assert.ok(hit, '必须带上命中的情景，前端才能显示「触发的是风险路径」');
+  assert.equal(hit.scenarioId, 'sc:0:risk');
+  assert.equal(hit.via, 'invalidation', '需区分「风险情景失效条件命中」与「主路径触发条件命中」');
+  assert.equal(hit.action, 'reduce', '前端要据此显示动作');
+  // 风险路径启动后必须要求新版本：状态停在 triggered（live），既不失效也进不了 listStalePlans，
+  // 不特判的话那份计划的多头情景会在盘中引擎里一直求值到 28 天有效期满
+  assert.equal(
+    ev.needsNewVersion,
+    true,
+    '风险路径已启动的计划必须被判为需要新版本，否则支撑跌破后它还要挂近一个月',
+  );
+
+  // 非风险情景的失效条件命中仍必须判整份失效
+  const primary: SymbolTradePlan = {
+    ...base,
+    scenarios: [{ ...base.scenarios[0], id: 'sc:0:primary', rank: 'primary' as const, action: 'probe' as const }],
+  };
+  const ev2 = evaluatePlan({ plan: primary, barsByPeriod: new Map([['day', BARS]]), force: true });
+  assert.equal(ev2.invalidated, true, '主路径情景的失效条件命中仍应判整份计划失效');
+}
+
+// ===== 23. 预测判定：失效价按情景取 + 同侧按远近判（第 3 条）=====
+
+{
+  const { judge } = await import('../symbolPlans/forecast');
+  const since = '2026-02-01T07:00:00.000Z';
+  const base = 100;
+  // 风险情景常见组合：止损 -6%、风险目标 -12%，两者同在基准价下方。
+  // 一律「失效优先」会让下跌必然先命中止损判 miss，风险情景永远不可能 hit。
+  // 同侧时按「谁离基准价更近先到谁」判：走到 88 必先经过 94，所以这里确实是 miss，
+  // 但换成该情景自己挑的失效位（在基准价上方）时就能正常判出 hit。
+  const dropBar = [{ time: '2026-02-02', high: 101, low: 87 }];
+  assert.equal(
+    judge(dropBar, since, base, 88, 94, '2026-03-01', '2026-02-04'),
+    'miss',
+    '同侧且失效价更近时按「先到近的」判落空',
+  );
+  assert.equal(
+    judge(dropBar, since, base, 88, 105, '2026-03-01', '2026-02-04'),
+    'hit',
+    '失效位在基准价上方（该情景被证伪的价）时，下跌到风险目标必须判兑现',
+  );
+  // 异侧且同一根内都命中：日线看不出先后，保守判落空
+  assert.equal(
+    judge([{ time: '2026-02-02', high: 106, low: 87 }], since, base, 88, 105, '2026-03-01', '2026-02-04'),
+    'miss',
+    '异侧且同根都命中时必须保守判落空',
+  );
+
+  // 窗口日界必须按上海日期取，与「是否盘前」同源（第二轮 H3）。
+  // 上海 08-08 00:30 = UTC 08-07T16:30：按 UTC 切片会取到 08-07，且时钟判为盘前，
+  // 于是 08-07 那根**记录预测时早已全部走完**的 bar 会进窗口，等于拿已知结果打分。
+  const afterMidnightSh = '2026-08-07T16:30:00.000Z';
+  const doneBar = [{ time: '2026-08-07', high: 200, low: 50 }];
+  assert.equal(
+    judge(doneBar, afterMidnightSh, 100, 110, 90, '2026-09-01', '2026-08-08'),
+    null,
+    '上海 00:30 生成的预测不得把前一交易日那根已走完的 bar 算进窗口',
+  );
+  // 真·盘前（上海 08:00 = UTC 00:00）仍必须含当日那根，否则「当天就走到目标」的兑现全漏
+  assert.equal(
+    judge(doneBar, '2026-08-07T00:00:00.000Z', 100, 110, 90, '2026-09-01', '2026-08-08'),
+    'miss',
+    '盘前生成的预测必须把当日 bar 算进窗口',
+  );
+}
+
+// ===== 23b. 风险情景取不到自己的失效位时不得套用多头止损（第二轮 M2）=====
+//
+// planStop 是多头执行止损、恒在基准价下方；风险目标也在下方且更远，
+// 套上去 judge 必然先命中更近的止损判 miss，风险情景永远不可能 hit——
+// 正是 scenarioInvalidPrice 立项要消除的系统性偏差。取不到就该不填，只靠 target 与 timeout 判。
+
+{
+  const { listForecasts } = await import('../symbolPlans/forecast');
+  const p = validProposal();
+  // 失效条件挑一条非 priceLevel 的（MA 类），触发条件挑看跌的，与 reduce 动作同向
+  const maInval = CATALOG.conditions.find(
+    (c) => c.rule.kind === 'ma' && c.suitableFor.includes('invalidation') && !c.alreadySatisfied,
+  );
+  const bearishTrig = CATALOG.conditions.find(
+    (c) =>
+      c.suitableFor.includes('trigger') &&
+      c.rule.kind === 'priceLevel' &&
+      (c.rule.relation === 'holdBelow' || c.rule.relation === 'crossDown'),
+  );
+  assert.ok(maInval && bearishTrig, 'fixture 应含 MA 类失效条件与看跌触发条件，否则本节断言空转');
+
+  const risky: SymbolTradePlanProposal = {
+    ...p,
+    scenarioSelections: [
+      {
+        rank: 'risk' as const,
+        name: '跌破减仓',
+        conditionCandidateIds: [bearishTrig.candidateId],
+        invalidConditionCandidateIds: [maInval.candidateId],
+        targetCandidateLevelIds: p.scenarioSelections[0].targetCandidateLevelIds,
+        subjectiveProbabilityPct: 40,
+      },
+    ],
+  };
+  assert.deepEqual(svc.validateProposal(mkCompileInput(risky)), [], '本节提案本身必须合法');
+  const plan = svc.compileAndSavePlan(mkCompileInput(risky));
+  const rows = listForecasts(plan.id);
+  assert.equal(rows.length, 1, '报了概率的风险情景应落一条预测记录');
+  assert.equal(
+    rows[0].invalidPrice,
+    null,
+    '风险情景取不到自己的 priceLevel 失效位时必须留空，套用多头止损会让它永远判不出 hit',
+  );
+  assert.ok((plan.risk.executionStop ?? 0) > 0, '前置条件：计划级止损确实存在，否则本节断言空转');
+}
+
+// ===== 24. 名称未知不得把普通主板股判成涨停（第二轮 H4）=====
+//
+// lookupName 只要 getQuotes 抖一次就返回 null。此时按最保守的 5% 算，
+// 一只 +4.6% 的普通主板股会拿到「涨停不可成交」这条硬阻断、整份计划被锁成等待，
+// 还会经 meta.limitPct 生成一个 close×1.05 的假涨停价以 entry_trigger/stop 角色进候选目录。
+
+{
+  const { stockAdapter } = await import('../symbolPlans/adapters');
+  const two = (prev: number, last: number): KlineBar[] => [
+    { time: dayAt(0), open: prev, high: prev, low: prev, close: prev, volume: 1000, amount: prev * 1000 },
+    { time: dayAt(1), open: last, high: last, low: last, close: last, volume: 1000, amount: last * 1000 },
+  ];
+  const unknown = { code: '600000', name: '600000', nameUnknown: true };
+
+  assert.deepEqual(
+    await stockAdapter.hardBlocks(unknown, two(10, 10.46)),
+    [],
+    '名称取不到时 +4.6% 的普通主板股不得被判成涨停——硬阻断非空会把整份计划锁成等待',
+  );
+  assert.ok(
+    (await stockAdapter.hardBlocks(unknown, two(10, 10.96))).some((b) => b.includes('涨停')),
+    '真到主板上限时仍必须给出涨停阻断',
+  );
+  assert.ok(
+    (await stockAdapter.hardBlocks({ code: '600000', name: '*ST自检' }, two(10, 10.46))).some((b) =>
+      b.includes('涨停'),
+    ),
+    '名称已知是 ST 时 +4.6% 必须照 5% 判涨停',
+  );
+
+  const meta = await stockAdapter.loadAssetMetadata(unknown);
+  assert.equal(meta.limitPctUncertain, true, '主板个股名称未知时必须显式声明上限不可信');
+  assert.equal(meta.limitPct, 10, '不可信时按代码段上限，不再拿 5% 反推');
+  assert.equal(
+    (await stockAdapter.loadAssetMetadata({ code: '300001', name: '300001', nameUnknown: true }))
+      .limitPctUncertain,
+    false,
+    '创业板没有 ST 制度，代码段就定死了上限，不受名称影响',
+  );
+}
+
 // ===== 失效计划回落读取不得污染业务判定 =====
 //
 // 面板要能看见失效计划（否则计划一失效界面整片空白，看不到原因也看不到内容），
@@ -830,5 +1274,5 @@ assert.equal(marks.shouldRenderOnTimeframe('trend_line', null, 'day'), true, '�
 
 rmSync(tmpDir, { recursive: true, force: true });
 console.log(
-  '✅ 计划存储与编译自检通过（确定性字段不可篡改 · 伪造候选/角色/缺条件/跨快照被拒 · 出生即失效被拒 · 失败零痕迹 · 版本递增且历史不删 · 同版本幂等 · 失效变灰保留 · 周期过滤 · draft 降级 · 重试指引 · 旧 spec 兼容与 live_only 拒绝 · 风险情景只收紧 · 板块闸门端到端接线 · 首行超限裁剪 · 账户未覆盖口吻 · 失效回落不污染 getActivePlan）',
+  '✅ 计划存储与编译自检通过（确定性字段不可篡改 · 伪造候选/角色/缺条件/跨快照被拒 · 出生即失效/即触发被拒 · 触发极性须与动作一致 · 失败零痕迹 · 版本递增且历史不删 · 同版本幂等 · 失效变灰保留 · draft 降级带到期日 · 重试指引 · 旧 spec 兼容与 live_only 拒绝 · 风险情景可表达且只收紧 · 目标须入选 · 买入 entry>stop · 指数拒保存 · secid 全链路 · 风险路径触发而非整份失效 · 预测失效价按情景取且风险情景不套多头止损 · 预测窗口按上海日界 · 名称未知不误判涨停 · 板块闸门端到端接线 · 首行超限裁剪 · 账户未覆盖口吻 · 失效回落不污染 getActivePlan）',
 );

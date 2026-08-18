@@ -33,13 +33,30 @@ interface GateState {
 
 const states = new Map<string, GateState>();
 
+/**
+ * 迟滞状态键。带 planHit 的信号必须把 `planId:conditionId` 并进来：
+ * evalSymbolPlanTickSignals 会为同一只票产出多条同 type 的信号（不同 scenario / 条件 / 计划版本），
+ * 只按 `code:type` 记状态的话第一条置 active 后其余条件永久静默——A 条件持续成立时
+ * 状态一直是 active，B 条件从头到尾发不出去。
+ */
 function key(s: WatchSignal): string {
-  return `${s.code}:${s.type}`;
+  return s.planHit
+    ? `${s.code}:${s.type}:${s.planHit.planId}:${s.planHit.conditionId}`
+    : `${s.code}:${s.type}`;
 }
 
 /** 跨交易日 / 引擎重启时清空所有迟滞状态 */
 export function resetGate(): void {
   states.clear();
+}
+
+/**
+ * 释放迟滞状态：放行后又被下游（冷却 / 打分门 / 限流 / 缓存复用）丢掉的信号，
+ * 若保留 active 状态就再也不会被放行第二次，等于当天彻底静默。
+ * 清掉状态让它下一 tick 以「首次出现」重新排队。
+ */
+export function releaseGate(signals: Iterable<WatchSignal>): void {
+  for (const s of signals) states.delete(key(s));
 }
 
 /** 迟滞门输出：passed=交 dispatcher 唤醒研判；suppressed=本 tick 评估到但被迟滞静默 */

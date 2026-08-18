@@ -35,6 +35,17 @@ export function shanghaiToday(now: Date = new Date()): string {
   }).format(now);
 }
 
+/**
+ * Asia/Shanghai 当日 00:00 对应的 UTC ISO，用于「今日 N 条」这类计数的下界。
+ *
+ * 库里各表的 createdAt 存的都是 nowIso() 的 UTC ISO，直接拿 UTC 日期前缀去比对
+ * 等于把窗口整体后移 8 小时：上海 00:00–08:00 产生的记录不计入今日，
+ * 昨天 16:00 之后的反而被算进来。
+ */
+export function shanghaiDayStartIso(now: Date = new Date()): string {
+  return new Date(`${shanghaiToday(now)}T00:00:00+08:00`).toISOString();
+}
+
 /** Asia/Shanghai 当前时间 HH:mm，用于交易时段提示 */
 export function shanghaiClock(now: Date = new Date()): string {
   return new Intl.DateTimeFormat('en-GB', {

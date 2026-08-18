@@ -388,15 +388,16 @@ export function updateItemByCode(
     .all()
     .find((r) => r.code === code);
   if (!row) return null;
+  // 写入与返回必须同一口径。`patch.note ?? row.lastNote` 会在调用方显式传 null
+  // （清空备注，plan/service.ts 就是这么传的）时把旧备注当成结果返回，
+  // 于是库里已清空、调用方却拿着旧备注去写事件 payload，事件与库永久不一致。
+  const nextStatus = patch.status ?? row.status;
+  const nextNote = patch.note !== undefined ? patch.note : row.lastNote;
   db.update(schema.dailyPlanItems)
-    .set({
-      status: patch.status ?? row.status,
-      lastNote: patch.note !== undefined ? patch.note : row.lastNote,
-      updatedAt: nowIso(),
-    })
+    .set({ status: nextStatus, lastNote: nextNote, updatedAt: nowIso() })
     .where(eq(schema.dailyPlanItems.id, row.id))
     .run();
-  return rowToItem({ ...row, status: patch.status ?? row.status, lastNote: patch.note ?? row.lastNote });
+  return rowToItem({ ...row, status: nextStatus, lastNote: nextNote });
 }
 
 /** 按代码回写某计划下标的项的多 agent 辩论结论，返回是否命中 */

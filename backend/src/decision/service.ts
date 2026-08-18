@@ -150,12 +150,24 @@ function ensureNotAborted(signal?: AbortSignal): void {
 const avg = (xs: number[]): number => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
 /** 带符号百分比文本，如 +1.23% */
 const fmtPct = (n: number): string => `${n >= 0 ? '+' : ''}${n.toFixed(2)}%`;
-/** 区间收益：last / closes[len-1-n] - 1，单位 %（数据不足返回 0） */
-function pctReturn(closes: number[], n: number): number {
-  if (closes.length <= n) return 0;
+/**
+ * 区间收益：last / closes[len-1-n] - 1，单位 %。样本不足返回 null。
+ * 原先返回 0：取数是 getKline(code,'day',60) 恰好 60 根，n=60 时条件成立，ret60 恒为 0，
+ * 于是「相对沪深300：近60日 +0.00%」是一条被伪造成事实的数据喂进决策 prompt。
+ */
+export function pctReturn(closes: number[], n: number): number | null {
+  if (closes.length <= n) return null;
   const base = closes[closes.length - 1 - n];
-  return base > 0 ? (closes[closes.length - 1] / base - 1) * 100 : 0;
+  if (!(base > 0)) return null;
+  return (closes[closes.length - 1] / base - 1) * 100;
 }
+/** 带符号百分比文本；缺样本渲染「—」而不是用 0 冒充零涨跌 */
+const fmtPctOr = (n: number | null): string => (n == null ? '—' : fmtPct(n));
+/** 两个区间收益之差（任一缺失即缺失） */
+const diffPct = (a: number | null, b: number | null): number | null =>
+  a == null || b == null ? null : a - b;
+/** 决策取数根数：比最长区间（60 日）多留一根基准，否则 pctReturn(closes,60) 永远算不出来 */
+const KLINE_BARS = 90;
 /** 简单移动均值（取末 n 个） */
 const maOf = (closes: number[], n: number): number => avg(closes.slice(-n));
 /** 收盘价 → 日收益序列（%） */
@@ -214,8 +226,8 @@ async function computeKlineBundle(code: string, _signal?: AbortSignal): Promise<
   let idx: KlineBar[] = [];
   try {
     [stock, idx] = await Promise.all([
-      getKline(code, 'day', 60).catch(() => [] as KlineBar[]),
-      getKline('000300', 'day', 60, CSI300_SECID).catch(() => [] as KlineBar[]),
+      getKline(code, 'day', KLINE_BARS).catch(() => [] as KlineBar[]),
+      getKline('000300', 'day', KLINE_BARS, CSI300_SECID).catch(() => [] as KlineBar[]),
     ]);
   } catch {
     return fallback;
@@ -226,8 +238,10 @@ async function computeKlineBundle(code: string, _signal?: AbortSignal): Promise<
   const closes = stock.map((b) => b.close);
   const vols = stock.map((b) => b.volume);
   const ma20 = maOf(closes, 20);
-  const hi = Math.max(...stock.map((b) => b.high));
-  const lo = Math.min(...stock.map((b) => b.low));
+  // 取数已提到 KLINE_BARS 根（否则 pctReturn(closes,60) 恒缺样本），区间口径仍按末 60 根
+  const win60 = stock.slice(-60);
+  const hi = Math.max(...win60.map((b) => b.high));
+  const lo = Math.min(...win60.map((b) => b.low));
   const ret5 = pctReturn(closes, 5);
   const ret20 = pctReturn(closes, 20);
   const ret60 = pctReturn(closes, 60);
@@ -240,7 +254,7 @@ async function computeKlineBundle(code: string, _signal?: AbortSignal): Promise<
     `现价 ${last.close}（${last.time}）`,
     `MA20 ${ma20.toFixed(2)}，现价${last.close >= ma20 ? '站上' : '跌破'} MA20`,
     `60 日区间 [${lo.toFixed(2)}, ${hi.toFixed(2)}]，价格位置约 ${posInRange.toFixed(0)}%`,
-    `近 5 日 ${fmtPct(ret5)}，近 20 日 ${fmtPct(ret20)}`,
+    `近 5 日 ${fmtPctOr(ret5)}，近 20 日 ${fmtPctOr(ret20)}`,
     `量能：最新量/20 日均量 ≈ ${volRatio.toFixed(2)}`,
   ].join('\n');
 
@@ -290,7 +304,8 @@ async function computeKlineBundle(code: string, _signal?: AbortSignal): Promise<
     const ir60 = pctReturn(idxCloses, 60);
     const beta = betaOf(closes, idxCloses);
     relLines.push(
-      `相对沪深300：近5日 ${fmtPct(ret5 - ir5)}，近20日 ${fmtPct(ret20 - ir20)}，近60日 ${fmtPct(ret60 - ir60)}（正=跑赢大盘）` +
+      `相对沪深300：近5日 ${fmtPctOr(diffPct(ret5, ir5))}，近20日 ${fmtPctOr(diffPct(ret20, ir20))}，` +
+        `近60日 ${fmtPctOr(diffPct(ret60, ir60))}（正=跑赢大盘；— 表示样本不足）` +
         `${beta != null ? `；Beta≈${beta.toFixed(2)}` : ''}`,
     );
   } else {
@@ -311,7 +326,7 @@ async function computeKlineBundle(code: string, _signal?: AbortSignal): Promise<
     const ivols = idx.map((b) => b.volume);
     const volTrend = avg(ivols.slice(-20)) > 0 ? avg(ivols.slice(-5)) / avg(ivols.slice(-20)) : 1;
     marketSeriesNote = [
-      `沪深300：近5日 ${fmtPct(pctReturn(idxCloses, 5))}，近20日 ${fmtPct(pctReturn(idxCloses, 20))}`,
+      `沪深300：近5日 ${fmtPctOr(pctReturn(idxCloses, 5))}，近20日 ${fmtPctOr(pctReturn(idxCloses, 20))}`,
       `近10日：${mRows.join('  ')}`,
       `量能：近5/20日均量 ≈ ${volTrend.toFixed(2)}`,
     ].join('\n');
@@ -341,21 +356,25 @@ async function computeSectorNote(code: string, signal: AbortSignal | undefined, 
 
   // 板块 60 日线 + 个股相对板块强弱（个股 K 线经 httpClient 15s 缓存去重，不额外打满）
   const [boardBars, stockBars] = await Promise.all([
-    getKline(board.code, 'day', 60).catch(() => [] as KlineBar[]),
-    getKline(code, 'day', 60).catch(() => [] as KlineBar[]),
+    getKline(board.code, 'day', KLINE_BARS).catch(() => [] as KlineBar[]),
+    getKline(code, 'day', KLINE_BARS).catch(() => [] as KlineBar[]),
   ]);
   if (boardBars.length >= 5) {
     const bc = boardBars.map((b) => b.close);
     const bret5 = pctReturn(bc, 5);
     const bret20 = pctReturn(bc, 20);
-    const bhi = Math.max(...boardBars.map((b) => b.high));
-    const blo = Math.min(...boardBars.map((b) => b.low));
+    const bwin60 = boardBars.slice(-60);
+    const bhi = Math.max(...bwin60.map((b) => b.high));
+    const blo = Math.min(...bwin60.map((b) => b.low));
     const bpos = bhi > blo ? ((boardBars[boardBars.length - 1].close - blo) / (bhi - blo)) * 100 : 50;
-    lines.push(`板块近5日 ${fmtPct(bret5)}，近20日 ${fmtPct(bret20)}，60日区间位置约 ${bpos.toFixed(0)}%`);
+    lines.push(
+      `板块近5日 ${fmtPctOr(bret5)}，近20日 ${fmtPctOr(bret20)}，60日区间位置约 ${bpos.toFixed(0)}%`,
+    );
     if (stockBars.length >= 21) {
       const sc = stockBars.map((b) => b.close);
       lines.push(
-        `个股相对板块：近5日 ${fmtPct(pctReturn(sc, 5) - bret5)}，近20日 ${fmtPct(pctReturn(sc, 20) - bret20)}（正=跑赢板块）`,
+        `个股相对板块：近5日 ${fmtPctOr(diffPct(pctReturn(sc, 5), bret5))}，` +
+          `近20日 ${fmtPctOr(diffPct(pctReturn(sc, 20), bret20))}（正=跑赢板块）`,
       );
     }
   } else {
@@ -1475,8 +1494,9 @@ function computeIndexKlineNote(bars: KlineBar[]): string {
   const ma10 = maOf(closes, 10);
   const ma20 = maOf(closes, 20);
   const ma60 = maOf(closes, 60);
-  const hi = Math.max(...bars.map((b) => b.high));
-  const lo = Math.min(...bars.map((b) => b.low));
+  const win60 = bars.slice(-60);
+  const hi = Math.max(...win60.map((b) => b.high));
+  const lo = Math.min(...win60.map((b) => b.low));
   const posInRange = hi > lo ? ((last.close - lo) / (hi - lo)) * 100 : 50;
   const avgVol20 = avg(vols.slice(-20));
   const volRatio = avgVol20 > 0 ? last.volume / avgVol20 : 1;
@@ -1503,7 +1523,8 @@ function computeIndexKlineNote(bars: KlineBar[]): string {
     `现点位 ${last.close}（${last.time}）`,
     `MA5/10/20/60 = ${ma5.toFixed(2)}/${ma10.toFixed(2)}/${ma20.toFixed(2)}/${ma60.toFixed(2)}（${maOrder}），现价${last.close >= ma20 ? '站上' : '跌破'} MA20`,
     `60 日区间 [${lo.toFixed(2)}, ${hi.toFixed(2)}]，位置约 ${posInRange.toFixed(0)}%，${isNewHigh ? '创60日新高' : '未创新高'}，区间最大回撤 ${(mdd * 100).toFixed(1)}%`,
-    `近5日 ${fmtPct(pctReturn(closes, 5))}，近20日 ${fmtPct(pctReturn(closes, 20))}，近60日 ${fmtPct(pctReturn(closes, 60))}，当前${streakDesc}`,
+    `近5日 ${fmtPctOr(pctReturn(closes, 5))}，近20日 ${fmtPctOr(pctReturn(closes, 20))}，` +
+      `近60日 ${fmtPctOr(pctReturn(closes, 60))}，当前${streakDesc}`,
     `量能：最新量/20日均量 ≈ ${volRatio.toFixed(2)}`,
   ].join('\n');
 }
@@ -1558,7 +1579,7 @@ async function fetchIndexBars(def: IndexDef): Promise<KlineBar[]> {
     : indexSecidCandidates(def);
   for (const secid of candidates) {
     const code = secid.split('.')[1] ?? def.key;
-    const bars = await getKline(code, 'day', 60, secid).catch(() => [] as KlineBar[]);
+    const bars = await getKline(code, 'day', KLINE_BARS, secid).catch(() => [] as KlineBar[]);
     if (bars.length > 0) {
       indexHitSecid.set(def.key, secid);
       return bars;
@@ -2049,7 +2070,7 @@ async function prefetchEtf(code: string, opts: RunDecisionOptions): Promise<EtfP
   const etfQuote = await fetchEtfQuote(code).catch(() => null);
   const name = etfQuote?.name || code;
   // ETF 6 位 K 线免 secid
-  const bars = await getKline(code, 'day', 60).catch(() => [] as KlineBar[]);
+  const bars = await getKline(code, 'day', KLINE_BARS).catch(() => [] as KlineBar[]);
 
   const [quoteNote, metricsNote, sizeNote, fundFlowNote, marketNote, marketStanceNote, newsNote, policyNote, hotspotNote] =
     await Promise.all([

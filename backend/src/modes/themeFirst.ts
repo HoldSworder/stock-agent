@@ -192,18 +192,27 @@ export interface ReplayResult {
   heldRatio: number;
 }
 
+/** 买卖分列的单边成本（bps）。ETF 免印花税，买卖不对称，不能只给一个 costBps */
+export interface ReplayCosts {
+  buyBps: number;
+  sellBps: number;
+}
+
 /**
- * 单仓回放，对齐 python run()（px='close', cost_bps=0）。
+ * 单仓回放，对齐 python run()（px='close'）。
  * 调仓相位以 dates[0] 为第 0 天，故 dates 必须从 spec.anchorDate 起算才能复现回测。
+ * costs 默认零成本：python 留档基准就是 cost_bps=0，自检要逐笔对齐必须保持这个默认；
+ * 生产跟踪与系统重跑由调用方显式传入真实成本档。
  */
 export function replayThemeFirst(
   spec: ThemeFirstSpec,
   universe: UniverseSeries[],
   dates: string[],
-  costBps = 0,
+  costs: ReplayCosts = { buyBps: 0, sellBps: 0 },
 ): ReplayResult {
   const byCode = new Map(universe.map((u) => [u.code, u]));
-  const cost = costBps / 10000;
+  const buyCost = costs.buyBps / 10000;
+  const sellCost = costs.sellBps / 10000;
   const days: ReplayDay[] = [];
   const trades: ReplayTrade[] = [];
 
@@ -260,7 +269,7 @@ export function replayThemeFirst(
         if (reason) {
           const series = byCode.get(hold);
           const sell = series?.rows.get(date)?.c ?? entry;
-          const pnl = (sell / entry) * (1 - cost) * (1 - cost) - 1;
+          const pnl = (sell / entry) * (1 - buyCost) * (1 - sellCost) - 1;
           trades.push({
             entryDate: entryDay,
             exitDate: date,
@@ -273,7 +282,7 @@ export function replayThemeFirst(
             reason,
           });
           events.push({ kind: 'exit', detail: `卖出 ${series?.name ?? ''}(${hold})：${reason}` });
-          cash *= (sell / entry) * (1 - cost);
+          cash *= (sell / entry) * (1 - sellCost);
           hold = null;
           holdFamily = '';
           peakPx = 0;
@@ -292,7 +301,7 @@ export function replayThemeFirst(
           entryIdx = idx;
           peakPx = entry;
           lastHoldClose = entry;
-          cash *= 1 - cost;
+          cash *= 1 - buyCost;
           events.push({ kind: 'enter', detail: `买入 ${series?.name ?? ''}(${hold})：主题 ${best.family}` });
         }
       }
@@ -320,7 +329,7 @@ export function replayThemeFirst(
       family: holdFamily,
       entryPrice: entry,
       exitPrice: sell,
-      pnl: (sell / entry) * (1 - cost) * (1 - cost) - 1,
+      pnl: (sell / entry) * (1 - buyCost) * (1 - sellCost) - 1,
       reason: '持有中',
     });
   }

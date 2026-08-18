@@ -2,6 +2,9 @@ import OpenAI from 'openai';
 import { getValue } from './settings';
 import * as gateway from './agent/gateway';
 
+/** 单次模型请求的客户端兜底超时；Agent 还会按整轮剩余 deadline 进一步收紧 */
+const LLM_REQUEST_TIMEOUT_MS = 120_000;
+
 /**
  * 基于当前设置构造 OpenAI 兼容客户端（模型不限于 DeepSeek）。
  * 【内部专用】仅供统一门面 gateway 及其低层（agent/loop）使用，业务侧禁止直接调用——
@@ -12,7 +15,13 @@ export function getLLM(): { client: OpenAI; model: string } {
   const baseURL = getValue('llmBaseUrl');
   const model = getValue('llmModel');
   if (!apiKey) throw new Error('模型 API Key 未配置，请到设置页填写');
-  const client = new OpenAI({ apiKey, baseURL });
+  const client = new OpenAI({
+    apiKey,
+    baseURL,
+    // 重试统一由 withLlmRetry 接管，避免 SDK 重试与外层重试相乘导致超时失控
+    maxRetries: 0,
+    timeout: LLM_REQUEST_TIMEOUT_MS,
+  });
   return { client, model };
 }
 

@@ -144,7 +144,21 @@ function normalize(h: RawHolding, q: Quote | undefined, totalAsset: number): Rea
   const prevClose = q && q.prevClose > 0 ? q.prevClose : price;
   const marketValue = h.count * price;
   const holdProfit = h.count * (price - h.cost);
-  const todayProfit = h.count * (price - prevClose);
+  // 当日建仓的标的没有「昨收」基准可言（券商口径是「现价 − 买入价」）：用昨收会把买入前的
+  // 日内涨跌算进当日盈亏，并污染 totalTodayProfit 与 positions/attribution 的归因贡献。
+  // 同花顺 hold_days 对当日买入返回 0 还是 1 未经确认，只能取误差更小的那一侧：
+  // 按 ≤1 判时，若昨日建仓也返回 1，昨天那段浮盈会被整段计进「今日盈亏」，
+  // 并经 totalTodayProfit → 当日收益率 / 当日贡献排序 / 喂给 LLM 的持仓正文扩散出去，
+  // 还会被 persist 写进当日快照事后无法回溯；按 ≤0 判时最坏只是少算买入当天开盘到买入价那一段。
+  const openedToday = h.holdDays <= 0;
+  const todayProfit = openedToday ? holdProfit : h.count * (price - prevClose);
+  const todayRate = openedToday
+    ? h.cost > 0
+      ? (price - h.cost) / h.cost
+      : 0
+    : prevClose > 0
+      ? (price - prevClose) / prevClose
+      : 0;
   return {
     code: h.code,
     name: h.name,
@@ -156,7 +170,7 @@ function normalize(h: RawHolding, q: Quote | undefined, totalAsset: number): Rea
     holdProfit,
     holdRate: h.cost > 0 ? (price - h.cost) / h.cost : 0,
     todayProfit,
-    todayRate: prevClose > 0 ? (price - prevClose) / prevClose : 0,
+    todayRate,
     positionRate: totalAsset > 0 ? marketValue / totalAsset : 0,
     holdDays: h.holdDays,
   };
@@ -313,9 +327,49 @@ async function loadFunds(userId: string): Promise<RawFund[]> {
 }
 
 /**
+ * 持仓账本进程内缓存时长。持仓结构是分钟级才会变的东西，而盯盘默认 10 秒一轮、
+ * etfwatch 再叠一份，每 tick 直连 stock_position + pass_quotes（多 fundKey 还成倍）
+ * 既拖长 tick 又有 Cookie 被风控的风险。
+ */
+const PORTFOLIO_TTL_MS = 60_000;
+
+let portfolioCache: { at: number; value: RealPortfolio } | null = null;
+let inflight: Promise<RealPortfolio> | null = null;
+/** 上一次已落库的快照时刻：缓存命中时不重复写同一份镜像 */
+let lastPersistedAsOf = '';
+
+/**
+ * 取账本（TTL + 并发去重）。刻意不用 lib/ttlCache：它有 serve-stale-on-error，
+ * 而 Cookie 失效必须如实抛给调用方（否则页面会一直展示旧持仓，用户不知道该去更新 Cookie）。
+ */
+function loadCachedPortfolio(): Promise<RealPortfolio> {
+  const hit = portfolioCache;
+  if (hit && Date.now() - hit.at < PORTFOLIO_TTL_MS) return Promise.resolve(hit.value);
+  inflight ??= loadRealPositions()
+    .then((p) => {
+      portfolioCache = { at: Date.now(), value: p };
+      return p;
+    })
+    .finally(() => {
+      inflight = null;
+    });
+  return inflight;
+}
+
+/**
  * 读取真实持仓：直连同花顺投资账本（持仓账本 + 实时报价），实时计算盈亏。
+ * 取数走 60 秒 TTL 缓存；落快照是副作用，不进缓存，也不因缓存命中重复触发。
  */
 export async function fetchRealPositions(persistSnapshot = true): Promise<RealPortfolio> {
+  const portfolio = await loadCachedPortfolio();
+  if (persistSnapshot && portfolio.asOf !== lastPersistedAsOf) {
+    persist(portfolio);
+    lastPersistedAsOf = portfolio.asOf;
+  }
+  return portfolio;
+}
+
+async function loadRealPositions(): Promise<RealPortfolio> {
   const userId = getValue('thsUserId');
   if (!userId) throw new RealPositionError('同花顺 UID 未配置，请到设置页填写');
   const fundKeys = getValue('thsFundKeys')
@@ -350,7 +404,7 @@ export async function fetchRealPositions(persistSnapshot = true): Promise<RealPo
   const funds = rawFunds.map((f) => normalizeFund(f, totalAsset));
   const closedToday = closed.map(toClosed);
 
-  const portfolio: RealPortfolio = {
+  return {
     asOf,
     sourceDate: ymd,
     source: '同花顺投资账本',
@@ -368,8 +422,6 @@ export async function fetchRealPositions(persistSnapshot = true): Promise<RealPo
     funds,
     closedToday,
   };
-  if (persistSnapshot) persist(portfolio);
-  return portfolio;
 }
 
 /** 同花顺连通性探测（数据源页健康检查用）：取场外基金账户列表，需 Cookie + UID */

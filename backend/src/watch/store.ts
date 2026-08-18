@@ -8,7 +8,7 @@ import type {
   WatchStats,
 } from '@stock-agent/shared';
 import { db, schema } from '../db/client';
-import { newId, nowIso } from '../util';
+import { newId, nowIso, shanghaiDayStartIso } from '../util';
 
 // 盯盘告警 DB 读写：自管，不进 repo.ts，保持模块独立。
 
@@ -89,33 +89,59 @@ export function insertAlert(input: {
   );
 }
 
+/**
+ * limit 入参钳制。路由层传的是 `Number(req.query.limit)`，非数字会得到 NaN，
+ * 直接绑进 SQL 会让接口 500（用户看到的是「告警列表打不开」而不是「参数错了」）。
+ */
+function clampLimit(limit: number | undefined, def: number, max = 500): number {
+  return typeof limit === 'number' && Number.isFinite(limit)
+    ? Math.min(Math.max(Math.floor(limit), 1), max)
+    : def;
+}
+
 export function listAlerts(limit = 100): WatchAlert[] {
   return db
     .select()
     .from(schema.watchAlerts)
     .orderBy(desc(schema.watchAlerts.createdAt))
-    .limit(limit)
+    .limit(clampLimit(limit, 100))
     .all()
     .map(rowToDto);
 }
 
 /** 今日告警计数（按 ISO 日期前缀粗匹配，本地工具够用） */
 export function countAlertsToday(): number {
-  const todayPrefix = nowIso().slice(0, 10);
   return db
     .select()
     .from(schema.watchAlerts)
-    .where(gte(schema.watchAlerts.createdAt, todayPrefix))
+    .where(gte(schema.watchAlerts.createdAt, shanghaiDayStartIso()))
     .all().length;
 }
 
-/** 查近期是否已对该 code 出过研判（缓存复用判断），返回最近一条 */
-export function findRecentAlertByCode(code: string, withinMin: number): WatchAlert | null {
+/**
+ * 查近期是否已对该 code 的「同类同级」信号出过研判（缓存复用判断），返回最近一条。
+ *
+ * 必须带上 signalType/severity 并排除 shouldAlert=false 的沉默/初筛留痕：
+ * 只按 code 匹配时，一条 low 级 breakout 被初筛拦下所落的 `跳过(初筛)` 记录，
+ * 会让同一只票随后的止损/炸板/计划止损在整个复用窗口内被整条丢弃（既不落库也不推送）。
+ */
+export function findRecentAlertByCode(
+  code: string,
+  withinMin: number,
+  opts: { signalType?: WatchSignalType; severity?: WatchSeverity } = {},
+): WatchAlert | null {
   const since = new Date(Date.now() - withinMin * 60_000).toISOString();
+  const conds = [
+    eq(schema.watchAlerts.code, code),
+    gte(schema.watchAlerts.createdAt, since),
+    eq(schema.watchAlerts.shouldAlert, true),
+  ];
+  if (opts.signalType) conds.push(eq(schema.watchAlerts.signalType, opts.signalType));
+  if (opts.severity) conds.push(eq(schema.watchAlerts.severity, opts.severity));
   const row = db
     .select()
     .from(schema.watchAlerts)
-    .where(and(eq(schema.watchAlerts.code, code), gte(schema.watchAlerts.createdAt, since)))
+    .where(and(...conds))
     .orderBy(desc(schema.watchAlerts.createdAt))
     .get();
   return row ? rowToDto(row) : null;
@@ -153,13 +179,16 @@ export function setOutcome(id: string, outcome: 'hit' | 'miss' | 'flat', pct: nu
     .run();
 }
 
-/** 成本与命中率统计（成熟样本基于全量 outcome；token/拦截按当日） */
+/**
+ * 成本与命中率统计（成熟样本基于全量 outcome；token/拦截按当日）。
+ * 当日窗口必须与 countAlertsToday 同口径走上海日切：用 UTC 日期前缀时，
+ * 凌晨 0–8 点两个「今日告警数」（WatchStatus 与 WatchStats）会互相打架。
+ */
 export function getStats(): WatchStats {
-  const todayPrefix = nowIso().slice(0, 10);
   const todayRows = db
     .select()
     .from(schema.watchAlerts)
-    .where(gte(schema.watchAlerts.createdAt, todayPrefix))
+    .where(gte(schema.watchAlerts.createdAt, shanghaiDayStartIso()))
     .all();
 
   let screenedToday = 0;
@@ -186,14 +215,26 @@ export function getStats(): WatchStats {
   };
 }
 
-/** 死信队列：待重投的告警（应推送但未投递成功） */
-export function listUndelivered(limit = 20): WatchAlert[] {
+/**
+ * 死信队列：待重投的告警（应推送但未投递成功）。
+ *
+ * 必须带时间下界：Telegram 配错期间会持续积累未投递记录，配好之后一次性成批补发，
+ * 跨日的旧卖点补发只是有害噪声（当时的价位与结论都已失效）。
+ */
+export function listUndelivered(limit = 20, withinHours = 12): WatchAlert[] {
+  const since = new Date(Date.now() - Math.max(1, withinHours) * 3_600_000).toISOString();
   return db
     .select()
     .from(schema.watchAlerts)
-    .where(and(eq(schema.watchAlerts.shouldAlert, true), eq(schema.watchAlerts.delivered, false)))
+    .where(
+      and(
+        eq(schema.watchAlerts.shouldAlert, true),
+        eq(schema.watchAlerts.delivered, false),
+        gte(schema.watchAlerts.createdAt, since),
+      ),
+    )
     .orderBy(desc(schema.watchAlerts.createdAt))
-    .limit(limit)
+    .limit(clampLimit(limit, 20, 100))
     .all()
     .map(rowToDto);
 }

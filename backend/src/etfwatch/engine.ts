@@ -12,7 +12,7 @@ import { collectTargets, type EtfTarget } from './targets';
 import { readTfMacd, readDayContext, type TfMacdReadout, type DayContext } from './macd';
 import { processEtfSignal, retryEtfUndelivered } from './dispatcher';
 import { broadcastEtfWatch } from './bus';
-import { getLayerState, listLayerStates, upsertLayerState } from './store';
+import { etfAlertExistsOnBar, getLayerState, listLayerStates, upsertLayerState } from './store';
 import { computeTrendStage, snapshotEtfShares } from './confirm';
 
 // ETF 多周期分层盯盘引擎：交易时段轮询，确定性检测多周期 MACD 金叉/死叉（收盘确认 + 大周期/零轴/
@@ -359,6 +359,14 @@ async function evalTarget(t: EtfTarget, price: number, pct: number, cfg: EtfWatc
   for (const c of candidates) {
     if (seenBar.has(c.dedupKey)) continue;
     seenBar.add(c.dedupKey);
+    // 跨重启幂等：seenBar 只在内存，重启就空了，而层状态是持久化的——
+    // 不查库的话盘中重启会把同一根 bar 的 sell_layer / hard_stop 再推一遍。
+    if (
+      c.signal.barTime &&
+      etfAlertExistsOnBar(c.signal.code, c.signal.type, c.signal.layer, c.signal.barTime)
+    ) {
+      continue;
+    }
     // 热启动首拍：买点候选只记去重键不发出（防回放旧金叉）；卖点/硬止损照常发出
     if (!primed && c.signal.type === 'buy_layer') {
       console.info('[etfwatch] 热启动跳过买点(防旧金叉回放):', c.dedupKey);

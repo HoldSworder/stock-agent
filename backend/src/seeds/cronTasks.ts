@@ -2,6 +2,7 @@ import { sql } from 'drizzle-orm';
 import type { ScheduledTaskInput } from '@stock-agent/shared';
 import { db, schema } from '../db/client';
 import { createTask, deleteTask, listTasks, updateTask } from '../tasks';
+import { getMeta, setMeta } from '../settings';
 import { DISCOVER_PROMPT_LEGACY, RESEARCH_OPP_TASK_NAME } from '../research/service';
 import {
   PLAN_GEN_PROMPT,
@@ -352,10 +353,11 @@ const SEEDS: ScheduledTaskInput[] = [
     notifyChannels: ['webui', 'telegram'],
     timeoutSec: 600,
   },
-  // A2. 妙想东财模拟盘·迁移对照「影子」任务（enabled=true，与原任务同时刻触发，只输出拟交易、不下单，仅 webui）
+  // A2. 妙想东财模拟盘·迁移对照「影子」任务（与原任务同时刻触发，只输出拟交易、不下单，仅 webui）。
+  // 与其它种子一致 enabled=false，由用户在 WebUI 显式启用：影子任务每次触发都真跑 LLM，
+  // 自动启用等于开箱即在烧 token，而对照验证本身是一次性的人工动作。
   {
     ...base,
-    enabled: true,
     modelConfig: heavy,
     name: TASK_MX_SHADOW_0933,
     description: '对照影子：开盘选股同口径研判，只输出拟买入清单，不实际下单',
@@ -366,7 +368,6 @@ const SEEDS: ScheduledTaskInput[] = [
   },
   {
     ...base,
-    enabled: true,
     modelConfig: heavy,
     name: TASK_MX_SHADOW_1015,
     description: '对照影子：上午卖点检查同口径研判，只输出拟卖出/拟补位清单，不实际下单',
@@ -377,7 +378,6 @@ const SEEDS: ScheduledTaskInput[] = [
   },
   {
     ...base,
-    enabled: true,
     modelConfig: heavy,
     name: TASK_MX_SHADOW_1443,
     description: '对照影子：尾盘卖点检查同口径研判，只输出拟卖出清单，不实际下单',
@@ -388,7 +388,6 @@ const SEEDS: ScheduledTaskInput[] = [
   },
   {
     ...base,
-    enabled: true,
     name: TASK_MX_SHADOW_1505,
     description: '对照影子：收盘复盘（本就不下单），仅 webui 推送供对照',
     cronExpr: '5 15 * * 1-5',
@@ -587,6 +586,29 @@ const REMOVED_NAMES = [
 export const WEIPAN_PROMPT_LEGACY =
   '执行尾盘动能套利筛选：选出尾盘有持续动能、适合次日套利的标的。输出必须包含每只标的的现价，便于判断介入时机，并用 save_stock_picks 留痕。推送用竖排清单，禁止表格。';
 
+/**
+ * 已灌过的种子任务名（内部运行态 kv）。
+ *
+ * 没有这份记账时，每次启动都会把 SEEDS 里所有缺失的任务重建一遍——用户主动删掉的种子
+ * 下次重启就复活。有了它，「缺失」才能区分出「用户删过」与「本版本新加的种子」两种情况。
+ */
+const SEEDED_META_KEY = 'seededCronTaskNames';
+
+function readSeededNames(): Set<string> {
+  const raw = getMeta(SEEDED_META_KEY);
+  if (!raw) return new Set();
+  try {
+    const v = JSON.parse(raw) as unknown;
+    return new Set(Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function writeSeededNames(names: Iterable<string>): void {
+  setMeta(SEEDED_META_KEY, JSON.stringify([...new Set(names)].sort()));
+}
+
 /** 首次启动（任务表为空）写入全部种子任务 */
 export function seedCronTasksIfEmpty(): void {
   const row = db
@@ -595,13 +617,15 @@ export function seedCronTasksIfEmpty(): void {
     .get();
   if ((row?.c ?? 0) > 0) return;
   for (const s of SEEDS) createTask(s);
+  writeSeededNames([...readSeededNames(), ...SEEDS.map((s) => s.name)]);
   console.log(`[seed] 已写入 ${SEEDS.length} 个定时任务（默认禁用，配置后到 WebUI 启用）`);
 }
 
 /**
  * 幂等迁移：把已存在的 DB 任务同步到 OpenClaw 线上逻辑。
  * - 先按 RENAME_MAP 重命名（仅当目标规范名尚不存在，避免与已存在规范任务撞名重复）；
- * - 对每个规范任务：存在则在 prompt 命中 LEGACY_PROMPTS 时覆盖 prompt/cron/timeout/model/description；不存在则按 enabled=false 新建；
+ * - 对每个规范任务：存在则在 prompt 命中 LEGACY_PROMPTS 时覆盖 prompt/cron/timeout/model/description；
+ *   不存在且该名字从未灌过（即本版本新增的种子）才按 enabled=false 新建——已灌过又不存在说明用户删了，不复活；
  * - 对 DEPRECATE_NAMES：存在且仍为旧种子文案时停用（保留数据，避免与 OpenClaw 双跑）。
  * - 对 REMOVED_NAMES：彻底删除（非战法任务），功能已迁模块定时或主动下线。
  * 用户已自定义过 prompt 的任务（不在 LEGACY_PROMPTS 内）一律不动。
@@ -623,9 +647,15 @@ export function syncCronTasksFromOpenClaw(): number {
   }
 
   // 2. 规范任务 upsert
+  const seeded = readSeededNames();
+  // 首次引入记账（升级到本版本的存量库）：当前 SEEDS 一律视为已灌过，
+  // 否则用户此前删掉的种子会在这一次同步里被集体复活。
+  const alreadySeeded = seeded.size > 0 ? seeded : new Set(SEEDS.map((s) => s.name));
   for (const seed of SEEDS) {
     const existing = map.get(seed.name);
     if (!existing) {
+      // 只补本版本新增的种子；已灌过却不存在的是用户删掉的，不再重建
+      if (alreadySeeded.has(seed.name)) continue;
       createTask(seed);
       changed++;
       continue;
@@ -663,5 +693,6 @@ export function syncCronTasksFromOpenClaw(): number {
     }
   }
 
+  writeSeededNames([...alreadySeeded, ...SEEDS.map((s) => s.name)]);
   return changed;
 }

@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, or, sql } from 'drizzle-orm';
 import type {
   SymbolPlanEvent,
   SymbolPlanEventKind,
@@ -38,6 +38,7 @@ function toDto(row: PlanRow): SymbolTradePlan {
     code: row.code,
     name: row.name,
     assetType: row.assetType as SymbolTradePlan['assetType'],
+    secid: row.secid,
     status: row.status as SymbolPlanStatus,
     asOf: row.asOf,
     validFrom: row.validFrom,
@@ -100,6 +101,8 @@ function toRow(plan: SymbolTradePlan): PlanRow {
     code: plan.code,
     name: plan.name,
     assetType: plan.assetType,
+    // 落 secid：求值与预测结算都要按它取 K 线，只有 code 会让指数撞到同码个股
+    secid: plan.secid ?? null,
     version: plan.version,
     // 期限车道已合并，列保留只为不动老数据；新计划一律写常量
     horizon: MERGED_HORIZON,
@@ -245,6 +248,30 @@ export function insertPlan(plan: SymbolTradePlan): void {
   db.insert(schema.symbolTradePlans).values(toRow(plan)).run();
 }
 
+/**
+ * 把到期时间提前到 `at`（只提前、不推迟；原值为空视为无限远，一律收紧）。
+ *
+ * 给「风险路径已启动」用：那份计划的多头情景已被行情否掉，但状态停在 triggered（仍是 live），
+ * 直接改状态会让最该给出减仓指令的时刻变成一份灰掉的作废计划。收紧有效期既保住当下的
+ * 减仓显示，又能让它在收盘时进入重算队列，而不是挂满 28 天。
+ *
+ * @returns 是否真的收紧了
+ */
+export function shortenExpiry(id: string, at: string): boolean {
+  const row = db
+    .select({ expiresAt: schema.symbolTradePlans.expiresAt })
+    .from(schema.symbolTradePlans)
+    .where(eq(schema.symbolTradePlans.id, id))
+    .get();
+  if (!row) return false;
+  if (row.expiresAt != null && row.expiresAt <= at) return false;
+  db.update(schema.symbolTradePlans)
+    .set({ expiresAt: at, updatedAt: nowIso() })
+    .where(eq(schema.symbolTradePlans.id, id))
+    .run();
+  return true;
+}
+
 export function updateStatus(id: string, status: SymbolPlanStatus): void {
   db.update(schema.symbolTradePlans)
     .set({ status, updatedAt: nowIso() })
@@ -281,20 +308,37 @@ export function supersedeOthers(
 /**
  * 需要重算的计划：该标的**最新版本**已失效或过期，且没有更新的生效版本顶上。
  *
+ * 「已过有效期但状态还没被求值改写」的生效计划同样收：状态是求值引擎写的，
+ * 而求值只在有行情时跑，一份过了期却没人求值的计划会永远停在 active 挂着旧价位。
+ * 风险路径已启动的计划也是靠这条进队列的——它的有效期被收紧到当日收盘（见 shortenExpiry），
+ * 状态则保持 triggered 以便盘中继续显示减仓指令。
+ *
  * 必须限定「最新版本」。只按状态筛的话，同一标的历史上每一版失效计划都会被选中，
  * 一个标的一次收盘就会重算十几遍。
  *
  * 按 asOf 倒序返回：调用方每轮只吃前 N 只。不排序的话返回的是表内插入序，
  * 某只早已退市/长期取不到数的标的会永远排在最前、每天霸占同样几个名额，
  * 今天新失效的计划则永远轮不上。倒序让最新失效的先重算，陈年老账排到队尾。
+ *
+ * 结果**按 code 去重**：唯一索引是 (code, horizon, version)，同一 code 的
+ * (code,'next_session',1) 与 (code,'swing',1) 都满足 version = max(version)，
+ * 两条一起入选会让同一标的一轮里被重算两次——白烧一次 agent 调用、占掉一个名额、统计虚高。
  */
 export function listStalePlans(): SymbolTradePlan[] {
+  const seen = new Set<string>();
+  const now = nowIso();
   return db
     .select()
     .from(schema.symbolTradePlans)
     .where(
       and(
-        inArray(schema.symbolTradePlans.status, ['invalid', 'expired'] as SymbolPlanStatus[]),
+        or(
+          inArray(schema.symbolTradePlans.status, ['invalid', 'expired'] as SymbolPlanStatus[]),
+          and(
+            inArray(schema.symbolTradePlans.status, LIVE_STATUSES),
+            sql`${schema.symbolTradePlans.expiresAt} is not null and ${schema.symbolTradePlans.expiresAt} < ${now}`,
+          ),
+        ),
         sql`${schema.symbolTradePlans.version} = (
           select max(version) from symbol_trade_plans x where x.code = ${schema.symbolTradePlans.code}
         )`,
@@ -302,7 +346,64 @@ export function listStalePlans(): SymbolTradePlan[] {
     )
     .orderBy(desc(schema.symbolTradePlans.asOf), desc(schema.symbolTradePlans.updatedAt))
     .all()
+    .filter((r) => {
+      if (seen.has(r.code)) return false;
+      seen.add(r.code);
+      return true;
+    })
     .map(toDto);
+}
+
+/**
+ * 把候选模型版本已过期的生效计划置为 expired，使其进入收盘重算队列。
+ *
+ * 候选口径变了（聚类容差、白名单极性、枢轴基准根等）意味着旧计划引用的价位与条件
+ * 已经不是当前口径算出来的东西，继续拿它盯盘等于用一把旧尺子量新行情。
+ * 但**不删历史、不回退为可执行**：置 expired 后计划仍可见可复盘，只是停止执行，
+ * 由 closeRegenerate 派生新版本；新版本落库失败时它就停在「已过期但可复盘」，这是安全侧。
+ *
+ * **必须分批**：升版本那一轮库里所有生效计划都不是当前口径，一次性全置 expired
+ * 会让它们同时从 getActivePlan / listLivePlans 里消失，而重算侧一轮只吃 MAX_PER_RUN 只，
+ * 跟踪 N 只标的就要 ceil(N/8) 个交易日才恢复，期间用户看到的是「尚无交易计划」。
+ * 只置本轮吃得下的那几只，其余保持生效，等轮到自己再换口径——旧口径多挂一两天，
+ * 远好过整片计划集体消失。
+ *
+ * @param currentVersion 当前 CANDIDATE_MODEL_VERSION，由调用方传入以免仓储层反向依赖候选目录
+ * @param limit 本轮最多置过期多少只；不传表示不限（只给自检与一次性维护脚本用）
+ * @returns 被置为过期的计划
+ */
+export function expireOutdatedCandidateModelPlans(
+  currentVersion: string,
+  limit?: number,
+): Array<{ id: string; code: string; version: number; from: string }> {
+  if (limit != null && limit <= 0) return [];
+  const q = db
+    .select()
+    .from(schema.symbolTradePlans)
+    .where(
+      and(
+        inArray(schema.symbolTradePlans.status, LIVE_STATUSES),
+        sql`${schema.symbolTradePlans.candidateModelVersion} <> ${currentVersion}`,
+      ),
+    )
+    // 与 listStalePlans 同序：最近的计划先换口径，陈年老账排队尾
+    .orderBy(desc(schema.symbolTradePlans.asOf), desc(schema.symbolTradePlans.updatedAt));
+  const rows = limit != null ? q.limit(limit).all() : q.all();
+  for (const r of rows) {
+    updateStatus(r.id, 'expired');
+    appendEvent({
+      planId: r.id,
+      planVersion: r.version,
+      kind: 'expired',
+      note: `候选模型版本已从 ${r.candidateModelVersion || '(空)'} 升到 ${currentVersion}，价位口径变化，置为过期待重算`,
+    });
+  }
+  return rows.map((r) => ({
+    id: r.id,
+    code: r.code,
+    version: r.version,
+    from: r.candidateModelVersion,
+  }));
 }
 
 export function appendEvent(input: {

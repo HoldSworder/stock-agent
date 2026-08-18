@@ -553,7 +553,9 @@ export async function ensureHeldEtfCoverage(runId: string | null): Promise<strin
   const plan = getTodayPlan();
   if (!plan) return [];
 
-  const portfolio = await fetchRealPositions().catch((e) => {
+  // persistSnapshot 必须显式传 false：这里是盘前 08:30 的只读读取，
+  // 默认 true 会用盘前价写一条 position_snapshots，污染归因与持仓历史
+  const portfolio = await fetchRealPositions(false).catch((e) => {
     console.warn('[plan] 持仓 ETF 兜底取持仓失败:', e instanceof Error ? e.message : e);
     return null;
   });

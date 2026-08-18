@@ -111,11 +111,24 @@ const SECRET_KEYS = new Set<SettingKey>([
   'telegramBotToken',
   'thsCookie',
   'idpToken',
+  'jisiluCookie',
   'htApiKey',
   'iwencaiApiKey',
   'weiboCookie',
   'xhsCookie',
 ]);
+
+const SECRET_MASK_PREFIX = '••••';
+
+/** 把敏感值转换为统一可识别的掩码；空值保持为空 */
+export function maskSecret(value: string): string {
+  return value ? `${SECRET_MASK_PREFIX}${value.slice(-4)}` : '';
+}
+
+/** 判断设置页提交值是否为服务端生成的敏感字段掩码 */
+export function isSecretMask(value: string): boolean {
+  return value.startsWith(SECRET_MASK_PREFIX);
+}
 
 function readRawByName(name: string): string | undefined {
   const row = db
@@ -190,57 +203,63 @@ export function migrateLegacySettings(): void {
   }
 }
 
-/** 对外暴露的设置视图：已登录鉴权保护，直接回显明文便于核对 */
+/** 读取对外设置值；敏感字段只返回统一掩码，不泄露明文 */
+function getPublicValue(key: SettingKey): string {
+  const value = getValue(key);
+  return SECRET_KEYS.has(key) ? maskSecret(value) : value;
+}
+
+/** 对外暴露的设置视图：敏感字段仅显示“已配置”掩码 */
 export function getPublicSettings(): AppSettings {
   return {
-    llmBaseUrl: getValue('llmBaseUrl'),
-    llmModel: getValue('llmModel'),
-    llmLightModel: getValue('llmLightModel'),
-    llmContextWindow: getValue('llmContextWindow'),
-    llmApiKey: getValue('llmApiKey'),
-    emApiKey: getValue('emApiKey'),
-    mxApiKey: getValue('mxApiKey'),
-    telegramBotToken: getValue('telegramBotToken'),
-    telegramChatId: getValue('telegramChatId'),
-    telegramThreadId: getValue('telegramThreadId'),
-    thsCookie: getValue('thsCookie'),
-    thsUserId: getValue('thsUserId'),
-    thsFundKeys: getValue('thsFundKeys'),
-    idpToken: getValue('idpToken'),
-    trendradarMcpUrl: getValue('trendradarMcpUrl'),
-    trendradarEnabled: getValue('trendradarEnabled'),
-    researchBaseUrl: getValue('researchBaseUrl'),
-    researchEnabled: getValue('researchEnabled'),
-    etfEnabled: getValue('etfEnabled'),
-    eastmoneyEnabled: getValue('eastmoneyEnabled'),
-    tencentEnabled: getValue('tencentEnabled'),
-    sinaEnabled: getValue('sinaEnabled'),
-    neteaseEnabled: getValue('neteaseEnabled'),
-    jisiluEnabled: getValue('jisiluEnabled'),
-    jisiluCookie: getValue('jisiluCookie'),
-    akshareBaseUrl: getValue('akshareBaseUrl'),
-    akshareEnabled: getValue('akshareEnabled'),
-    cffexEnabled: getValue('cffexEnabled'),
-    usMapEnabled: getValue('usMapEnabled'),
-    htApiKey: getValue('htApiKey'),
-    htscBaseUrl: getValue('htscBaseUrl'),
-    htscEnabled: getValue('htscEnabled'),
-    iwencaiApiKey: getValue('iwencaiApiKey'),
-    iwencaiBaseUrl: getValue('iwencaiBaseUrl'),
-    iwencaiEnabled: getValue('iwencaiEnabled'),
-    iwencaiSkillId: getValue('iwencaiSkillId'),
-    iwencaiStockSkillId: getValue('iwencaiStockSkillId'),
-    iwencaiStockEnabled: getValue('iwencaiStockEnabled'),
-    clsEnabled: getValue('clsEnabled'),
-    xueqiuEnabled: getValue('xueqiuEnabled'),
-    astockBaseUrl: getValue('astockBaseUrl'),
-    astockEnabled: getValue('astockEnabled'),
-    weiboEnabled: getValue('weiboEnabled'),
-    weiboCookie: getValue('weiboCookie'),
-    xhsEnabled: getValue('xhsEnabled'),
-    xhsCookie: getValue('xhsCookie'),
-    weiboFetchDays: getValue('weiboFetchDays'),
-    xhsFetchDays: getValue('xhsFetchDays'),
+    llmBaseUrl: getPublicValue('llmBaseUrl'),
+    llmModel: getPublicValue('llmModel'),
+    llmLightModel: getPublicValue('llmLightModel'),
+    llmContextWindow: getPublicValue('llmContextWindow'),
+    llmApiKey: getPublicValue('llmApiKey'),
+    emApiKey: getPublicValue('emApiKey'),
+    mxApiKey: getPublicValue('mxApiKey'),
+    telegramBotToken: getPublicValue('telegramBotToken'),
+    telegramChatId: getPublicValue('telegramChatId'),
+    telegramThreadId: getPublicValue('telegramThreadId'),
+    thsCookie: getPublicValue('thsCookie'),
+    thsUserId: getPublicValue('thsUserId'),
+    thsFundKeys: getPublicValue('thsFundKeys'),
+    idpToken: getPublicValue('idpToken'),
+    trendradarMcpUrl: getPublicValue('trendradarMcpUrl'),
+    trendradarEnabled: getPublicValue('trendradarEnabled'),
+    researchBaseUrl: getPublicValue('researchBaseUrl'),
+    researchEnabled: getPublicValue('researchEnabled'),
+    etfEnabled: getPublicValue('etfEnabled'),
+    eastmoneyEnabled: getPublicValue('eastmoneyEnabled'),
+    tencentEnabled: getPublicValue('tencentEnabled'),
+    sinaEnabled: getPublicValue('sinaEnabled'),
+    neteaseEnabled: getPublicValue('neteaseEnabled'),
+    jisiluEnabled: getPublicValue('jisiluEnabled'),
+    jisiluCookie: getPublicValue('jisiluCookie'),
+    akshareBaseUrl: getPublicValue('akshareBaseUrl'),
+    akshareEnabled: getPublicValue('akshareEnabled'),
+    cffexEnabled: getPublicValue('cffexEnabled'),
+    usMapEnabled: getPublicValue('usMapEnabled'),
+    htApiKey: getPublicValue('htApiKey'),
+    htscBaseUrl: getPublicValue('htscBaseUrl'),
+    htscEnabled: getPublicValue('htscEnabled'),
+    iwencaiApiKey: getPublicValue('iwencaiApiKey'),
+    iwencaiBaseUrl: getPublicValue('iwencaiBaseUrl'),
+    iwencaiEnabled: getPublicValue('iwencaiEnabled'),
+    iwencaiSkillId: getPublicValue('iwencaiSkillId'),
+    iwencaiStockSkillId: getPublicValue('iwencaiStockSkillId'),
+    iwencaiStockEnabled: getPublicValue('iwencaiStockEnabled'),
+    clsEnabled: getPublicValue('clsEnabled'),
+    xueqiuEnabled: getPublicValue('xueqiuEnabled'),
+    astockBaseUrl: getPublicValue('astockBaseUrl'),
+    astockEnabled: getPublicValue('astockEnabled'),
+    weiboEnabled: getPublicValue('weiboEnabled'),
+    weiboCookie: getPublicValue('weiboCookie'),
+    xhsEnabled: getPublicValue('xhsEnabled'),
+    xhsCookie: getPublicValue('xhsCookie'),
+    weiboFetchDays: getPublicValue('weiboFetchDays'),
+    xhsFetchDays: getPublicValue('xhsFetchDays'),
   };
 }
 
@@ -297,9 +316,10 @@ export interface SettingsUpdate {
 
 export function updateSettings(patch: SettingsUpdate): void {
   for (const [k, v] of Object.entries(patch)) {
-    if (v === undefined) continue;
-    // 敏感字段留空表示「不修改」，避免掩码回显被原样保存导致清空
-    if (v === '' && SECRET_KEYS.has(k as SettingKey)) continue;
-    setValue(k as SettingKey, v);
+    if (!Object.prototype.hasOwnProperty.call(KEYS, k) || typeof v !== 'string') continue;
+    const key = k as SettingKey;
+    // 敏感字段留空或回传掩码均表示“不修改”
+    if (SECRET_KEYS.has(key) && (v === '' || isSecretMask(v))) continue;
+    setValue(key, v);
   }
 }

@@ -8,6 +8,7 @@ import type {
   EtfWatchStatus,
 } from '@stock-agent/shared';
 import { api, openWs } from '@/api';
+import { createWsRetry } from '@/composables/wsRetry';
 
 /** 信号流折叠行：按 code:type:layer 聚合，记录触发次数与首次时间 */
 export interface EtfWatchSignalRow extends EtfWatchSignal {
@@ -36,7 +37,7 @@ export const useEtfWatchStore = defineStore('etfWatch', () => {
   const alertScope = ref<'today' | 'all'>('today');
 
   let ws: WebSocket | null = null;
-  let reconnectTimer: number | null = null;
+  const retry = createWsRetry('ETF 盯盘');
   /** 信号流归属的上海交易日；跨日首帧清空隔夜残留 */
   let feedDay = shanghaiToday();
 
@@ -69,11 +70,17 @@ export const useEtfWatchStore = defineStore('etfWatch', () => {
     }
   }
 
-  function connect() {
+  /**
+   * @param fromRetry 是否由退避重连触发。store 是单例，退避计数跨页面存活，
+   *   用户主动进页面算一次新的连接意图，必须重置计数，否则打满上限后再进来永不重连。
+   */
+  function connect(fromRetry = false) {
+    if (!fromRetry) retry.reset();
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
     ws = openWs('/ws/etf-watch');
     ws.onopen = () => {
       connected.value = true;
+      retry.reset();
     };
     ws.onmessage = (ev) => {
       try {
@@ -84,21 +91,13 @@ export const useEtfWatchStore = defineStore('etfWatch', () => {
     };
     ws.onclose = () => {
       connected.value = false;
-      if (reconnectTimer == null) {
-        reconnectTimer = window.setTimeout(() => {
-          reconnectTimer = null;
-          connect();
-        }, 5000);
-      }
+      retry.schedule(() => connect(true));
     };
     ws.onerror = () => ws?.close();
   }
 
   function disconnect() {
-    if (reconnectTimer != null) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
+    retry.cancel();
     if (ws) {
       ws.onclose = null;
       ws.onerror = null;

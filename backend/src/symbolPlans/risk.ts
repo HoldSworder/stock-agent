@@ -9,6 +9,7 @@ import type {
 } from '@stock-agent/shared';
 import { planPeriodRank } from '@stock-agent/shared';
 import { budgetForPhase, computeSizing } from '../positions/riskBudget';
+import { nextTradingClose } from './sessionClock';
 
 const REGIME_PHASES: MarketRegimePhase[] = ['主升', '退潮', '反弹', '震荡'];
 
@@ -184,11 +185,14 @@ export function assembleRisk(input: RiskInput): AssembledRisk {
 }
 
 /**
- * 下次复核时间：下一交易日收盘后。
+ * 下次复核时间：下一交易日收盘。
  * 合并车道后不再按期限拉长到一周——计划里既有 60 分钟级条件，
  * 一周才复核一次意味着短周期那部分整周处于无人看管状态。
  * 真正的长期有效性由 expiresAt 与时间止损负责。
+ *
+ * 走交易日历而不是「+24 小时」：后者周五生成会给出周六，那天不开市，
+ * 这个字段就成了一句自相矛盾的话（注释写着交易日、值却是休市日）。
  */
 function nextReviewAt(): string {
-  return new Date(Date.now() + 86_400_000).toISOString();
+  return nextTradingClose();
 }

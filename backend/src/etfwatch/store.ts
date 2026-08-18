@@ -1,4 +1,4 @@
-import { and, desc, eq, gte } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray } from 'drizzle-orm';
 import type {
   EtfConfirm,
   EtfExecInstruction,
@@ -11,7 +11,7 @@ import type {
   EtfWatchVerdict,
 } from '@stock-agent/shared';
 import { db, schema } from '../db/client';
-import { newId, nowIso, shanghaiToday } from '../util';
+import { newId, nowIso, shanghaiDayStartIso, shanghaiToday } from '../util';
 
 // ETF 盯盘告警与层状态 DB 读写：自管，不进 repo.ts，保持模块独立。
 
@@ -91,7 +91,18 @@ export function insertEtfAlert(input: {
   );
 }
 
-export function listEtfAlerts(limit = 100, todayOnly = false): EtfWatchAlert[] {
+/**
+ * limit 入参钳制。路由层传的是 `Number(req.query.limit)`，非数字会得到 NaN，
+ * 直接绑进 SQL 会让接口 500。
+ */
+function clampLimit(limit: number | undefined, def: number, max = 500): number {
+  return typeof limit === 'number' && Number.isFinite(limit)
+    ? Math.min(Math.max(Math.floor(limit), 1), max)
+    : def;
+}
+
+export function listEtfAlerts(rawLimit = 100, todayOnly = false): EtfWatchAlert[] {
+  const limit = clampLimit(rawLimit, 100);
   if (!todayOnly) {
     return db
       .select()
@@ -116,25 +127,69 @@ export function listEtfAlerts(limit = 100, todayOnly = false): EtfWatchAlert[] {
 }
 
 export function countEtfAlertsToday(): number {
-  const todayPrefix = nowIso().slice(0, 10);
   return db
     .select()
     .from(schema.etfWatchSignals)
-    .where(gte(schema.etfWatchSignals.createdAt, todayPrefix))
+    .where(gte(schema.etfWatchSignals.createdAt, shanghaiDayStartIso()))
     .all().length;
 }
 
-export function listEtfUndelivered(limit = 20): EtfWatchAlert[] {
+/**
+ * 允许补发的 verdict 白名单：只有真正推送过的动作才补发。
+ * 定义在 store 而非 dispatcher，是因为过滤必须下推到 SQL——放在取数之后过滤时，
+ * 「观察/放弃」这类恒 delivered=false 的留痕会把 limit 名额占满（12 小时窗口内攒够 20 条
+ * 轻而易举），更早那条真正推送失败的建仓/硬止损就永远进不了候选集，补发不出去。
+ */
+export const REPUSH_VERDICTS: EtfWatchVerdict[] = ['建仓', '撤层', '硬止损'];
+
+/**
+ * 死信队列：待重投的告警。
+ * 必须带时间下界——pushTelegram 关闭期间落库的告警 delivered 恒为 false，
+ * 开启后会被整批跨日补发，而当时的价位与结论早已失效。
+ * 原先的 `positionPct >= 0` 条件恒真，起不到任何过滤作用，已移除。
+ */
+export function listEtfUndelivered(limit = 20, withinHours = 12): EtfWatchAlert[] {
+  const since = new Date(Date.now() - Math.max(1, withinHours) * 3_600_000).toISOString();
   return db
     .select()
     .from(schema.etfWatchSignals)
     .where(
-      and(eq(schema.etfWatchSignals.delivered, false), gte(schema.etfWatchSignals.positionPct, 0)),
+      and(
+        eq(schema.etfWatchSignals.delivered, false),
+        gte(schema.etfWatchSignals.createdAt, since),
+        inArray(schema.etfWatchSignals.verdict, REPUSH_VERDICTS),
+      ),
     )
     .orderBy(desc(schema.etfWatchSignals.createdAt))
-    .limit(limit)
+    .limit(clampLimit(limit, 20, 100))
     .all()
     .map(rowToAlert);
+}
+
+/**
+ * 该根 bar 上是否已落过同 code/类型/层的告警。
+ * 引擎的 seenBar 只在内存、重启即失，而层状态 heldLayers 是持久化的，
+ * 盘中重启会把同一根 bar 的 sell_layer / hard_stop 再推一遍。
+ */
+export function etfAlertExistsOnBar(
+  code: string,
+  signalType: EtfWatchSignalType,
+  layer: number,
+  barTime: string,
+): boolean {
+  const row = db
+    .select({ id: schema.etfWatchSignals.id })
+    .from(schema.etfWatchSignals)
+    .where(
+      and(
+        eq(schema.etfWatchSignals.code, code),
+        eq(schema.etfWatchSignals.signalType, signalType),
+        eq(schema.etfWatchSignals.layer, layer),
+        eq(schema.etfWatchSignals.barTime, barTime),
+      ),
+    )
+    .get();
+  return !!row;
 }
 
 export function markEtfDelivered(id: string): void {

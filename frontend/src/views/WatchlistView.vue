@@ -122,7 +122,15 @@ const forecastOpen = ref(false);
 const forecastCode = ref('');
 const forecastName = ref('');
 
+/**
+ * in-flight 守卫。这一页是裸 3 秒轮询（同页 MarketView/EtfView 走 useCachedResource
+ * 的 TTL 闸门），上游慢于 3 秒时请求会持续堆叠，乱序返回还会让列表来回跳。
+ */
+let loadInFlight = false;
+
 async function load(silent = false) {
+  if (loadInFlight) return;
+  loadInFlight = true;
   if (!silent) loading.value = true;
   try {
     items.value = await api.listWatchlist();
@@ -132,6 +140,7 @@ async function load(silent = false) {
   } catch (e) {
     if (!silent) ElMessage.error(e instanceof Error ? e.message : String(e));
   } finally {
+    loadInFlight = false;
     if (!silent) loading.value = false;
   }
 }
@@ -287,7 +296,11 @@ const fixed = (v: number, d = 2) => v.toFixed(d);
 let timer: ReturnType<typeof setInterval> | undefined;
 onMounted(() => {
   load();
-  timer = setInterval(() => load(true), 3000);
+  // 标签页在后台时没人看报价，别白拉全量自选（含实时报价）
+  timer = setInterval(() => {
+    if (document.visibilityState !== 'visible') return;
+    void load(true);
+  }, 3000);
   window.addEventListener('click', closeCtxMenu);
   window.addEventListener('contextmenu', closeCtxMenu, true);
 });

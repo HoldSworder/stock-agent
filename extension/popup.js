@@ -87,7 +87,8 @@ async function onSyncCookie() {
   btn.disabled = true;
   try {
     const data = await syncThsCookie();
-    log(`Cookie 已推送，后端 thsCookieSet=${!!data?.thsCookie}`, 'OK');
+    // 后端只回布尔位（不回值）；旧后端没有这两个字段时退回 updated 判定，避免推成功却显示 false
+    log(`Cookie 已推送，后端 thsCookieSet=${data?.thsCookieSet ?? data?.updated === true}`, 'OK');
   } catch (e) {
     log(e instanceof Error ? e.message : String(e), 'ERR');
   } finally {
@@ -178,7 +179,7 @@ async function startLogin() {
         const data = await pushCredentials({ idpToken: token });
         chrome.runtime.sendMessage({ type: 'token-updated' });
         const until = expiresAt ? `，有效期至 ${new Date(expiresAt).toLocaleString()}` : '';
-        log(`token 已推送，后端 idpTokenSet=${!!data?.idpToken}${until}`, 'OK');
+        log(`token 已推送，后端 idpTokenSet=${data?.idpTokenSet ?? data?.updated === true}${until}`, 'OK');
         $('qrBox').classList.add('hidden');
         return;
       }

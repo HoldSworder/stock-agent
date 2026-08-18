@@ -207,6 +207,11 @@ http.interceptors.request.use((cfg) => {
 http.interceptors.response.use(
   (res) => res,
   (err) => {
+    // 后端绝大多数错误走非 2xx + { ok:false, error }，axios 直接 reject，
+    // unwrap 够不到；不在这里把 error 提成 err.message，所有调用点的 catch
+    // 只能显示「Request failed with status code 400」这种对用户毫无意义的原文。
+    const msg = err?.response?.data?.error;
+    if (typeof msg === 'string' && msg) err.message = msg;
     if (err?.response?.status === 401) {
       clearToken();
       if (!location.pathname.startsWith('/login')) {
@@ -229,8 +234,9 @@ export const api = {
   authStatus: () => unwrap<AuthStatus>(http.get('/auth/status')),
   login: (password: string) =>
     unwrap<LoginResult>(http.post('/auth/login', { password })),
-  setPassword: (next: string) =>
-    unwrap<LoginResult>(http.post('/auth/password', { next })),
+  /** 设置访问密码。已启用鉴权时后端强制校验 current，首次 bootstrap 可不传 */
+  setPassword: (next: string, current?: string) =>
+    unwrap<LoginResult>(http.post('/auth/password', { next, current })),
 
   // 设置
   getSettings: () => unwrap<AppSettings>(http.get('/settings')),
@@ -250,8 +256,9 @@ export const api = {
 
   // 运行 / 复盘
   listRuns: () => unwrap<TaskRun[]>(http.get('/runs')),
+  /** run 可能为 null：id 不存在时后端返回 404，调用方必须显式判空 */
   getRun: (id: string) =>
-    unwrap<{ run: TaskRun; messages: RunMessage[] }>(http.get(`/runs/${id}`)),
+    unwrap<{ run: TaskRun | null; messages: RunMessage[] }>(http.get(`/runs/${id}`)),
 
   // 调用记录分析
   usage: {
@@ -600,10 +607,20 @@ export const api = {
       unwrap<ReviewHistoryItem[]>(
         http.get('/research/opportunity-reviews', { params: { limit } }),
       ),
-    announcements: (params?: { days?: number; limit?: number }) =>
-      unwrap<ResearchAnnouncementItem[]>(
-        http.get('/research/announcements', { params, timeout: 30000 }),
-      ),
+    /**
+     * 候选公告。除 data 外还要读顶层 partial：
+     * 翻页部分失败时候选集不完整，界面必须说出来，否则用户会把「少拉了几百条」当成「今日就这些公告」。
+     */
+    announcements: async (params?: { days?: number; limit?: number }) => {
+      const res = await http.get<
+        ApiResult<ResearchAnnouncementItem[]> & { partial?: boolean }
+      >('/research/announcements', { params, timeout: 30000 });
+      if (!res.data.ok) throw new Error(res.data.error || '请求失败');
+      return {
+        items: (res.data.data ?? []) as ResearchAnnouncementItem[],
+        partial: res.data.partial === true,
+      };
+    },
     announcementContent: (artCode: string) =>
       unwrap<{ text: string | null }>(
         http.get('/research/announcement-content', { params: { artCode }, timeout: 30000 }),

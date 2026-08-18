@@ -44,16 +44,27 @@ export async function fetchBars(code: string): Promise<Bar[]> {
   const raw = (await callAstock('mootdx_kline', { symbol: code, category: 4, offset: 800 })) as
     | Array<Record<string, unknown>>
     | null;
-  const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
-  const bars: Bar[] = (raw ?? []).map((x) => ({
-    d: String(x.datetime ?? '').slice(0, 10),
-    o: num(x.open),
-    h: num(x.high),
-    l: num(x.low),
-    c: num(x.close),
-    v: num(x.volume),
-    amt: num(x.amount),
-  }));
+  // 非有限值一律返回 null，让整根 bar 被丢弃：以前统一折成 0，一根 close=0 的坏 bar
+  // 会在 adjustSplits 里算出 r=0 并把它之前的全部历史价格乘 0 清零，而 loadPoolBars
+  // 只看 bars.length 不会察觉，之后 ma/ret/above60/themePower 全部失真。
+  const num = (v: unknown): number | null => {
+    const n = typeof v === 'number' ? v : typeof v === 'string' && v.trim() !== '' ? Number(v) : NaN;
+    return Number.isFinite(n) ? n : null;
+  };
+  const bars: Bar[] = [];
+  for (const x of raw ?? []) {
+    const d = String(x.datetime ?? '').slice(0, 10);
+    const o = num(x.open);
+    const h = num(x.high);
+    const l = num(x.low);
+    const c = num(x.close);
+    const v = num(x.volume);
+    // 成交额是选填字段（computeRows 会用 v×c 兜底），缺了不必丢整根
+    const amt = num(x.amount) ?? 0;
+    if (!d || o === null || h === null || l === null || c === null || v === null) continue;
+    if (!(c > 0)) continue;
+    bars.push({ d, o, h, l, c, v, amt });
+  }
   bars.sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : 0));
   return adjustSplits(bars);
 }
@@ -62,10 +73,12 @@ export async function fetchBars(code: string): Promise<Bar[]> {
 export function adjustSplits(bars: Bar[]): Bar[] {
   const factor = bars.map(() => 1);
   for (let i = 1; i < bars.length; i++) {
-    if (bars[i - 1].c > 0) {
-      const r = bars[i].c / bars[i - 1].c;
-      if (r < 0.65 || r > 1.5) for (let j = 0; j < i; j++) factor[j] *= r;
-    }
+    // 两侧收盘都必须为正且比值有限为正：r 为 0 / NaN / 负数时整段历史会被乘坏，
+    // 宁可跳过这一次除权推断（顶多少复权一次），也不能污染前面所有 bar
+    if (!(bars[i - 1].c > 0) || !(bars[i].c > 0)) continue;
+    const r = bars[i].c / bars[i - 1].c;
+    if (!Number.isFinite(r) || r <= 0) continue;
+    if (r < 0.65 || r > 1.5) for (let j = 0; j < i; j++) factor[j] *= r;
   }
   for (let i = 0; i < bars.length; i++) {
     const f = factor[i];

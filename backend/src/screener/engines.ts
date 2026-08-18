@@ -67,6 +67,15 @@ export interface ScreenEngine {
 /** LLM 横排候选池上限（控制 token；从打分 Top 截取） */
 const LLM_POOL_MAX = 40;
 
+/**
+ * 显式留缺声明：seeds/cronTasks.ts 写给 LLM 的交易硬规则里包含「排除上市未满 30 个交易日的次新股」，
+ * 但确定性代码层没有对应实现——东财 clist 快照没有上市日期字段，用代码段前缀去猜是伪实现。
+ * 次新股的波动/流动性特征不适用现有因子口径（momentum/activity 会系统性给高分），
+ * 所以这条规则未生效必须显式可见，不能静默不执行。补上上市日期数据源后删除本条。
+ */
+const UNIMPLEMENTED_RULE_NOTE =
+  '⚠️ 次新股（上市不足 30 交易日）过滤因缺少上市日期数据源尚未生效，结果中可能混入次新股';
+
 /** 把运行模式说明拼到文案前缀（marketView/selectionLogic），便于前端识别降级来源 */
 function withModeNote(mode: string | null, text: string | null): string | null {
   if (!mode) return text;
@@ -119,12 +128,15 @@ const multifactor: ScreenEngine = {
 
     // 盘前退化处理：当日量价被东财置 0 时，优先复用最近一次有效行情缓存（通常即上一交易日收盘），
     // 让硬筛/打分照常生效；非退化则把本次快照写入缓存，供下个盘前窗口使用。
-    let runMode: string | null = null;
+    let runMode: string | null = UNIMPLEMENTED_RULE_NOTE;
     if (isDegenerateSnapshot(snapshot)) {
-      const cached = loadLastCloseSnapshot();
+      const { rows: cached, staleNote } = loadLastCloseSnapshot();
       if (cached) {
         snapshot = cached;
-        runMode = '盘前模式：采用上一交易日收盘快照';
+        runMode = `盘前模式：采用上一交易日收盘快照；${runMode}`;
+      } else if (staleNote) {
+        // 缓存过期时绝不能沉默降级：此刻用的是当日被置 0 的量价，硬筛会自动放宽，用户需要知道
+        runMode = `盘前模式降级：${staleNote}，改用当日退化量价；${runMode}`;
       }
     } else {
       saveLastCloseSnapshot(snapshot);
@@ -185,11 +197,14 @@ const multifactor: ScreenEngine = {
         for (const [code, vals] of src) extra!.set(code, { ...extra!.get(code), ...vals });
       }
       if (extra && extra.size > 0) {
+        // 分位基准固定为初筛行集：拿 40 只子集重算分位会让 screenScore 量纲在两次调用间漂移，
+        // 最终落库的分数和刚才用于截断的分数就不是同一把尺
         pool = scoreCandidates(
           pool.map((c) => c.row),
           def,
           theme,
           extra,
+          filtered,
         ).sort((a, b) => b.screenScore - a.screenScore);
       }
       emit({ stage: 'enrich', label: '趋势/资金/龙头二段增强', status: 'done', poolCount: pool.length });

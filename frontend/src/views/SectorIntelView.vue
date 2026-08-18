@@ -39,22 +39,30 @@ async function loadSectors() {
 }
 
 async function loadRss() {
+  // 连点赛道 A→B 且 A 后返回时，若不比对 id，右侧会显示 A 的资讯而左侧高亮在 B
+  const id = active.value;
   loading.value.rss = true;
   try {
-    items.value = await api.sectorintel.rss(active.value, 2);
+    const list = await api.sectorintel.rss(id, 2);
+    if (id !== active.value) return;
+    items.value = list;
   } catch (e) {
+    if (id !== active.value) return;
     ElMessage.error(msg(e));
   } finally {
-    loading.value.rss = false;
+    // loading 归属最新那一发，被切走后不要抢着复位
+    if (id === active.value) loading.value.rss = false;
   }
 }
 
 async function loadDigest() {
+  const id = active.value;
   loading.value.digest = true;
   digest.value = '';
   digestAt.value = '';
   try {
-    const d = await api.sectorintel.latestDigest(active.value);
+    const d = await api.sectorintel.latestDigest(id);
+    if (id !== active.value) return;
     if (d) {
       digest.value = d.content;
       digestAt.value = fmtTime(d.createdAt);
@@ -62,7 +70,7 @@ async function loadDigest() {
   } catch {
     /* 首屏静默 */
   } finally {
-    loading.value.digest = false;
+    if (id === active.value) loading.value.digest = false;
   }
 }
 

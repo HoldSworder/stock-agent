@@ -147,7 +147,91 @@ assert.ok(askedLimit > 240, `全量重刷抓取根数应按 keepDays 折算，�
   );
 }
 
+// ---- 第4条：全量重刷的旧行清理必须带 secid ----
+// 预热宇宙旧实现只传 6 位代码、一律 toSecid，清理也只按 code 过滤：
+// 上证指数（1.000001，显式 secid）与同码个股（0.000001）互相连坐，指数历史每周被删空。
+{
+  cache.writeCachedDaily('000002', '1.000002', [bar('2026-08-01', 3500)], { adjBase: '2026-07-01' });
+  cache.writeCachedDaily('000002', '0.000002', [bar('2026-08-01', 12)], { adjBase: '2026-07-01' });
+  const r = await cache.prewarmDaily(
+    [{ code: '000002', secid: '1.000002' }],
+    async () => [bar('2026-08-01', 3600), bar('2026-08-03', 3620)],
+    { full: true },
+  );
+  assert.equal(r.ok, 1, '显式 secid 的标的应能正常参与重刷');
+  assert.equal(
+    cache.readCachedDaily('000002', '0.000002', 10).length,
+    1,
+    '同码不同 secid 的标的不得被连坐删除',
+  );
+  const idx = cache.readCachedDaily('000002', '1.000002', 10);
+  assert.equal(idx.length, 2, '本轮刷新的标的应换到新基准的两根');
+  assert.equal(idx[0].adjBase, r.adjBase, '刷新后的行应是新基准');
+}
+
+// ---- 第5条：历史长度本就不足 limit 的标的也要能命中缓存 ----
+// 旧判据 cached.length >= limit 让新上市几个月的标的（默认 limit=250）永久回源，
+// 恰恰丢掉了「上游一慢就整块降级」的防护。回源返回数少于请求数即已触达历史起点。
+{
+  let calls = 0;
+  const short = [bar('2026-08-01', 5), bar('2026-08-03', 5.2)];
+  const out1 = await cache.getDailyCached('600007', '1.600007', 250, async () => {
+    calls += 1;
+    return short;
+  });
+  assert.equal(calls, 1, '首次读取应回源');
+  assert.equal(out1.length, 2, '上游只有 2 根就是 2 根');
+  const out2 = await cache.getDailyCached('600007', '1.600007', 250, async () => {
+    throw new Error('历史不足 limit 的标的不应每次都回源');
+  });
+  assert.equal(out2.length, 2, '第二次应直接命中缓存');
+}
+
+// ---- 第5条的反面：上次「拿满」不能被当成「已到历史起点」，否则更大的 limit 会命中短缓存 ----
+// 同一只标的在全仓被以差异极大的 limit 请求（盯盘 3 根 / regime 260 根 / ETF 500 根）。
+// 若只记「上次拿到多少」而不记「上次要了多少」，则「要 60 拿到 60」会被误判成
+// 「历史只有 60 根」，之后 200 根的请求永久命中 60 行的短缓存、静默返回被截断的历史——
+// 而 MA120／回测这类消费方拿到短序列不会报错，只会算出偏短窗口的指标。
+{
+  const many = Array.from({ length: 60 }, (_, i) =>
+    bar(`2026-05-${String((i % 28) + 1).padStart(2, '0')}`, 7 + i * 0.01),
+  );
+  // 首次以 limit=60 回源，上游给满 60 根（说明并未触达历史起点）
+  await cache.getDailyCached('600009', '1.600009', 60, async () => many);
+  let refetched = false;
+  const deeper = await cache.getDailyCached('600009', '1.600009', 200, async () => {
+    refetched = true;
+    return many;
+  });
+  assert.ok(refetched, '上次拿满说明历史可能更长，更大的 limit 必须回源而不是命中短缓存');
+  assert.ok(deeper.length > 0, '回源结果应正常返回');
+}
+
+// ---- 第1条：回源失败兜底不得把盘中临时 bar 当成完整日线交出去 ----
+// 判据依赖「此刻是否在连续竞价中」，自检可能在任意时刻跑，故按当下时段分别断言。
+{
+  const inSession = cache.isFresh(new Date().toISOString(), new Date(), true);
+  cache.writeCachedDaily('600008', '1.600008', [bar('2026-08-01', 10)]);
+  cache.writeCachedDaily('600008', '1.600008', [bar('2026-08-03', 10.5)], { provisional: true });
+  const out = await cache.getDailyCached(
+    '600008',
+    '1.600008',
+    2,
+    async () => {
+      throw new Error('上游超时');
+    },
+    { fresh: true },
+  );
+  assert.equal(
+    out.length,
+    inSession ? 2 : 1,
+    inSession
+      ? '盘中兜底应保留临时 bar（既有行为）'
+      : '非交易时段兜底必须剔除末根临时 bar，少一根完整日线好过多一根假的',
+  );
+}
+
 rmSync(tmpDir, { recursive: true, force: true });
 console.log(
-  '✅ 日K缓存落库自检通过：secid 隔离 / 全量重刷失败标的保历史 / 重刷根数 / 读出口幂等补修正 / fresh 强制回源与失败回退',
+  '✅ 日K缓存落库自检通过：secid 隔离 / 全量重刷失败标的保历史 / 重刷清理带 secid / 重刷根数 / 读出口幂等补修正 / fresh 强制回源与失败回退 / 短历史标的可命中缓存 / 兜底剔除临时bar',
 );

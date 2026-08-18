@@ -99,9 +99,17 @@ function todayStr() {
   return `${get('year')}-${get('month')}-${get('day')}`;
 }
 
+/** 分时点的时间戳日期：优先用后端给的交易日 */
+function tradeDateOf(result) {
+  // 非交易时段后端返回的是【上一交易日】的分时，用「今天」补日期会把它标成今天
+  // （周末/盘前打开面板必踩）。tradeDate 是可选字段，取不到才退回今天。
+  const d = result?.tradeDate;
+  return typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d) ? d : todayStr();
+}
+
 export function renderTrends(el, result) {
   if (!reinit(el)) return;
-  const date = todayStr();
+  const date = tradeDateOf(result);
   const data = (result.points ?? []).map((p) => {
     const ts = new Date(`${date}T${p.time}:00+08:00`).getTime();
     return { timestamp: ts, open: p.price, high: p.price, low: p.price, close: p.price, volume: p.volume };

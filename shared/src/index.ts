@@ -209,6 +209,11 @@ export interface TrendsResult {
   /** 昨收（分时基线） */
   prevClose: number;
   points: TrendPoint[];
+  /**
+   * 这份分时所属的交易日 YYYY-MM-DD（数据源给的，取不到时缺省）。
+   * 消费方不要拿「今天」补日期：周末/节假日打开时那份分时其实是上一交易日的。
+   */
+  tradeDate?: string;
 }
 
 /** 个股实时报价 */
@@ -1658,6 +1663,11 @@ export interface SimPosition {
   sellableQty: number;
   /** 持有逻辑（如金属钨涨价；position 级，跨同步留存） */
   thesis?: string | null;
+  /**
+   * 取价失败：price 退回了成本价，holdProfit/holdRate 被置 0 而非真实盈亏。
+   * 运行态标记（每次取价现算），不落库；消费方应把这类持仓标灰并拒绝当作权益样本。
+   */
+  priceStale?: boolean;
 }
 
 /** 战法成交流水 */
@@ -1714,6 +1724,10 @@ export interface StrategySnapshot {
   totalProfitRate: number;
   positions: SimPosition[];
   trades: SimTrade[];
+  /** 任一持仓取价失败：本快照的盈亏/总资产不可信，不得作为当日权益样本落库 */
+  priceStale?: boolean;
+  /** 取价失败的标的代码 */
+  stalePriceCodes?: string[];
 }
 
 /**
@@ -1753,13 +1767,24 @@ export interface StrategyHistoryItem {
   lastSellDate: string | null;
 }
 
-/** 战法列表项：基础信息 + 账户汇总 */
+/**
+ * 战法列表项：基础信息 + 账户汇总。
+ * 快照取失败时不编造数字：totalProfit / totalProfitRate / positionCount 一律为 null，
+ * 由 snapshotError 说明原因，前端渲染「—」+ 错误角标。旧行为（补 0）会让「持有 5 只、
+ * 浮亏 8%」的战法在取价失败时显示成「+0.00 (0.00%)、0 持仓」。
+ */
 export interface StrategyListItem {
   strategy: Strategy;
+  /** 总资产。取失败时退回本地库里的现金（确定值），并置 snapshotError */
   totalAsset: number;
-  totalProfit: number;
-  totalProfitRate: number;
-  positionCount: number;
+  /** 总收益；快照取失败为 null */
+  totalProfit: number | null;
+  /** 总收益率；快照取失败为 null */
+  totalProfitRate: number | null;
+  /** 持仓只数；快照取失败为 null */
+  positionCount: number | null;
+  /** 快照取失败原因：非空表示本卡片的数字不完整，不得作为权益样本 */
+  snapshotError?: string;
 }
 
 /** 聊天会话 */
@@ -3327,7 +3352,11 @@ export type StreamEvent =
   | { type: 'run_finished'; runId: string; status: RunStatus }
   /** 上下文预算用量（每步采样后上报，供前端展示 token 预算 / 压缩提示） */
   | { type: 'context'; usedTokens: number; contextWindow: number; compacted: boolean }
-  | { type: 'error'; message: string };
+  /**
+   * 运行出错。runId 必须带上：前端要按它查回这一轮自己的世代，
+   * 否则旧 run 迟到的 error 会把另一轮正在跑的 run 误收尾成空闲。
+   */
+  | { type: 'error'; message: string; runId?: string };
 
 export interface ApiResult<T> {
   ok: boolean;
@@ -5928,6 +5957,40 @@ export interface ModeSegmentRow {
   trades?: number;
 }
 
+/** 标的池来源口径 */
+export type ModeUniversePolicy =
+  /** 数据库 ETF 跟踪池（生产跟踪默认，会随用户增删漂移） */
+  | 'db-etf-pool'
+  /** mode/ 下 python 研究脚本的内置池（与回测留档同源） */
+  | 'research-fallback'
+  /** 调用方显式给定 */
+  | 'custom';
+
+/**
+ * 模式引擎协议标记：一条跟踪/回测证据出自「哪一版引擎 / 哪个标的池 / 哪档成本」。
+ * 引擎规则一改（例如修好一条从未触发的离场、给回放加上成本），同一份 spec 就会跑出
+ * 不同曲线；没有这个标记，新旧样本会被混进同一个晋级门判断，看上去像同一套策略的多次验证。
+ */
+export interface ModeProtocolMark {
+  /** 可直接展示/比对的完整口径串 */
+  protocolVersion: string;
+  /** 引擎语义版本。v1-legacy = supertrend 恒不触发 + 零成本回放的历史口径 */
+  engineVersion: string;
+  universePolicy: ModeUniversePolicy;
+  /**
+   * 排序后**申报池**的哈希（含影响主题归类的规范化名称）。
+   * 不是「当天取数成功的子集」：一只标的瞬时取数失败就换 hash 的话，晋级门只回溯到
+   * 第一次口径变更为止，样本会被截断到当天，结构上永远攒不满最小样本量。
+   */
+  universeHash: string;
+  /** 当次实际纳入引擎的标的数（元数据，不进口径键；申报池规模见 protocolVersion） */
+  poolSize: number;
+  /** 单边成本（bps），买卖分列 */
+  costBps: { buyBps: number; sellBps: number };
+  /** 与该模式研究基准池是否同源；false = 站内跟踪结果不可与回测留档直接对比。未知为 null */
+  sameAsResearchPool: boolean | null;
+}
+
 /** 回测结果列表项（不含交易记录 markdown，省带宽） */
 export interface ResearchModeBacktestListItem {
   id: string;
@@ -5942,6 +6005,8 @@ export interface ResearchModeBacktestListItem {
   isRecommended: boolean;
   /** 回测协议号（规则一改就换号；空串=改造前的历史结果，口径未知） */
   protocol: string;
+  /** 引擎语义版本；历史记录回填为 v1-legacy，不可与新版结果横向比较 */
+  engineVersion: string | null;
   createdAt: string;
 }
 export interface ResearchModeBacktestInput {
@@ -5956,6 +6021,8 @@ export interface ResearchModeBacktestInput {
   isRecommended?: boolean;
   /** 回测协议号：规则/阈值有任何改动都必须换号，旧协议结果不再作为当前证据 */
   protocol?: string;
+  /** 引擎语义版本（协议号的一部分，单列一份便于按版本过滤） */
+  engineVersion?: string;
 }
 
 /** 当日应持仓 */
@@ -5980,6 +6047,8 @@ export interface ResearchModeDaily {
   cumReturn?: number | null;
   drawdown?: number | null;
   source: TrackingMode;
+  /** 产出这行的引擎口径；null = 加列之前的历史行（按 v1-legacy 看待） */
+  protocol?: ModeProtocolMark | null;
   createdAt?: string;
 }
 export interface ResearchModeDailyInput {
@@ -5989,6 +6058,8 @@ export interface ResearchModeDailyInput {
   dayReturn?: number;
   cumReturn?: number;
   drawdown?: number;
+  /** 本次跟踪的引擎口径。同日重跑时一并刷新，否则协议会停留在上一版 */
+  protocol?: ModeProtocolMark;
 }
 
 export interface ResearchModeEvent {
@@ -6289,6 +6360,21 @@ export interface PlaybookSpec {
   costs?: Partial<BacktestCosts>;
 }
 
+/**
+ * 标的覆盖度。取数失败/超时预算被剔除的标的**不是随机缺失**——集中在退市、长期停牌、
+ * 流动性差的标的上，剔除方向系统性偏乐观，所以「申请了多少、实际纳入多少」必须随指标一起摆出来。
+ */
+export interface PlaybookCoverage {
+  requested: number;
+  included: number;
+  /** 实际纳入 / 申请（0-1） */
+  ratio: number;
+  /** 取数失败或样本不足的标的 */
+  failed: string[];
+  /** 超出取数时长预算未纳入的标的 */
+  skipped: string[];
+}
+
 /** 回测核心指标（站内跑与外部导入共用） */
 export interface PlaybookBacktestMetrics {
   /** 累计收益（%） */
@@ -6306,6 +6392,11 @@ export interface PlaybookBacktestMetrics {
   avgHoldBars?: number;
   /** 最大连续亏损笔数 */
   maxConsecutiveLosses?: number;
+  /**
+   * 标的覆盖度。挂在 metrics 里而不是单开一列：它是「这组指标可信到什么程度」的限定语，
+   * 必须与指标同生共死，且能直接搭 playbook_backtests.metrics 这份 JSON 落库，无需加列。
+   */
+  coverage?: PlaybookCoverage;
 }
 
 /** 逐笔成交（含成本后净收益） */
@@ -6750,6 +6841,11 @@ export interface TradeScenario {
   conditions: PlanCondition[];
   action: SymbolPlanAction;
   invalidConditions: PlanCondition[];
+  /**
+   * 目标价位 id，**按优先级排列，首项即第一目标**。
+   * 预测核对（forecast.ts）只认首项：取「首个可解析项」会让判定结果随数组顺序漂移，
+   * 同一份计划两次落库能判出不同结局，校准表也就失去了复现性。
+   */
   targetLevelIds: string[];
   /** 模型主观概率，只展示不参与计算；口径见 SymbolTradePlanProposal.scenarioSelections */
   subjectiveProbabilityPct?: number;
@@ -6884,7 +6980,8 @@ export interface CandidateCondition {
   fromLevelCandidateId: string | null;
   /**
    * 该条件适合承担的角色（触发 / 失效 / 目标）。
-   * 已成立的条件会被摘掉 'invalidation'，见 alreadySatisfied。
+   * 已成立的条件会被摘掉 'invalidation'，见 alreadySatisfied；
+   * 方向已错过的事件型条件（见 directionMissed）会被摘空，任何角色都用不了。
    */
   suitableFor: Array<'trigger' | 'invalidation' | 'target'>;
   /**
@@ -6896,6 +6993,17 @@ export interface CandidateCondition {
    * 对触发条件不是问题（「已经站上均线」本就可以是入场依据），故只摘 invalidation 用途。
    */
   alreadySatisfied?: boolean;
+  /**
+   * 事件型价位条件的**方向已经错过**：现价已在该价位的另一侧，
+   * 事件要成立得先原路走回去再穿一次。
+   *
+   * 与 alreadySatisfied 是两码事，必须单独判：`crossDown` 在「价位已在现价上方」时
+   * 最后一根并没有穿，状态型判据看不出问题，于是它照常留在失效候选里——
+   * 而它实际永远不会成立，失效保护形同虚设；对称地已被上穿的压力位若被挑成
+   * `crossUp` 触发条件（触发条件一律 required），整份计划会永远无法触发。
+   * 故这类条件的所有用途都摘掉。
+   */
+  directionMissed?: boolean;
   evidenceIds: string[];
   capability: PlaybookRuleCapability;
 }
@@ -6922,6 +7030,8 @@ export interface SymbolTechnicalContext {
   code: string;
   name: string;
   assetType: SymbolAssetType;
+  /** 东财 secid，随上下文一路带到计划落库，见 SymbolTradePlan.secid */
+  secid: string | null;
   asOf: string;
   dataStatus: 'complete' | 'provisional' | 'degraded';
   /** 每周期一行读数，不含原始 K 线数组 */
@@ -6975,6 +7085,7 @@ export interface SymbolTradePlanProposal {
     name: string;
     conditionCandidateIds: string[];
     invalidConditionCandidateIds: string[];
+    /** 目标候选价位 id，按优先级排列，首项即第一目标；必须都出现在 levelSelections 里，否则落库后解析不出价 */
     targetCandidateLevelIds: string[];
     /**
      * 模型对该情景的主观概率（0~100）。**只用于展示，禁止参与任何计算**。
@@ -7036,6 +7147,12 @@ export interface SymbolTradePlan {
   code: string;
   name: string;
   assetType: SymbolAssetType;
+  /**
+   * 东财 secid（如 `1.000300`）。求值与预测结算必须用它取 K 线：
+   * 指数与个股撞码，单凭 code 会把 000300 解析成深市个股，拿另一只标的的 OHLC 判触及。
+   * 旧计划为 null。
+   */
+  secid: string | null;
   status: SymbolPlanStatus;
   asOf: string;
   validFrom: string;
@@ -7120,7 +7237,22 @@ export interface SymbolPlanEvaluation {
   status: SymbolPlanStatus;
   conditions: PlanConditionState[];
   triggered: boolean;
+  /**
+   * 计划整份失效。**只统计 rank !== 'risk' 的情景**：风险情景的失效条件本就是
+   * 「该减仓了」这件事本身，把它算成整份失效会灰化所有价位线，用户拿不到减仓指令。
+   */
   invalidated: boolean;
+  /**
+   * 本轮判为触发的情景，供前端显示「触发的是哪条路径、该做什么动作」。
+   * `via='invalidation'` 表示这是风险情景的失效条件命中（即减仓/清仓信号），
+   * 与主路径的触发条件命中（`via='trigger'`）刻意区分开。
+   */
+  triggeredScenarios: Array<{
+    scenarioId: string;
+    rank: TradeScenario['rank'];
+    action: SymbolPlanAction;
+    via: 'trigger' | 'invalidation';
+  }>;
   expired: boolean;
   needsNewVersion: boolean;
   summary: string;

@@ -6,7 +6,7 @@ import type {
   DataSourceInfo,
   DataSourceProtocol,
 } from '@stock-agent/shared';
-import { getValue, setValue } from '../settings';
+import { getValue, isSecretMask, maskSecret, setValue } from '../settings';
 import { statsFor } from './metrics';
 import { ping as pingEastmoney } from '../market/eastmoney';
 import { getIndicesTencent } from '../market/tencent';
@@ -423,13 +423,12 @@ export function isSourceEnabled(id: string): boolean {
 
 function buildFields(def: SourceDef): DataSourceConfigField[] {
   return def.fields.map((f) => {
-    // 凭据一律明文回显（页面已在登录鉴权后访问），便于核对
     const raw = getValue(f.key as never);
     return {
       key: f.key,
       label: f.label,
       secret: f.secret,
-      value: raw,
+      value: f.secret ? maskSecret(raw) : raw,
       configured: raw.length > 0,
       required: f.required,
       placeholder: f.placeholder,
@@ -502,13 +501,16 @@ export function toggleSource(id: string, enabled: boolean): DataSourceInfo | nul
   return toInfo(def);
 }
 
-/** 更新数据源凭据/配置（仅接受该源声明的字段；明文所见即所存，允许清空） */
+/** 更新数据源凭据/配置；敏感字段留空或掩码表示不修改 */
 export function updateSourceConfig(id: string, patch: DataSourceConfigUpdate): DataSourceInfo | null {
   const def = byId.get(id);
   if (!def) return null;
-  const allowed = new Set(def.fields.map((f) => f.key));
+  const allowed = new Map(def.fields.map((f) => [f.key, f]));
   for (const [k, v] of Object.entries(patch)) {
-    if (allowed.has(k)) setValue(k as never, v);
+    const field = allowed.get(k);
+    if (!field || typeof v !== 'string') continue;
+    if (field.secret && (v === '' || isSecretMask(v))) continue;
+    setValue(k as never, v);
   }
   return toInfo(def);
 }

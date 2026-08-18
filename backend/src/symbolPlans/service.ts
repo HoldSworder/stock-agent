@@ -18,6 +18,7 @@ import { syncPlanMarks } from './markSync';
 import { recordForecasts } from './forecast';
 import { PHASE_MODEL_VERSION, tighten } from './phase';
 import { CANDIDATE_MODEL_VERSION } from './candidateCatalog';
+import { nextTradingClose } from './sessionClock';
 
 // 计划编译与落库（计划 7.2 + R1 职责边界）。
 // LLM 只提交 SymbolTradePlanProposal（摘要 + 候选 ID 组合）；
@@ -33,6 +34,12 @@ export interface ProposalIssue {
     | 'purpose_mismatch'
     /** 被选作失效条件的候选在计划生成时就已成立，会产出一份出生即失效的计划 */
     | 'invalidation_already_true'
+    /** 被选作触发条件的候选在计划生成时就已成立，会产出一份出生即触发的计划 */
+    | 'trigger_already_true'
+    /** 触发条件的极性与情景动作相反（如「收盘跌破支撑」配加仓） */
+    | 'trigger_polarity_mismatch'
+    /** 穿越型条件的方向已错过（现价已在价位另一侧），该事件不原路走回去就永不成立 */
+    | 'condition_direction_missed'
     | 'role_not_compatible'
     | 'catalog_mismatch'
     | 'catalog_expired'
@@ -40,6 +47,12 @@ export interface ProposalIssue {
     | 'missing_invalidation'
     | 'missing_summary'
     | 'price_out_of_range'
+    /** 情景目标价位没出现在 levelSelections 里，落库后解析不出价，预测永远判不出 hit */
+    | 'target_not_selected'
+    /** 买入类计划的入场价不高于止损价，按它算「单笔最大亏损」会得到负数 */
+    | 'entry_below_stop'
+    /** 指数类标的暂不支持保存交易计划（全链路按 code 定位，与个股撞码） */
+    | 'asset_not_tradable'
     | 'no_scenario';
   message: string;
   availableCandidateIds?: string[];
@@ -81,6 +94,19 @@ export function validateProposal(input: CompileInput): ProposalIssue[] {
 
   if (!proposal.summary?.trim()) {
     issues.push({ field: 'summary', code: 'missing_summary', message: '缺少 summary' });
+  }
+
+  // 指数不落交易计划：计划表、求值、标注、会话全链路都按 code 定位，而指数与个股撞码
+  // （000300 会被解析成深市个股），于是会拿另一只标的的 OHLC 判触及与失效。
+  // secid 列已备好通路，等全链路都改成按 secid 取数后再放开。
+  if (context.assetType === 'index') {
+    issues.push({
+      field: 'contextId',
+      code: 'asset_not_tradable',
+      message:
+        '指数类标的暂不支持保存交易计划或预测：指数代码与个股撞码，求值时会取到另一只标的的行情。' +
+        '请改为分析对应的 ETF，或只做技术研判不落计划。',
+    });
   }
 
   // 跨快照混用防护
@@ -160,6 +186,12 @@ export function validateProposal(input: CompileInput): ProposalIssue[] {
     }
   });
 
+  const selectedLevelIds = new Set(
+    (proposal.levelSelections ?? [])
+      .filter((s) => levelById.has(s.candidateLevelId))
+      .map((s) => s.candidateLevelId),
+  );
+
   // 情景
   if (!proposal.scenarioSelections?.length) {
     issues.push({ field: 'scenarioSelections', code: 'no_scenario', message: '至少需要一个情景' });
@@ -182,18 +214,42 @@ export function validateProposal(input: CompileInput): ProposalIssue[] {
           });
           continue;
         }
-        // 必须排在 purpose_mismatch 之前：目录已把已成立的条件从 suitableFor 摘掉，
-        // 落到下面只会报「只适用于 trigger」，模型据此换一条同样已成立的条件继续撞墙。
-        if (expect === 'invalidation' && c.alreadySatisfied) {
+        // 同样必须排在 purpose_mismatch 之前：目录已把这类条件的 suitableFor 摘空，
+        // 落到下面只会报「只适用于 」，模型看不出真正的原因。
+        if (c.directionMissed) {
           issues.push({
             field: `scenarioSelections[${i}].${f}`,
-            code: 'invalidation_already_true',
+            code: 'condition_direction_missed',
             message:
-              `候选条件 ${id}「${c.description}」在计划生成时就已成立，不能当失效条件。` +
-              '失效条件必须是「将来若发生则计划作废」的事；用已发生的事实做失效条件，' +
-              '计划第一次复核就会判失效。请改选一条当前尚未成立的失效条件。',
+              `候选条件 ${id}「${c.description}」的穿越方向已经错过：现价已在该价位的另一侧，` +
+              '这个事件要成立得先原路走回去再穿一次。当失效条件等于没有保护，当触发条件则会让整份计划永远无法触发。' +
+              '请改选一条方向仍成立的条件。',
             availableCandidateIds: catalog.conditions
-              .filter((x) => x.suitableFor.includes('invalidation'))
+              .filter((x) => x.suitableFor.includes(expect))
+              .map((x) => x.candidateId),
+          });
+          continue;
+        }
+        // 必须排在 purpose_mismatch 之前：目录已把已成立的条件从 suitableFor 摘掉，
+        // 落到下面只会报「只适用于 trigger」，模型据此换一条同样已成立的条件继续撞墙。
+        //
+        // 触发侧同样要拦。看跌关系改成双用途之后，一条已成立的看跌条件（如价位在现价上方的
+        // holdBelow，它恒为真）不再被摘空，而是变成一条合法的触发条件——计划一落库、
+        // 第一次复核就判触发，风险路径凭空启动。已成立的事实两个用途都当不了。
+        if (c.alreadySatisfied) {
+          issues.push({
+            field: `scenarioSelections[${i}].${f}`,
+            code: expect === 'invalidation' ? 'invalidation_already_true' : 'trigger_already_true',
+            message:
+              expect === 'invalidation'
+                ? `候选条件 ${id}「${c.description}」在计划生成时就已成立，不能当失效条件。` +
+                  '失效条件必须是「将来若发生则计划作废」的事；用已发生的事实做失效条件，' +
+                  '计划第一次复核就会判失效。请改选一条当前尚未成立的失效条件。'
+                : `候选条件 ${id}「${c.description}」在计划生成时就已成立，不能当触发条件。` +
+                  '触发条件必须是「将来若发生则动手」的事；用已发生的事实做触发条件，' +
+                  '计划第一次复核就会判触发。请改选一条当前尚未成立的触发条件。',
+            availableCandidateIds: catalog.conditions
+              .filter((x) => x.suitableFor.includes(expect))
               .map((x) => x.candidateId),
           });
           continue;
@@ -217,6 +273,7 @@ export function validateProposal(input: CompileInput): ProposalIssue[] {
     };
     const trig = checkIds(sc.conditionCandidateIds, 'conditionCandidateIds', 'trigger');
     const inval = checkIds(sc.invalidConditionCandidateIds, 'invalidConditionCandidateIds', 'invalidation');
+    issues.push(...checkTriggerPolarity(sc, trig, i, input.marketAction));
     for (const id of sc.targetCandidateLevelIds ?? []) {
       if (!levelById.has(id)) {
         issues.push({
@@ -224,6 +281,20 @@ export function validateProposal(input: CompileInput): ProposalIssue[] {
           code: 'unknown_level_candidate',
           message: `目标价位 ${id} 不在当次目录内`,
           availableCandidateIds: catalog.levels.map((l) => l.candidateId),
+        });
+        continue;
+      }
+      // 目标必须同时出现在 levelSelections 里：计划只存 levels 里的价位，
+      // 没被选进去的 id 落库后在 plan.levels 里查不到，预测记录解析不出目标价，永远判不出 hit。
+      if (!selectedLevelIds.has(id)) {
+        issues.push({
+          field: `scenarioSelections[${i}].targetCandidateLevelIds`,
+          code: 'target_not_selected',
+          message:
+            `目标价位 ${id} 没有出现在 levelSelections 里。` +
+            '请先把它以 role="target" 选进 levelSelections，再在情景里引用——' +
+            '否则计划里根本没有这个价位，事后无法判定目标是否兑现。',
+          availableCandidateIds: Array.from(selectedLevelIds),
         });
       }
     }
@@ -244,7 +315,117 @@ export function validateProposal(input: CompileInput): ProposalIssue[] {
     }
   });
 
+  issues.push(...checkEntryAboveStop(input));
+
   return issues;
+}
+
+/** 条件的方向极性。目录用不到的 kind 一律返回 null（中性），不做牵强的猜测 */
+function polarityOf(rule: CandidateCondition['rule']): 'bullish' | 'bearish' | null {
+  switch (rule.kind) {
+    case 'priceLevel':
+      if (rule.relation === 'crossUp' || rule.relation === 'holdAbove') return 'bullish';
+      if (rule.relation === 'crossDown' || rule.relation === 'holdBelow') return 'bearish';
+      return null;
+    case 'ma':
+      if (rule.relation === 'above' || rule.relation === 'crossUp') return 'bullish';
+      return 'bearish';
+    case 'macd':
+      if (rule.signal === 'goldCross' || rule.signal === 'barAbove0') return 'bullish';
+      return 'bearish';
+    case 'closeLocation':
+      if (rule.op === 'gt' || rule.op === 'gte') return 'bullish';
+      if (rule.op === 'lt' || rule.op === 'lte') return 'bearish';
+      return null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * 触发条件的极性必须与情景动作一致。
+ *
+ * 看跌关系改成双用途（trigger + invalidation）之后，「收盘跌破支撑」在结构上可以合法地
+ * 写进任何情景的触发数组——包括 rank='primary'、action='add' 的加仓情景，
+ * 而那正是「跌破支撑就加仓」这种全程无人拦截的反向指令。改动前它不含 trigger、
+ * 物理上进不了触发数组，双用途把这唯一的结构性护栏一并拆掉了，只能在这里补回来。
+ *
+ * 情景动作的算法必须与 compileAndSavePlan 一致（风险情景走 tighten），否则校验的是另一份计划。
+ */
+function checkTriggerPolarity(
+  sc: { rank: TradeScenario['rank']; name?: string },
+  trig: CandidateCondition[],
+  i: number,
+  marketAction: SymbolPlanAction,
+): ProposalIssue[] {
+  const action = sc.rank === 'risk' ? tighten(marketAction, 'reduce') : marketAction;
+  const forbidden: 'bullish' | 'bearish' | null =
+    action === 'add' || action === 'probe'
+      ? 'bearish'
+      : action === 'reduce' || action === 'exit'
+        ? 'bullish'
+        : null;
+  if (!forbidden) return [];
+  return trig
+    .filter((c) => polarityOf(c.rule) === forbidden)
+    .map((c) => ({
+      field: `scenarioSelections[${i}].conditionCandidateIds`,
+      code: 'trigger_polarity_mismatch' as const,
+      message:
+        `情景「${sc.name || i}」的动作是 ${action}，触发条件 ${c.candidateId}「${c.description}」` +
+        `却是${forbidden === 'bearish' ? '看跌' : '看多'}的。` +
+        `${forbidden === 'bearish' ? '买入类动作要等的是转强信号，跌破/死叉只能作失效条件或风险情景的触发' : '减仓类动作要等的是转弱信号，站上/金叉不该触发减仓'}。` +
+        '请改选一条方向一致的触发条件，或把这条放进 invalidConditionCandidateIds。',
+    }));
+}
+
+/**
+ * 买入类计划必须满足「入场价 > 止损价」。
+ *
+ * 不校验的话，`(entry - stop) × 股数` 会算出负数的「单笔最大亏损」，
+ * 界面上就成了一份「买入还能赚风险预算」的计划；`rescaleSharesToEntry` 也会因风险距离为负
+ * 反推出被放大的股数。这类提案本身就是选错了角色（把压力位当止损、或把止损挂在入场上方），
+ * 给校验码让 LLM 重提比事后收紧仓位更准。
+ */
+function checkEntryAboveStop(input: CompileInput): ProposalIssue[] {
+  const BUY_ACTIONS: SymbolPlanAction[] = ['add', 'probe'];
+  if (!BUY_ACTIONS.includes(input.primaryAction) && !BUY_ACTIONS.includes(input.marketAction)) {
+    return [];
+  }
+  const levelById = new Map(input.catalog.levels.map((l) => [l.candidateId, l]));
+  /** 区间价位取对买入更不利的一侧：入场取高、止损取低，宁可算出更小的仓位 */
+  const priceOf = (id: string, side: 'high' | 'low'): number | null => {
+    const l = levelById.get(id);
+    if (!l) return null;
+    const v = side === 'high' ? l.high : l.low;
+    return Number.isFinite(v) && v > 0 ? v : null;
+  };
+  const entries: number[] = [];
+  const stops: number[] = [];
+  for (const sel of input.proposal.levelSelections ?? []) {
+    if (sel.role === 'entry_trigger' || sel.role === 'add_trigger') {
+      const p = priceOf(sel.candidateLevelId, 'high');
+      if (p != null) entries.push(p);
+    }
+    if (sel.role === 'stop' || sel.role === 'invalidation') {
+      const p = priceOf(sel.candidateLevelId, 'low');
+      if (p != null) stops.push(p);
+    }
+  }
+  if (entries.length === 0 || stops.length === 0) return [];
+  const entry = Math.min(...entries);
+  const stop = Math.max(...stops);
+  if (entry > stop) return [];
+  return [
+    {
+      field: 'levelSelections',
+      code: 'entry_below_stop',
+      message:
+        `买入类计划的入场价 ${entry.toFixed(3)} 不高于止损价 ${stop.toFixed(3)}，` +
+        '按它算出的「单笔最大亏损」会是负数，仓位也会被反推放大。' +
+        '请把止损改选到入场价下方的支撑/结构失效位，或把入场触发位改到止损上方。',
+    },
+  ];
 }
 
 function toPlanCondition(c: CandidateCondition, required: boolean): PlanCondition {
@@ -333,6 +514,7 @@ export function compileAndSavePlan(input: CompileInput): SymbolTradePlan {
     code: context.code,
     name: context.name,
     assetType: context.assetType,
+    secid: context.secid,
     status: 'active',
     asOf: context.asOf,
     validFrom: input.validFrom,
@@ -448,10 +630,14 @@ export function saveDraftObservationPlan(input: {
     code: context.code,
     name: context.name,
     assetType: context.assetType,
+    secid: context.secid,
     status: 'draft',
     asOf: context.asOf,
     validFrom: now,
-    expiresAt: null,
+    // 观察计划必须有到期日：draft 在 PLAN_LIVE_STATUSES 内，expiresAt=null 时它既不会被判过期、
+    // 也进不了 listStalePlans 的重算队列，收盘重算从此永远不再认领这个标的，
+    // 只能靠用户手动点「生成计划」——一次降级等于把该标的踢出自动流水线。
+    expiresAt: nextTradingClose(new Date(now)),
     dataStatus: context.dataStatus,
     marketPhase: context.phase.phase,
     trendState: context.dow?.state ?? 'range',

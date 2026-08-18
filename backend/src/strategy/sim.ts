@@ -399,11 +399,20 @@ function emitAutoTrade(strategy: Strategy, trade: SimTrade, source: ExecuteSimTr
   }
 }
 
+/** 报价取数口径，仅供自检注入。生产调用一律走默认的 getQuoteWithLimits */
+export type QuoteFetcher = typeof getQuoteWithLimits;
+
 /**
  * 执行一笔模拟成交：校验通用交易规则后落库并更新现金/持仓。
  * 任何规则不满足都会抛 StrategyError，调用方据此回显原因。
+ *
+ * @param quoteFetcher 仅自检使用：并发超买这类竞态只有在「取价这段 await 期间账户被别人改了」
+ *   时才暴露，而真实取价既联网又不可控，无法在断言里制造那个时间窗。
  */
-export async function executeSimTrade(input: ExecuteSimTradeInput): Promise<ExecuteSimTradeResult> {
+export async function executeSimTrade(
+  input: ExecuteSimTradeInput,
+  quoteFetcher: QuoteFetcher = getQuoteWithLimits,
+): Promise<ExecuteSimTradeResult> {
   const strategy = getStrategy(input.strategyId);
   if (!strategy) throw new StrategyError('战法不存在');
   if (strategy.archived) throw new StrategyError('战法已归档，不能交易');
@@ -433,7 +442,7 @@ export async function executeSimTrade(input: ExecuteSimTradeInput): Promise<Exec
   if (!Number.isFinite(qty) || qty <= 0) throw new StrategyError('数量需为正数');
   if (qty % 100 !== 0) throw new StrategyError('数量必须为 100 股的整数倍');
 
-  const quote = await getQuoteWithLimits(code);
+  const quote = await quoteFetcher(code);
   if (!(quote.price > 0)) throw new StrategyError(`未取到 ${code} 的有效现价，暂不能下单`);
 
   // 定执行价：传 price 用限价（须在涨跌停区间内），否则用实时现价
@@ -450,38 +459,48 @@ export async function executeSimTrade(input: ExecuteSimTradeInput): Promise<Exec
   }
 
   const date = shanghaiDate();
+  const amount = qty * price;
 
-  if (input.side === 'buy') {
-    // 涨停不可买入
-    if (quote.limitUp > 0 && price >= quote.limitUp) {
-      throw new StrategyError(`${quote.name}(${code}) 已涨停（涨停价 ${quote.limitUp}），无法买入`);
+  // 校验与写入必须在同一个事务里，且现金/持仓要在事务内重新 select：
+  // 上面的 getQuoteWithLimits 是 await，让出过事件循环，函数入口读到的 strategy 快照可能已过期。
+  // 定时调仓（rebalance 循环下单）与盯盘自动卖出并发时，两笔成交都基于同一份旧现金校验并写回，
+  // 后写覆盖先写，账户现金会凭空多出一笔、净值曲线随之失真。
+  // 仅把 cash 改成 SQL 原子自减不够——校验本身也得看到最新值，否则照样超买。
+  // better-sqlite3 同步单连接：事务回调内的所有 db.* 语句都在同一个 BEGIN/COMMIT 里。
+  const result = db.transaction((): ExecuteSimTradeResult => {
+    const row = db.select().from(schema.strategies).where(eq(schema.strategies.id, input.strategyId)).get();
+    if (!row) throw new StrategyError('战法不存在');
+    const fresh = rowToStrategy(row);
+
+    if (input.side === 'buy') {
+      // 涨停不可买入
+      if (quote.limitUp > 0 && price >= quote.limitUp) {
+        throw new StrategyError(`${quote.name}(${code}) 已涨停（涨停价 ${quote.limitUp}），无法买入`);
+      }
+      if (amount > fresh.cash + 1e-6) {
+        throw new StrategyError(
+          `可用资金不足：需 ${amount.toFixed(2)}，现金 ${fresh.cash.toFixed(2)}`,
+        );
+      }
+      return applyBuy(fresh, quote.name, code, qty, price, amount, date, input);
     }
-    const amount = qty * price;
-    if (amount > strategy.cash + 1e-6) {
+
+    // 卖出：跌停不可卖出
+    if (quote.limitDown > 0 && price <= quote.limitDown) {
+      throw new StrategyError(`${quote.name}(${code}) 已跌停（跌停价 ${quote.limitDown}），无法卖出`);
+    }
+    const pos = getPositionRow(input.strategyId, code);
+    if (!pos || pos.qty <= 0) throw new StrategyError(`${quote.name}(${code}) 当前无持仓，无法卖出`);
+    const lockedToday = todayBoughtQty(input.strategyId, code, date);
+    const sellable = pos.qty - lockedToday;
+    if (qty > sellable + 1e-6) {
       throw new StrategyError(
-        `可用资金不足：需 ${amount.toFixed(2)}，现金 ${strategy.cash.toFixed(2)}`,
+        `可卖数量不足：可卖 ${sellable}（持仓 ${pos.qty}，当日买入 T+1 锁定 ${lockedToday}），欲卖 ${qty}`,
       );
     }
-    const result = applyBuy(strategy, quote.name, code, qty, price, amount, date, input);
-    emitAutoTrade(strategy, result.trade, input.source);
-    return result;
-  }
+    return applySell(fresh, pos, qty, price, amount, date, input);
+  });
 
-  // 卖出：跌停不可卖出
-  if (quote.limitDown > 0 && price <= quote.limitDown) {
-    throw new StrategyError(`${quote.name}(${code}) 已跌停（跌停价 ${quote.limitDown}），无法卖出`);
-  }
-  const pos = getPositionRow(input.strategyId, code);
-  if (!pos || pos.qty <= 0) throw new StrategyError(`${quote.name}(${code}) 当前无持仓，无法卖出`);
-  const lockedToday = todayBoughtQty(input.strategyId, code, date);
-  const sellable = pos.qty - lockedToday;
-  if (qty > sellable + 1e-6) {
-    throw new StrategyError(
-      `可卖数量不足：可卖 ${sellable}（持仓 ${pos.qty}，当日买入 T+1 锁定 ${lockedToday}），欲卖 ${qty}`,
-    );
-  }
-  const amount = qty * price;
-  const result = applySell(strategy, pos, qty, price, amount, date, input);
   emitAutoTrade(strategy, result.trade, input.source);
   return result;
 }
@@ -591,6 +610,11 @@ function insertTrade(values: Omit<typeof schema.simTrades.$inferInsert, 'id'>): 
 
 // ===== 快照（实时报价计盈亏）=====
 
+/**
+ * 行情取不到时原先直接拿 avgCost 冒充现价，于是 holdProfit/holdRate 全变 0，
+ * totalAsset / totalProfitRate 一并失真，而这些值又被前向验证当作当日权益样本落库。
+ * 现在缺价一律经 SimPosition.priceStale / StrategySnapshot.priceStale 显式标记。
+ */
 export async function getStrategySnapshot(
   id: string,
   opts: { skipSync?: boolean } = {},
@@ -616,17 +640,21 @@ export async function getStrategySnapshot(
 
   // 先算市值与总资产，再算仓位占比
   let totalMarketValue = 0;
+  const stalePriceCodes: string[] = [];
   const enriched = posRows.map((p) => {
     const q = quoteMap.get(p.code);
-    const price = q && q.price > 0 ? q.price : p.avgCost;
+    const stale = !(q && q.price > 0);
+    if (stale) stalePriceCodes.push(p.code);
+    // 取不到价时按成本估值只是为了总资产不至于塌成 0，盈亏不会据此编造（见下方 priceStale）
+    const price = stale ? p.avgCost : q!.price;
     const marketValue = p.qty * price;
     totalMarketValue += marketValue;
-    return { p, q, price, marketValue };
+    return { p, q, price, marketValue, stale };
   });
   const totalAsset = strategy.cash + totalMarketValue;
   const thesisMap = getThesisMap(id);
 
-  const positions: SimPosition[] = enriched.map(({ p, q, price, marketValue }) => {
+  const positions: SimPosition[] = enriched.map(({ p, q, price, marketValue, stale }) => {
     const holdProfit = p.qty * (price - p.avgCost);
     const lockedToday = todayBoughtQty(id, p.code, date);
     return {
@@ -642,6 +670,7 @@ export async function getStrategySnapshot(
       positionRate: totalAsset > 0 ? marketValue / totalAsset : 0,
       sellableQty: Math.max(0, p.qty - lockedToday),
       thesis: thesisMap.get(p.code) ?? null,
+      priceStale: stale || undefined,
     };
   });
 
@@ -657,6 +686,8 @@ export async function getStrategySnapshot(
     totalProfitRate: strategy.initialCapital > 0 ? totalProfit / strategy.initialCapital : 0,
     positions,
     trades,
+    priceStale: stalePriceCodes.length > 0 || undefined,
+    stalePriceCodes: stalePriceCodes.length ? stalePriceCodes : undefined,
   };
 }
 
@@ -781,19 +812,36 @@ export async function getStrategyHistory(id: string): Promise<StrategyHistoryIte
   return items;
 }
 
-/** 战法列表（含账户汇总），用于列表页卡片 */
+/**
+ * 战法列表（含账户汇总），用于列表页卡片。
+ * 用 allSettled 而非 all：getStrategySnapshot 内部会调 getQuotes（网络）与妙想同步，
+ * 任一战法失败就让整个列表接口 reject，等于一只标的取价超时整页打不开。
+ */
 export async function listStrategyItems(): Promise<StrategyListItem[]> {
   const strategies = listStrategies();
-  return Promise.all(
-    strategies.map(async (s) => {
-      const snap = await getStrategySnapshot(s.id);
+  const settled = await Promise.allSettled(strategies.map((s) => getStrategySnapshot(s.id)));
+  return strategies.map((s, i) => {
+    const r = settled[i];
+    if (r.status === 'rejected') {
+      const msg = r.reason instanceof Error ? r.reason.message : String(r.reason);
+      // 占位卡片：现金是本地库里的确定值；收益与持仓数无从计算，一律 null 而不是 0——
+      // 0 会被读成「不赚不亏、空仓」，比明说取不到更误导
       return {
         strategy: s,
-        totalAsset: snap.totalAsset,
-        totalProfit: snap.totalProfit,
-        totalProfitRate: snap.totalProfitRate,
-        positionCount: snap.positions.length,
+        totalAsset: s.cash,
+        totalProfit: null,
+        totalProfitRate: null,
+        positionCount: null,
+        snapshotError: `账户快照取失败：${msg}`,
       };
-    }),
-  );
+    }
+    const snap = r.value;
+    return {
+      strategy: s,
+      totalAsset: snap.totalAsset,
+      totalProfit: snap.totalProfit,
+      totalProfitRate: snap.totalProfitRate,
+      positionCount: snap.positions.length,
+    };
+  });
 }

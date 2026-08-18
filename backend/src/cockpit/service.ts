@@ -219,9 +219,24 @@ interface ModuleSource {
   build?: () => { headline: string; excerpt: string; createdAt: string | null } | null;
 }
 
-/** 今日（Asia/Shanghai）起始时刻的 ISO，用于「今日新增」类计数 */
-function todayStartIso(): string {
-  return `${shanghaiToday()}T00:00:00`;
+/**
+ * 今日（Asia/Shanghai）起始时刻的 UTC ISO，用于「今日新增」类计数。
+ *
+ * 必须带上海偏移再转 UTC：库里 createdAt 存的是 nowIso() 的 UTC ISO，
+ * 拿裸的 `YYYY-MM-DDT00:00:00` 去比对等于把窗口整体后移 8 小时——
+ * 盘前 00:00–08:00（大V发观点的高峰）不计入今日，昨天 16:00 之后的反被算进来。
+ */
+export function todayStartIso(now: Date = new Date()): string {
+  return new Date(`${shanghaiToday(now)}T00:00:00+08:00`).toISOString();
+}
+
+/**
+ * UTC ISO 时间戳 → 所属的 Asia/Shanghai 自然日 YYYY-MM-DD。
+ * 同上：直接 slice(0,10) 取的是 UTC 日期，上海 00:00–08:00 会被判成前一天。
+ */
+export function shanghaiDateOf(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? iso.slice(0, 10) : shanghaiToday(d);
 }
 
 const MODULE_SOURCES: ModuleSource[] = [
@@ -278,7 +293,7 @@ const MODULE_SOURCES: ModuleSource[] = [
     build: () => {
       const events = listDisciplineEvents(20);
       const today = shanghaiToday();
-      const todays = events.filter((e) => e.createdAt.slice(0, 10) === today);
+      const todays = events.filter((e) => shanghaiDateOf(e.createdAt) === today);
       if (events.length === 0) return null;
       const high = todays.filter((e) => e.severity === 'high').length;
       return {
@@ -389,13 +404,13 @@ export function buildModuleSummaries(): CockpitModuleSummary[] {
         headline: built?.headline ?? '',
         excerpt: built?.excerpt ?? '暂无产出（该模块未启用或尚未运行）',
         createdAt: built?.createdAt ?? null,
-        stale: built?.createdAt ? built.createdAt.slice(0, 10) !== today : true,
+        stale: built?.createdAt ? shanghaiDateOf(built.createdAt) !== today : true,
       });
       continue;
     }
     const row = m.latest?.();
     const createdAt = row?.createdAt ?? null;
-    const stale = createdAt ? createdAt.slice(0, 10) !== today : true;
+    const stale = createdAt ? shanghaiDateOf(createdAt) !== today : true;
     if (!row?.outputText) {
       cards.push({
         key: m.key,
@@ -469,7 +484,7 @@ export function buildModuleSummaries(): CockpitModuleSummary[] {
       headline: `${latestRun.strategyName} · Top${latestRun.topN}`,
       excerpt: latestRun.selectionLogic || `全市场 ${latestRun.marketCount} → 硬筛 ${latestRun.filteredCount} → 入选 ${latestRun.topN}`,
       createdAt: latestRun.createdAt,
-      stale: latestRun.createdAt.slice(0, 10) !== today,
+      stale: shanghaiDateOf(latestRun.createdAt) !== today,
     });
   } else {
     cards.push({

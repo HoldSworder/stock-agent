@@ -2,7 +2,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import Fastify from 'fastify';
+import Fastify, { type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
 import websocket from '@fastify/websocket';
@@ -177,6 +177,79 @@ import { catchUpModuleMissedRuns } from './scheduling/moduleScheduler';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+/**
+ * 配套浏览器扩展允许用 BRIDGE_SECRET 访问的接口白名单。
+ *
+ * 扩展只有这把机器凭据、拿不到 app token，而它除了推凭据还要渲染自选股面板
+ * （列表 / 增删 / 分组 / K线 / 分时 / 代码联想，见 extension/watchlist.js）。
+ * 白名单必须逐条列举：一旦放宽成前缀通配，这把存在扩展里的密钥就又变成了
+ * 能改设置、跑 agent、下模拟单的全站令牌。
+ */
+function isExtensionApiPath(path: string): boolean {
+  if (path === '/api/watchlist' || path.startsWith('/api/watchlist/')) return true;
+  return path === '/api/kline' || path === '/api/trends' || path === '/api/search/suggest';
+}
+
+/** 恒定时比较 BRIDGE_SECRET；未配置或不匹配一律 false */
+function verifyBridgeSecret(provided: unknown): boolean {
+  const expected = config.bridgeSecret;
+  if (!expected) return false;
+  const a = Buffer.from(String(provided ?? ''));
+  const b = Buffer.from(expected);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
+/** 从 URL 中移除 WebSocket token，避免访问日志泄露凭据 */
+function redactTokenFromUrl(url: string): string {
+  try {
+    const parsed = new URL(url, 'http://localhost');
+    if (!parsed.searchParams.has('token')) return url;
+    parsed.searchParams.set('token', '[REDACTED]');
+    return `${parsed.pathname}${parsed.search}`;
+  } catch {
+    return url.replace(/([?&]token=)[^&]*/gi, '$1[REDACTED]');
+  }
+}
+
+/** 把查询 limit 归一为有限整数并钳制到安全范围 */
+function parseLimit(
+  value: unknown,
+  fallback: number,
+  min = 1,
+  max = 1000,
+): number {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(Math.trunc(parsed), min), max);
+}
+
+/** 已知长跑 Agent HTTP 路由对应的用途；WebSocket 不参与此请求级互斥 */
+function longAgentPurpose(method: string, rawUrl: string): string | null {
+  if (method !== 'POST') return null;
+  const url = rawUrl.split('?')[0];
+  if (
+    url === '/api/market/review' ||
+    url === '/api/themes/board-review' ||
+    url === '/api/etf/review'
+  ) {
+    return 'market-review';
+  }
+  if (url === '/api/etf/analyze' || url === '/api/rotation/review') return 'analyze';
+  if (
+    url === '/api/research/analyze' ||
+    url === '/api/research/analyze-batch' ||
+    url === '/api/research/discover-review'
+  ) {
+    return 'research';
+  }
+  if (url === '/api/plan/generate' || /^\/api\/plan\/[^/]+\/regenerate$/.test(url)) {
+    return 'plan';
+  }
+  if (url === '/api/plan/reevaluate') return 'plan-reevaluate';
+  if (/^\/api\/strategies\/[^/]+\/run$/.test(url)) return 'strategy';
+  return null;
+}
+
 /** 写透同花顺：best-effort，失败仅告警，不阻断本地操作 */
 async function pushThs(fn: () => Promise<void>): Promise<void> {
   try {
@@ -206,12 +279,61 @@ async function main() {
   // 研究模式库种子（从 mode/ 解析的 research-modes-seed.json 灌入，库为空才执行，幂等）
   seedResearchModesIfEmpty();
 
-  const app = Fastify({ logger: { level: 'info' } });
-  // 生产配置 CORS_ORIGINS 白名单则按白名单放行，否则反射任意来源（本地开发）
-  const corsOrigin = config.corsOrigins
-    ? config.corsOrigins.split(',').map((s) => s.trim()).filter(Boolean)
-    : true;
-  await app.register(cors, { origin: corsOrigin });
+  const app = Fastify({
+    logger: {
+      level: 'info',
+      redact: ['req.headers.authorization', 'req.headers.x-app-token', 'req.headers.x-bridge-secret'],
+      serializers: {
+        req(req) {
+          return {
+            method: req.method,
+            url: redactTokenFromUrl(req.url),
+            host: req.headers.host,
+            remoteAddress: req.ip,
+            remotePort: req.socket?.remotePort,
+          };
+        },
+      },
+    },
+  });
+  const configuredOrigins = config.corsOrigins
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  if (configuredOrigins.length > 0) {
+    await app.register(cors, { origin: configuredOrigins });
+  } else {
+    const developmentPorts = new Set(['3000', '4173', '5173', '5373', '8787']);
+    await app.register(cors, {
+      delegator: async (req: FastifyRequest) => {
+        const origin = req.headers.origin;
+        if (!origin) return { origin: false };
+        try {
+          const parsed = new URL(origin);
+          const requestHost = String(req.headers.host ?? '').toLowerCase();
+          const sameOrigin =
+            (parsed.protocol === 'http:' || parsed.protocol === 'https:') &&
+            parsed.host.toLowerCase() === requestHost;
+          const localDevelopment =
+            (parsed.hostname === 'localhost' ||
+              parsed.hostname === '127.0.0.1' ||
+              parsed.hostname === '[::1]') &&
+            developmentPorts.has(parsed.port || (parsed.protocol === 'https:' ? '443' : '80'));
+          // 扩展发的是 chrome-extension:// 源，凭据推送与自选股面板那批接口都要能读到响应，
+          // 否则浏览器会在 CORS 阶段就把响应体拦掉（表现为扩展里整块面板空白）
+          const extensionPath = req.url.split('?')[0];
+          const fromExtension =
+            parsed.protocol === 'chrome-extension:' || parsed.protocol === 'moz-extension:';
+          const extensionAllowed =
+            fromExtension &&
+            (extensionPath === '/api/credentials' || isExtensionApiPath(extensionPath));
+          return { origin: sameOrigin || localDevelopment || extensionAllowed ? origin : false };
+        } catch {
+          return { origin: false };
+        }
+      },
+    });
+  }
   await app.register(websocket);
 
   // ===== 全局鉴权：保护所有 /api 与 /ws（登录/状态端点除外）=====
@@ -219,17 +341,23 @@ async function main() {
   app.addHook('onRequest', async (req, reply) => {
     const url = req.url.split('?')[0];
     if (!url.startsWith('/api') && !url.startsWith('/ws')) return;
-    if (url === '/api/auth/login' || url === '/api/auth/status') return;
-    // 配套浏览器扩展用 BRIDGE_SECRET 作为机器凭据，匹配则绕过 app 登录（看自选股/推送凭据等）
-    if (config.bridgeSecret) {
-      const provided = String(req.headers['x-bridge-secret'] ?? '');
-      if (provided) {
-        const a = Buffer.from(provided);
-        const b = Buffer.from(config.bridgeSecret);
-        if (a.length === b.length && timingSafeEqual(a, b)) return;
-      }
+    if (
+      url.startsWith('/api/auth/') ||
+      url === '/api/settings' ||
+      url.startsWith('/api/settings/') ||
+      url === '/api/credentials'
+    ) {
+      reply.header('Cache-Control', 'no-store');
     }
+    if (url === '/api/auth/login' || url === '/api/auth/status') return;
+    // 浏览器扩展机器凭据只允许进入该精确路由，再由路由内部独立校验
+    if (url === '/api/credentials') return;
     if (!isAuthEnabled()) return;
+    // 配套浏览器扩展只有 BRIDGE_SECRET、拿不到 app token，但它除了推凭据还要读自选股面板
+    // （见 extension/watchlist.js）。放行范围严格限定在这份只读/自选维护的白名单内——
+    // 早先的实现是在全局钩子最前面无条件认 bridge 密钥，等于把扩展里那把窄凭据
+    // 升级成了能改设置、跑 agent、下模拟单的全站管理员令牌。
+    if (isExtensionApiPath(url) && verifyBridgeSecret(req.headers['x-bridge-secret'])) return;
     const token = url.startsWith('/ws')
       ? String((req.query as Record<string, unknown>)?.token ?? '')
       : String(req.headers['x-app-token'] ?? '');
@@ -237,6 +365,27 @@ async function main() {
       return reply.code(401).send({ ok: false, error: '未登录或登录已失效' });
     }
   });
+
+  const activeHttpPurposes = new Set<string>();
+  const requestPurpose = new WeakMap<object, string>();
+  /** 释放当前请求持有的长跑用途锁 */
+  const releasePurpose = (req: object): void => {
+    const purpose = requestPurpose.get(req);
+    if (!purpose) return;
+    requestPurpose.delete(req);
+    activeHttpPurposes.delete(purpose);
+  };
+  app.addHook('onRequest', async (req, reply) => {
+    const purpose = longAgentPurpose(req.method, req.url);
+    if (!purpose) return;
+    if (activeHttpPurposes.has(purpose)) {
+      return reply.code(409).send({ ok: false, error: `同类任务正在运行（${purpose}），请勿重复提交` });
+    }
+    activeHttpPurposes.add(purpose);
+    requestPurpose.set(req, purpose);
+  });
+  app.addHook('onResponse', async (req) => releasePurpose(req));
+  app.addHook('onRequestAbort', async (req) => releasePurpose(req));
 
   // ===== 鉴权 =====
   app.get('/api/auth/status', () => ({ ok: true, data: { enabled: isAuthEnabled() } }));
@@ -247,7 +396,13 @@ async function main() {
     }
     return { ok: true, data: { token: issueToken() } };
   });
-  app.post<{ Body: { next?: string } }>('/api/auth/password', (req, reply) => {
+  app.post<{ Body: { current?: string; next?: string } }>('/api/auth/password', (req, reply) => {
+    if (isAuthEnabled()) {
+      const current = String(req.body?.current ?? '');
+      if (!current || !verifyPassword(current)) {
+        return reply.code(401).send({ ok: false, error: '当前密码错误' });
+      }
+    }
     const next = String(req.body?.next ?? '').trim();
     if (!next) {
       return reply.code(400).send({ ok: false, error: '新密码不能为空' });
@@ -292,7 +447,16 @@ async function main() {
         return reply.code(400).send({ ok: false, error: '未提供 idpToken 或 thsCookie' });
       }
       updateSettings(patch);
-      return { ok: true, data: getPublicSettings() };
+      // 只回布尔状态，不回凭据值：扩展要据此显示「已写入」，而回吐设置视图
+      // 等于让一把只该用来写 cookie 的窄凭据反向读出 LLM Key 与 Telegram Token。
+      return {
+        ok: true,
+        data: {
+          updated: true,
+          idpTokenSet: !!getPublicSettings().idpToken,
+          thsCookieSet: !!getPublicSettings().thsCookie,
+        },
+      };
     },
   );
 
@@ -331,18 +495,28 @@ async function main() {
       if (!getTask(req.params.id)) {
         return reply.code(404).send({ ok: false, error: '任务不存在' });
       }
-      // 后台异步执行，进度通过 /ws/runs 广播
-      void triggerTask(req.params.id, { forceTrade: req.body?.forceTrade ?? false });
+      const taskRunKey = `task:${req.params.id}`;
+      if (activeHttpPurposes.has(taskRunKey)) {
+        return reply.code(409).send({ ok: false, error: '该任务正在运行，请勿重复触发' });
+      }
+      activeHttpPurposes.add(taskRunKey);
+      // 后台异步执行，进度通过 /ws/runs 广播；异常在此收口，避免未处理 Promise 拒绝
+      void triggerTask(req.params.id, { forceTrade: req.body?.forceTrade ?? false })
+        .catch((e) => {
+          req.log.error({ err: e, taskId: req.params.id }, '手动任务执行失败');
+        })
+        .finally(() => activeHttpPurposes.delete(taskRunKey));
       return { ok: true };
     },
   );
 
   // ===== 运行记录 / 复盘 =====
   app.get('/api/runs', () => ({ ok: true, data: listRuns(100) }));
-  app.get<{ Params: { id: string } }>('/api/runs/:id', (req) => ({
-    ok: true,
-    data: getRun(req.params.id),
-  }));
+  app.get<{ Params: { id: string } }>('/api/runs/:id', (req, reply) => {
+    const run = getRun(req.params.id);
+    if (!run) return reply.code(404).send({ ok: false, error: '运行记录不存在' });
+    return { ok: true, data: run };
+  });
 
   // ===== LLM 调用记录分析 =====
   app.get<{ Querystring: { days?: string } }>('/api/usage/summary', (req) => ({
@@ -352,7 +526,7 @@ async function main() {
   app.get<{ Querystring: { limit?: string; purpose?: string } }>('/api/usage/calls', (req) => ({
     ok: true,
     data: listLlmCalls(
-      req.query.limit ? Number(req.query.limit) : 100,
+      parseLimit(req.query.limit, 100),
       req.query.purpose || undefined,
     ),
   }));
@@ -396,7 +570,7 @@ async function main() {
   // 复盘历史（成功的「一键复盘」运行）
   app.get<{ Querystring: { limit?: string } }>('/api/reviews', (req) => ({
     ok: true,
-    data: listReviews(req.query.limit ? Number(req.query.limit) : undefined),
+    data: listReviews(parseLimit(req.query.limit, 50, 1, 200)),
   }));
 
   // 模块显隐配置
@@ -693,7 +867,7 @@ async function main() {
 
   app.get<{ Querystring: { limit?: string } }>('/api/backtest/runs', (req, reply) => {
     try {
-      const limit = req.query?.limit ? Number(req.query.limit) : undefined;
+      const limit = parseLimit(req.query?.limit, 50, 1, 200);
       return { ok: true, data: listBacktestRuns(limit) };
     } catch (e) {
       return backtestErr(reply, e);
@@ -749,6 +923,11 @@ async function main() {
         if (!/^\d+\.[A-Za-z0-9]+$/.test(secid)) {
           return reply.code(400).send({ ok: false, error: '非法 secid' });
         }
+        // 这里**不要**把 secid 反解出的 code 填回去。K 线源里 astockdata(mootdx) 完全忽略
+        // secid、只把 code 当 symbol，而它在分钟链里排第一：填了 code 之后
+        // 上证指数 1.000001 会以 symbol=000001 命中 mootdx，取回平安银行的 K 线。
+        // code 留空正是让该源报错跳过、交给认 secid 的腾讯/东财的关键。
+        // 「缓存身份不能带空 code」那件事在 getKline 内部按 secid 反解解决（见 datasource/scheduler.ts）。
       } else if (!/^(\d{6}|BK\d+)$/i.test(code)) {
         return reply.code(400).send({ ok: false, error: '非法标的代码' });
       }
@@ -756,7 +935,7 @@ async function main() {
       const period = allowed.includes(req.query?.period as KlinePeriod)
         ? (req.query!.period as KlinePeriod)
         : 'day';
-      const limit = Math.min(Math.max(Number(req.query?.limit) || 250, 30), 800);
+      const limit = parseLimit(req.query?.limit, 250, 30, 800);
       // fresh=1 跳过日线缓存的新鲜度窗口直接回源，只给前台 K 线弹窗的轮询用：
       // 缓存窗口是 10 分钟，弹窗却 10 秒一刷，不绕过就会盯着一根不动的当日线（详见 getDailyCached）
       const fresh = req.query?.fresh === '1';
@@ -1050,30 +1229,6 @@ async function main() {
         socket.send(JSON.stringify({ type: 'error', message: '消息格式错误' }));
         return;
       }
-      // 控制消息：用户主动停止当前运行
-      if (payload.action === 'stop') {
-        activeAbort?.abort();
-        return;
-      }
-      const { sessionId, content } = payload;
-      if (!sessionId || !content) return;
-
-      const history: ChatCompletionMessageParam[] = listMessages(sessionId).map((m) => ({
-        role: m.role === 'tool' ? 'assistant' : (m.role as 'user' | 'assistant' | 'system'),
-        content: m.content,
-      }));
-      addMessage(sessionId, 'user', content);
-
-      // 标的专属会话：给模型前置标的上下文，使其无需追问即可取数、并知道可往 K 线图上打点。
-      // 带 planIntent 时再叠一段固定工具序列的标准计划指令。落库的用户消息仍是原文，不含这些注入。
-      const session = getSession(sessionId);
-      const prompt = buildChatPrompt({
-        refCode: session?.refCode,
-        refName: session?.refName,
-        content,
-        planIntent: payload.planIntent,
-      });
-
       const send = (e: StreamEvent) => {
         try {
           socket.send(JSON.stringify(e));
@@ -1081,34 +1236,68 @@ async function main() {
           /* socket 可能已关闭 */
         }
       };
-      // 上一轮若仍在跑（异常情况），先中止，避免并发烧 token
-      activeAbort?.abort();
-      const abortController = new AbortController();
-      activeAbort = abortController;
-      // 运行管理 + 调用记录 + run 生命周期事件均由 gateway 接管（经 onEvent 透传到本 socket）
-      const result = await gateway.call({
-        mode: 'agent',
-        trigger: 'chat',
-        purpose: 'chat',
-        taskName: '聊天',
-        prompt,
-        history,
-        // 深思开关由前端传入，缺省按开启（兼容老前端）
-        modelConfig: { thinking: payload.thinking ?? true },
-        timeoutSec: 300,
-        signal: abortController.signal,
-        // 同一会话用稳定缓存键，提升多轮对话的上游前缀缓存命中
-        cacheKey: `chat:${sessionId}`,
-        onEvent: send,
-      });
-      if (activeAbort === abortController) activeAbort = null;
-      // 中止运行不写入 assistant 结果（避免把半截/空回答落库污染会话）
-      if (result.status !== 'canceled' && result.outputText) {
-        addMessage(sessionId, 'assistant', result.outputText);
+      try {
+        // 控制消息：用户主动停止当前运行
+        if (payload.action === 'stop') {
+          activeAbort?.abort();
+          return;
+        }
+        const { sessionId, content } = payload;
+        if (!sessionId || !content) return;
+
+        const history: ChatCompletionMessageParam[] = listMessages(sessionId).map((m) => ({
+          role: m.role === 'tool' ? 'assistant' : (m.role as 'user' | 'assistant' | 'system'),
+          content: m.content,
+        }));
+        addMessage(sessionId, 'user', content);
+
+        // 标的专属会话：给模型前置标的上下文，使其无需追问即可取数、并知道可往 K 线图上打点。
+        // 带 planIntent 时再叠一段固定工具序列的标准计划指令。落库的用户消息仍是原文，不含这些注入。
+        const session = getSession(sessionId);
+        const prompt = buildChatPrompt({
+          refCode: session?.refCode,
+          refName: session?.refName,
+          content,
+          planIntent: payload.planIntent,
+        });
+
+        // 上一轮若仍在跑（异常情况），先中止，避免并发烧 token
+        activeAbort?.abort();
+        const abortController = new AbortController();
+        activeAbort = abortController;
+        try {
+          // 运行管理 + 调用记录 + run 生命周期事件均由 gateway 接管（经 onEvent 透传到本 socket）
+          const result = await gateway.call({
+            mode: 'agent',
+            trigger: 'chat',
+            purpose: 'chat',
+            taskName: '聊天',
+            prompt,
+            history,
+            // 深思开关由前端传入，缺省按开启（兼容老前端）
+            modelConfig: { thinking: payload.thinking ?? true },
+            timeoutSec: 300,
+            signal: abortController.signal,
+            // 同一会话用稳定缓存键，提升多轮对话的上游前缀缓存命中
+            cacheKey: `chat:${sessionId}`,
+            onEvent: send,
+          });
+          // 中止运行不写入 assistant 结果（避免把半截/空回答落库污染会话）
+          if (result.status !== 'canceled' && result.outputText) {
+            addMessage(sessionId, 'assistant', result.outputText);
+          }
+          // 标的会话标题固定为「代码 名称」，不被首轮提问覆盖
+          if (history.length === 0 && !session?.refCode) touchSession(sessionId, content.slice(0, 20));
+          else touchSession(sessionId);
+        } finally {
+          if (activeAbort === abortController) activeAbort = null;
+        }
+      } catch (e) {
+        send({
+          type: 'error',
+          message: e instanceof Error ? e.message : '聊天处理失败',
+        });
       }
-      // 标的会话标题固定为「代码 名称」，不被首轮提问覆盖
-      if (history.length === 0 && !session?.refCode) touchSession(sessionId, content.slice(0, 20));
-      else touchSession(sessionId);
     });
 
     // 连接关闭：中止在飞运行（避免 socket 断开后 run 仍继续跑、继续烧 token）

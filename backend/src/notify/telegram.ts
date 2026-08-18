@@ -7,6 +7,13 @@ import { getValue } from '../settings';
 // Telegram 单条消息上限 4096 字符，留余量按 4000 切分
 const TG_LIMIT = 4000;
 
+/**
+ * 单次请求超时。pushAlert 是在盯盘 tick 内串行 await 的，而 scheduleNext 在 loop 末尾才执行：
+ * Telegram 连接挂住时整个轮询被冻结，undici 默认要等到 headers timeout；
+ * retryUndelivered 一轮最多 20 条更会把停摆成倍放大。超时即失败，交死信队列重投。
+ */
+const REQUEST_TIMEOUT_MS = 10_000;
+
 /** 按上限切分长文本，优先在换行边界切，避免单条超限被拒 */
 function splitText(text: string, limit = TG_LIMIT): string[] {
   if (text.length <= limit) return [text];
@@ -55,6 +62,7 @@ export async function sendTelegram(text: string): Promise<{ ok: boolean; message
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
       const data = (await res.json()) as { ok: boolean; description?: string };
       if (!data.ok) return { ok: false, message: data.description || '发送失败' };

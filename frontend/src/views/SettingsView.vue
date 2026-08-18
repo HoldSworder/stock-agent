@@ -30,12 +30,20 @@ watch(tab, (v) => {
 const loading = ref(false);
 const testing = ref(false);
 const settings = ref<AppSettings | null>(null);
+/** 设置读取失败原因：与「已加载但为空」区分，否则整页只剩空白无从判断 */
+const loadError = ref('');
+/** 是否已启用访问密码：启用后改密必须先验旧密码 */
+const authEnabled = ref(false);
 
 // 访问密码
-const pwForm = reactive({ next: '', confirm: '' });
+const pwForm = reactive({ current: '', next: '', confirm: '' });
 const pwLoading = ref(false);
 
 async function savePassword() {
+  if (authEnabled.value && !pwForm.current) {
+    ElMessage.warning('请输入当前密码');
+    return;
+  }
   if (!pwForm.next) {
     ElMessage.warning('请输入新密码');
     return;
@@ -46,7 +54,7 @@ async function savePassword() {
   }
   pwLoading.value = true;
   try {
-    await api.setPassword(pwForm.next);
+    await api.setPassword(pwForm.next, authEnabled.value ? pwForm.current : undefined);
     clearToken();
     ElMessage.success('密码已更新，请重新登录');
     router.replace('/login');
@@ -91,8 +99,21 @@ function fill(s: AppSettings) {
 }
 
 async function load() {
-  settings.value = await api.getSettings();
-  fill(settings.value);
+  loadError.value = '';
+  try {
+    settings.value = await api.getSettings();
+    fill(settings.value);
+  } catch (e) {
+    // 取不到设置时必须显式报错：否则表单被 v-if 隐藏，页面只剩空白，看起来像功能丢了
+    loadError.value = e instanceof Error ? e.message : '读取设置失败';
+    ElMessage.error(loadError.value);
+  }
+  try {
+    authEnabled.value = (await api.authStatus()).enabled;
+  } catch {
+    // 鉴权状态取不到时按「已启用」处理，宁可多要一次旧密码，也不放过校验
+    authEnabled.value = true;
+  }
 }
 
 async function save() {
@@ -101,6 +122,8 @@ async function save() {
     settings.value = await api.updateSettings({ ...form });
     fill(settings.value);
     ElMessage.success('已保存');
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '保存失败');
   } finally {
     loading.value = false;
   }
@@ -111,6 +134,8 @@ async function test() {
   try {
     const r = await api.testLLM();
     r.ok ? ElMessage.success(r.message) : ElMessage.error(r.message);
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : '测试失败');
   } finally {
     testing.value = false;
   }
@@ -132,6 +157,22 @@ onMounted(load);
       </el-tab-pane>
 
       <el-tab-pane label="模型与推送" name="general">
+        <el-alert
+          v-if="loadError"
+          type="error"
+          show-icon
+          :closable="false"
+          class="s-load-error"
+          title="设置读取失败"
+          :description="`${loadError}（请确认后端在线且登录未失效，然后重试）`"
+        >
+          <template #default>
+            <div class="s-load-error-body">
+              <span>{{ loadError }}</span>
+              <el-button size="small" @click="load">重试</el-button>
+            </div>
+          </template>
+        </el-alert>
         <el-form v-if="settings" label-position="top" class="s-form">
       <section class="s-card">
         <div class="s-card-head">
@@ -158,7 +199,13 @@ onMounted(load);
             />
           </el-form-item>
           <el-form-item label="API Key">
-            <el-input v-model="form.llmApiKey" placeholder="未配置" />
+            <el-input
+              v-model="form.llmApiKey"
+              type="password"
+              show-password
+              placeholder="未配置"
+            />
+            <div class="hint">已配置时显示掩码（••••后四位）；保持掩码不动即不修改</div>
           </el-form-item>
         </div>
       </section>
@@ -170,7 +217,13 @@ onMounted(load);
         </div>
         <div class="s-grid">
           <el-form-item label="Bot Token" class="s-full">
-            <el-input v-model="form.telegramBotToken" placeholder="未配置" />
+            <el-input
+              v-model="form.telegramBotToken"
+              type="password"
+              show-password
+              placeholder="未配置"
+            />
+            <div class="hint">已配置时显示掩码（••••后四位）；保持掩码不动即不修改</div>
           </el-form-item>
           <el-form-item label="Chat ID">
             <el-input v-model="form.telegramChatId" />
@@ -199,11 +252,29 @@ onMounted(load);
           <div class="s-card-sub">全局登录保护</div>
         </div>
         <div class="s-grid">
+          <el-form-item v-if="authEnabled" label="当前密码" class="s-full">
+            <el-input
+              v-model="pwForm.current"
+              type="password"
+              show-password
+              placeholder="已启用访问密码，改密需先验证当前密码"
+            />
+          </el-form-item>
           <el-form-item label="新密码">
-            <el-input v-model="pwForm.next" placeholder="留空不修改" />
+            <el-input
+              v-model="pwForm.next"
+              type="password"
+              show-password
+              placeholder="留空不修改"
+            />
           </el-form-item>
           <el-form-item label="确认新密码">
-            <el-input v-model="pwForm.confirm" placeholder="再次输入" />
+            <el-input
+              v-model="pwForm.confirm"
+              type="password"
+              show-password
+              placeholder="再次输入"
+            />
           </el-form-item>
           <el-form-item class="s-full">
             <el-button :loading="pwLoading" @click="savePassword">更新密码</el-button>
@@ -351,5 +422,14 @@ onMounted(load);
   border-radius: 4px;
   background: var(--bg-1);
   font-size: 12px;
+}
+.s-load-error {
+  margin-bottom: 12px;
+}
+.s-load-error-body {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  justify-content: space-between;
 }
 </style>

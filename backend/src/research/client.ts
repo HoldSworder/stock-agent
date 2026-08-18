@@ -1,5 +1,6 @@
 import type { ResearchReportType } from '@stock-agent/shared';
 import { getValue } from '../settings';
+import { shanghaiToday } from '../util';
 import { requestJson, requestText } from '../datasource/httpClient';
 
 // 东方财富研报中心数据客户端（免费/无鉴权）：
@@ -46,8 +47,15 @@ function baseUrl(): string {
   return (getValue('researchBaseUrl').trim() || 'https://reportapi.eastmoney.com').replace(/\/$/, '');
 }
 
+/**
+ * 窗口日期一律按上海自然日算（东财的 begin/endTime 就是上海日期口径）。
+ *
+ * 原来用 Date 的本地时区字段拼日期：compose 没设 TZ、容器默认 UTC，于是上海时间
+ * 00:00–08:00 这段算出的 endTime 比东财的「今天」早一天，当日新研报被窗口整体排除。
+ * 同模块 catalystRepo 已统一走 shanghaiToday，这里对齐。
+ */
 function ymd(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  return shanghaiToday(d);
 }
 
 async function fetchJson(url: string, timeoutMs = 15000): Promise<Record<string, unknown>> {
@@ -228,11 +236,24 @@ export interface FetchAnnListOpts {
   pageSize?: number;
 }
 
-/** 拉取全市场公告列表原始条目（按时间倒序，合并多页 data.list） */
-export async function fetchAnnouncementList(opts: FetchAnnListOpts = {}): Promise<Record<string, unknown>[]> {
+export interface AnnListPage {
+  items: Record<string, unknown>[];
+  /** 后续页抓取失败，items 只是当日公告的一部分（调用方须提示不完整） */
+  partial: boolean;
+}
+
+/**
+ * 拉取全市场公告列表原始条目（按时间倒序，合并多页 data.list）。
+ *
+ * 第 1 页失败直接抛错：原先任何一页失败都 break 返回已收集内容，第 1 页挂掉就静默返回空数组，
+ * 调用方无从区分「数据源挂了」和「今日无公告」——下游 agent 会据此直接下「今日无重大公告」的结论。
+ * 后续页失败仍按已拿到的部分返回，但打 partial 标记。
+ */
+export async function fetchAnnouncementList(opts: FetchAnnListOpts = {}): Promise<AnnListPage> {
   const pages = Math.min(Math.max(opts.pages ?? 3, 1), 8);
   const pageSize = Math.min(Math.max(opts.pageSize ?? 100, 1), 100);
   const out: Record<string, unknown>[] = [];
+  let partial = false;
   for (let p = 1; p <= pages; p++) {
     const params = new URLSearchParams({
       cb: ANN_CB,
@@ -249,12 +270,14 @@ export async function fetchAnnouncementList(opts: FetchAnnListOpts = {}): Promis
       const data = json.data as Record<string, unknown> | undefined;
       const list = data?.list;
       if (Array.isArray(list)) out.push(...(list as Record<string, unknown>[]));
-    } catch {
+    } catch (e) {
+      if (p === 1) throw e; // 首页失败即数据源不可用，显性报错而不是伪装成「今日无公告」
+      partial = true;
       break; // 翻页失败即止，用已拿到的部分
     }
     await new Promise((res) => setTimeout(res, 300));
   }
-  return out;
+  return { items: out, partial };
 }
 
 /** 拉取单条公告正文（notice_content 纯文本）；失败返回 null */

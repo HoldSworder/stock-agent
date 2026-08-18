@@ -1,7 +1,13 @@
 // 主线阶段状态机 + 核心股跨日延续自检（无框架，assert 断言）。
 // 运行：cd backend && ./node_modules/.bin/tsx src/scripts/breadthStage.selfcheck.ts
 import assert from 'node:assert/strict';
-import { assessPersistence, stageAction } from '../breadth/service';
+import {
+  assessPersistence,
+  competitiveRanks,
+  shouldKeepFadedBoard,
+  stageAction,
+  takeWithFading,
+} from '../breadth/service';
 import type { BoardBreadthSnapshotRow } from '../breadth/repo';
 
 const hist = (
@@ -103,6 +109,92 @@ const freshPrev = assessPersistence(
   '2026-08-04',
 );
 assert.equal(freshPrev.continuity.overlap, 1, '上一交易日快照存在时应正常算留存率');
+
+// 6d. 昨日居首 30 只、今日新高归零：这是最该报警的退潮形态。
+// 它必须①被判 fading、②仍留在榜内参与落库、③不被 Top N 截断抹掉。
+// 旧口径 filter(newHighCount > 0) 会把这条整行丢弃，于是 judge 的 fading 分支永远拿不到当日记录，
+// 次日 hist[0] 还会变成两天前的行导致延续性判定失真。
+const zeroedHist = hist([{ date: '2026-08-03', count: 30, rank: 1, core: CORE_A }]);
+assert.equal(shouldKeepFadedBoard(zeroedHist), true, '曾居榜首的板块归零后必须保留进榜');
+assert.equal(
+  shouldKeepFadedBoard(hist([{ date: '2026-08-03', count: 4, rank: 37, core: [] }])),
+  false,
+  '从未居首的普通零值板块仍应排除，否则全市场几百个零值板块会灌爆响应',
+);
+const zeroed = assessPersistence(41, 0, 0, zeroedHist, [], '2026-08-04', ['2026-08-03']);
+assert.equal(zeroed.stage, 'fading', '昨日居首、今日归零必须判退幕');
+assert.equal(zeroed.action, 'exit_only', '退幕只允许退出，持仓者需要看到这条');
+assert.equal(zeroed.delta, -30, '归零板块的「较昨」必须算得出来（这正是退潮幅度证据）');
+// 展示/落库截取不得把它切掉：排在第 50 位（超出 Top40）时仍要在结果里
+const listed = [
+  ...Array.from({ length: 49 }, () => ({ stage: 'brewing' as const, tag: 'other' })),
+  { stage: 'fading' as const, tag: 'faded' },
+];
+assert.equal(
+  takeWithFading(listed, 40).some((it) => it.tag === 'faded'),
+  true,
+  '退幕板块排在 Top N 之外时必须被补回，否则退出提示会被截断抹掉',
+);
+
+// 6e. 环比 delta / 腰斩判据必须与 continuity 共用同一个新鲜度口径：
+// hist[0] 不是上一交易日时，拿三天前的数字当「较昨」用会误报退潮（收盘快照漏跑是常态）
+const staleDelta = assessPersistence(
+  1,
+  20,
+  20,
+  hist([{ date: '2026-07-28', count: 60, rank: 1, core: CORE_A }]),
+  CORE_A,
+  '2026-08-04',
+);
+assert.equal(staleDelta.delta, null, '上一份快照不是上一交易日时不得给出「较昨」环比');
+assert.notEqual(
+  staleDelta.stage,
+  'fading',
+  '不能拿三天前的 60 只跟今天的 20 只比来判腰斩退潮',
+);
+
+// 6f. 连续达标天数按 distinct 交易日对齐：某天该板块缺席（未入榜）时序列必须断开，
+// 不能把缺席日前后两天直接接起来报成连续
+const gapHist = hist([
+  { date: '2026-08-03', count: 20, rank: 1, core: CORE_A }, // 达标
+  // 2026-07-31 该板块缺席（无行）
+  { date: '2026-07-30', count: 20, rank: 1, core: CORE_A }, // 达标
+]);
+const gapDates = ['2026-08-03', '2026-07-31', '2026-07-30'];
+assert.equal(
+  assessPersistence(1, 20, 20, gapHist, CORE_A, '2026-08-04', gapDates).streakDays,
+  2,
+  '缺席日必须按未达标断开连续段（今日 + 08-03 共 2 日）',
+);
+assert.equal(
+  assessPersistence(1, 20, 20, gapHist, CORE_A, '2026-08-04').streakDays,
+  3,
+  '不传交易日序列时退回按 hist 逐行计算（自检构造数据的旧行为）',
+);
+
+// 6g. 竞争排名：新高数并列即同名次（1,1,3），否则「并列第一但占比低 0.1pt」的板块拿 rank=2，
+// 在 TOP_RANK=1 口径下一天都不计入 topDays，PERSIST_TOP_DAYS>=3 永远无法满足
+assert.deepEqual(competitiveRanks([30, 30, 25, 20, 20, 20, 18]), [1, 1, 3, 4, 4, 4, 7]);
+// 但并列第一不能无限扩：超过 3 个即当日无明确主线，整组降到 TOP_RANK 之外。
+// 否则 rank=1 的独占语义被悄悄放宽成「所有并列第一」，wasMainline 命中面变宽，
+// 次日它们只要掉出并列第一或环比腰斩就被判 fading → exit_only（标的计划的板块闸门）
+assert.deepEqual(
+  competitiveRanks([20, 20, 20, 20, 18]),
+  [2, 2, 2, 2, 5],
+  '并列第一超过 3 个视为无主线，谁都不给 isTop',
+);
+assert.deepEqual(
+  competitiveRanks([20, 20, 20, 18]),
+  [1, 1, 1, 4],
+  '并列第一不超过 3 个时仍按并列同名次',
+);
+assert.deepEqual(competitiveRanks([]), [], '空排名池不得抛错');
+const tied = assessPersistence(1, 30, 20, hist([
+  { date: '2026-08-03', count: 28, rank: 1, core: CORE_A },
+  { date: '2026-07-31', count: 26, rank: 1, core: CORE_A },
+]), CORE_A);
+assert.equal(tied.topDays, 3, '并列第一应与第一名同样计入居首天数');
+assert.equal(tied.stage, 'advancing', '并列第一不得因序号靠后而无法确认主线');
 
 // 7. 硬路由不存在「放大仓位」的出口：任何阶段都不会返回超出自身许可的动作
 assert.deepEqual(

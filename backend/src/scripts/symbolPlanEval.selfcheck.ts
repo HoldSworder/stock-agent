@@ -46,6 +46,7 @@ function mkPlan(over: Partial<SymbolTradePlan> = {}): SymbolTradePlan {
     code: '159516',
     name: 'ETF',
     assetType: 'etf',
+    secid: '0.159516',
     status: 'active',
     asOf: dayAt(59),
     validFrom: '2026-01-01T00:00:00.000Z',
@@ -902,7 +903,79 @@ assert.equal(
   assert.ok(st?.satisfied, '价格跌回穿越点下方后，日内那次上穿仍应凭锁存算作已满足');
 }
 
+// ===== 19. 双用途条件不得产出重复命中与重复事件（第二轮 M3）=====
+//
+// 同一条件同时出现在某风险情景的触发与失效数组里是双用途之后的合法形状。
+// 索引键不含用途时两边会互相覆盖；triggeredScenarios 不去重时前端会把同一条风险路径
+// 渲染两遍；conditions 里两条同 conditionId 的记录对状态型规则（holdBelow）没有锁存兜底，
+// applyEvaluation 会写两条重复的 condition_hit。
+
+{
+  ev.resetEvaluatorState();
+  // 价位远在现价上方，「收盘跌破」是状态型规则且当下恒为真——没有事件锁存兜底，
+  // 重复事件只能靠写入侧按 conditionId 去重
+  const dual = cond('c-dual', { kind: 'priceLevel', level: LAST * 2, relation: 'holdBelow' });
+  const plan = mkPlan({
+    id: 'plan-dual',
+    code: '159888',
+    expiresAt: '2099-01-01T00:00:00.000Z',
+    scenarios: [
+      {
+        id: 'sc-risk',
+        rank: 'risk',
+        name: '跌破减仓',
+        action: 'reduce',
+        targetLevelIds: [],
+        // 同一条件既是这条风险路径的触发，也是它自己的失效条件
+        conditions: [dual],
+        invalidConditions: [dual],
+      },
+    ],
+  });
+  repo.insertPlan(plan);
+
+  // 先预热，让下一根新 bar 能报出 justHit
+  await ev.evaluateAllLivePlans({ loadBars: async () => BARS });
+  const nextBars = [...BARS, { ...BARS[BARS.length - 1], time: dayAt(60) }];
+  const res = ev.evaluatePlan({
+    plan,
+    barsByPeriod: new Map([['day', nextBars]]),
+    lastBarClosed: true,
+  });
+
+  assert.equal(res.triggered, true, '前置条件：该条件当下成立，风险路径应判触发');
+  assert.equal(
+    res.triggeredScenarios.length,
+    1,
+    `同一情景两个用途都命中时只能记一次，实际 ${res.triggeredScenarios.length} 次（前端会渲染两遍）`,
+  );
+  assert.equal(
+    res.conditions.filter((c) => c.conditionId === 'c-dual' && c.justHit).length,
+    2,
+    '前置条件：触发副本与失效副本都应报出刚命中，否则去重断言空转',
+  );
+
+  ev.applyEvaluation(plan, res);
+  const hits = repo
+    .listEvents(plan.id)
+    .filter((e) => e.kind === 'condition_hit' && e.conditionId === 'c-dual');
+  assert.equal(hits.length, 1, `同一次命中只能写一条 condition_hit，实际 ${hits.length} 条`);
+
+  // 风险路径已启动 → 有效期必须被收紧，否则它状态停在 triggered（live），
+  // 既不失效也进不了收盘重算队列，会一直挂到 28 天有效期满（第二轮 H1）
+  assert.equal(res.needsNewVersion, true, '风险路径已启动的计划必须被判为需要新版本');
+  const after = repo.getPlan(plan.id)!;
+  assert.ok(
+    after.expiresAt != null && after.expiresAt < '2099-01-01T00:00:00.000Z',
+    `风险路径启动后有效期必须被收紧，实际仍是 ${after.expiresAt}`,
+  );
+  assert.ok(
+    repo.listEvents(plan.id).some((e) => e.note.includes('风险路径已启动')),
+    '收紧有效期必须留痕，否则用户看到计划提前过期查不到原因',
+  );
+}
+
 rmSync(tmpDir, { recursive: true, force: true });
 console.log(
-  '✅ 分频求值自检通过（cadence 分类 · tick 不碰 buildSeries · 同 bar 只构建一次 · 与新 bar 数同阶非 tick 数 · 多计划复用序列 · 未预热不回放 · 缺 K 线不近似 · 失效优先 · 过期判定 · 周期去重 · 午休收完判定 · 定时入口预热接线 · 规则语义按 relation 判 · 事件锁存跨 bar 生效 · 终态不复活 · planBars 按实际收盘计数 · 预热失败恢复轮不回放 · tick 命中回写事件流与锁存且去重）',
+  '✅ 分频求值自检通过（cadence 分类 · tick 不碰 buildSeries · 同 bar 只构建一次 · 与新 bar 数同阶非 tick 数 · 多计划复用序列 · 未预热不回放 · 缺 K 线不近似 · 失效优先 · 过期判定 · 周期去重 · 午休收完判定 · 定时入口预热接线 · 规则语义按 relation 判 · 事件锁存跨 bar 生效 · 终态不复活 · planBars 按实际收盘计数 · 预热失败恢复轮不回放 · tick 命中回写事件流与锁存且去重 · 双用途条件不重复命中不重复写事件 · 风险路径启动后收紧有效期）',
 );

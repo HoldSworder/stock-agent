@@ -37,6 +37,14 @@ type StrengthPoint = { date: string; strength: number };
 const MAX_STRENGTH_HISTORY = 30;
 /** 趋势判定阈值（点） */
 const TREND_DELTA = 5;
+/**
+ * 强度日衰减因子：当日主源给出的 strengthHint 低于历史值时，强度按此比例向下收敛。
+ * 旧口径 max(prev, hint) 单调不减，而 strengthHistory 记的正是这个值，
+ * 于是 calcStrengthTrend 永远不会返回 falling、饱和后连 rising 也没有，
+ * 下游「强度走弱」风险标签、themeDown、失效条件三处判据长期是死代码。
+ * 用衰减而非直接覆盖：单日取数抖动不该让一条主线的强度断崖，10%/日约 3 日跨过 TREND_DELTA。
+ */
+const STRENGTH_DECAY = 0.9;
 
 /** 主线持续天数：首次出现→最近出现（含端点） */
 function calcDurationDays(firstSeen: string, lastSeen: string): number {
@@ -169,7 +177,10 @@ function upsertTheme(input: UpsertInput): void {
   const prev = rowToTheme(existing);
   const hasNewSource = !prev.sources.includes(input.source);
   const sources = hasNewSource ? [...prev.sources, input.source] : prev.sources;
-  const strength = clamp(Math.max(prev.strength, input.strengthHint) + (hasNewSource ? 8 : 0));
+  // 「多源协同 +8」只作用于本次合成值，不与历史峰值绑死：加成一旦被 max 锁进 prev.strength，
+  // 它就成了永久地板，强度再也回不去（这正是趋势判定失效的根因）。
+  const base = Math.max(input.strengthHint, prev.strength * STRENGTH_DECAY);
+  const strength = clamp(base + (hasNewSource ? 8 : 0));
   // 同源同日证据去重，新的置顶，保留最近 MAX_EVIDENCE 条
   const evidence = [
     newEvidence,
@@ -382,7 +393,9 @@ export function ingestFromReview(jsonText: string): number {
       date,
       phase,
     });
-    // upsert 仅叠加强度（Math.max）且强制 active；负向 verdict 需直接下修强度，退潮/证伪并置 fading。
+    // upsert 的强度合成带日衰减地板，负向 verdict 要求的跌幅可能被地板托住；
+    // 这里按复盘结论直接下修到位，退潮/证伪并置 fading。
+    // strengthHistory 必须同步改写，否则趋势读的是被托住的那个值，与实际强度对不上。
     if (delta < 0) {
       const row = db
         .select()
@@ -390,10 +403,14 @@ export function ingestFromReview(jsonText: string): number {
         .where(eq(schema.marketThemes.theme, name))
         .get();
       if (row) {
+        const lowered = clamp(prevStrength + delta);
         db.update(schema.marketThemes)
           .set({
-            strength: clamp(prevStrength + delta),
+            strength: lowered,
             status: verdict === '退潮' || verdict === '证伪' ? 'fading' : row.status,
+            strengthHistory: JSON.stringify(
+              appendStrengthHistory(rowToTheme(row).strengthHistory, date, lowered),
+            ),
             updatedAt: nowIso(),
           })
           .where(eq(schema.marketThemes.id, row.id))

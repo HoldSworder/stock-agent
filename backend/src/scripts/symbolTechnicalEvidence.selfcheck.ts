@@ -138,6 +138,35 @@ assert.equal(
   );
 }
 
+// ===== 4a. 可比性必须实测，不能硬编码 true（第 11 条）=====
+//
+// 本源不给成交额时 pickBasis 会回退成交量口径（腾讯 fqkline 日线正是这种源），
+// 10 送 10 或 ETF 1:2 折算后成交量翻倍，会得出「极端放量 / 突破获量能确认」的假结论
+// 并一路影响阶段判定与仓位。
+
+{
+  const { isVolumeComparable } = await import('../symbolPlans/volumePrice');
+  const clean: KlineBar[] = [];
+  for (let i = 1; i <= 21; i++) {
+    clean.push(bar(`2026-07-${String(i).padStart(2, '0')}`, 10, 10.5, 9.5, 10, 10, 100));
+  }
+  assert.equal(isVolumeComparable(clean), true, '无跳空序列必须判为可比，否则量能结论会被无故砍掉');
+
+  // 10 送 10：次日开盘价与最低价一起腰斩，成交量翻倍
+  const split = [...clean.slice(0, 20)];
+  split.push(bar('2026-07-21', 5, 5.3, 4.9, 5.1, 20, 102));
+  assert.equal(
+    isVolumeComparable(split),
+    false,
+    '窗口内出现除权级向下跳空时必须判为不可比，否则成交量翻倍会被读成极端放量',
+  );
+
+  // 正常跌停（-10%）不得被误判成除权
+  const limitDown = [...clean.slice(0, 20)];
+  limitDown.push(bar('2026-07-21', 9.1, 9.2, 9.0, 9.0, 12, 108));
+  assert.equal(isVolumeComparable(limitDown), true, '常规大跌不得被误判成除权，否则量能结论天天被砍');
+}
+
 // ===== 4b. 量能读数：两套口径各用各的阈值 =====
 
 {
@@ -187,6 +216,20 @@ assert.equal(
   assert.equal(fallback.basis, 'volume_median20', '回退口径必须显式标注');
   assert.equal(fallback.ratio, 1.4, '回退后取成交量比值');
   assert.equal(fallback.state, 'clear_expand', '回退口径沿用收盘阈值');
+
+  // 回退成交量口径时可比性必须实测（第二轮 M4）：本源不给成交额、窗口内又刚做过 10 送 10 时，
+  // 硬编码可比会把翻倍的成交量读成「极端放量」，而这正是 buildVolumeReadout 的公共读数入口
+  const splitNoAmount = noAmount.map((b, i) =>
+    // 最后一根做 10 送 10：开盘与最低同步腰斩，成交量翻倍
+    i === noAmount.length - 1
+      ? { ...b, open: b.open / 2, low: b.low / 2, high: b.high / 2, close: b.close / 2, volume: b.volume * 2 }
+      : b,
+  );
+  assert.equal(
+    buildVolumeReadout(splitNoAmount, { completeBar: true }),
+    null,
+    '窗口内跨除权且本源无成交额时不得给出量能读数，否则翻倍的成交量会被读成极端放量',
+  );
 
   // 成交额与成交量都不可用时才返回 null
   assert.equal(

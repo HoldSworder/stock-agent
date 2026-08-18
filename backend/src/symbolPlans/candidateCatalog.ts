@@ -26,7 +26,7 @@ import { TIME_STOP_BARS } from './risk';
 // 全流程确定性：同一份 fixture 两次生成的 catalogHash / 候选ID / 排序必须完全一致。
 
 /** 候选模型版本：聚类容差、评分权重、上限、白名单任一变化都要递增 */
-export const CANDIDATE_MODEL_VERSION = 'candidate-v5';
+export const CANDIDATE_MODEL_VERSION = 'candidate-v6';
 
 /**
  * 分层配额。候选按 week/day/60m 三层各自产出，配额也按层分。
@@ -434,10 +434,16 @@ const ROLE_CONDITIONS: Record<
   //
   // 对称地，resistance 不能加 holdBelow 作失效：计划生效时价格本就在压力位下方，
   // 那条会立即满足导致秒失效；「突破失败后跌回」需要「曾突破」的状态前提，当前规则 DSL 表达不了。
+  //
+  // 看跌关系一律**双用途**：同一个事实（收盘跌破支撑）既是多头计划的失效，
+  // 也是风险情景的减仓触发。只挂 invalidation 的话，rank='risk' 情景在结构上无法表达——
+  // 目录里一条 suitableFor 含 trigger 的看跌条件都没有，而每个情景都必填触发条件，
+  // 于是 LLM 把「收盘跌破支撑」放进风险情景触发数组必被 purpose_mismatch 打回，
+  // 连续两次被拒即降级观察计划，表现为「有候选却总给不出可执行计划」，减仓车道整体失效。
   support: [
     { relation: 'holdAbove', text: '收盘守住', suitableFor: ['trigger'] },
-    { relation: 'holdBelow', text: '收盘跌破', suitableFor: ['invalidation'] },
-    { relation: 'crossDown', text: '盘中下穿风险', suitableFor: ['invalidation'] },
+    { relation: 'holdBelow', text: '收盘跌破', suitableFor: ['trigger', 'invalidation'] },
+    { relation: 'crossDown', text: '盘中下穿风险', suitableFor: ['trigger', 'invalidation'] },
   ],
   entry_trigger: [
     { relation: 'crossUp', text: '上穿预警', suitableFor: ['trigger'] },
@@ -448,12 +454,12 @@ const ROLE_CONDITIONS: Record<
     { relation: 'holdAbove', text: '收盘确认', suitableFor: ['trigger'] },
   ],
   invalidation: [
-    { relation: 'crossDown', text: '下穿预警', suitableFor: ['invalidation'] },
-    { relation: 'holdBelow', text: '收盘失效', suitableFor: ['invalidation'] },
+    { relation: 'crossDown', text: '下穿预警', suitableFor: ['trigger', 'invalidation'] },
+    { relation: 'holdBelow', text: '收盘失效', suitableFor: ['trigger', 'invalidation'] },
   ],
   stop: [
-    { relation: 'crossDown', text: '下穿预警', suitableFor: ['invalidation'] },
-    { relation: 'holdBelow', text: '收盘失效', suitableFor: ['invalidation'] },
+    { relation: 'crossDown', text: '下穿预警', suitableFor: ['trigger', 'invalidation'] },
+    { relation: 'holdBelow', text: '收盘失效', suitableFor: ['trigger', 'invalidation'] },
   ],
   target: [
     { relation: 'touch', text: '触及', suitableFor: ['target'] },
@@ -507,13 +513,14 @@ function buildNonPriceConditions(
   add('volume_confirm', { kind: 'amountRatio', days: 20, op: 'gte', value: 1.2 }, '成交额比 ≥ 1.20（突破确认量）', ['trigger']);
   add('volume_confirm', { kind: 'closeLocation', op: 'gte', value: 0.67 }, '收盘位置 ≥ 0.67（收在上三分之一）', ['trigger']);
   add('volume_confirm', { kind: 'amountRatio', days: 20, op: 'lte', value: 0.8 }, '成交额比 ≤ 0.80（回踩缩量）', ['trigger']);
-  add('volume_confirm', { kind: 'closeLocation', op: 'lte', value: 0.33 }, '收盘位置 ≤ 0.33（收在下三分之一，风险）', ['invalidation']);
+  // 看跌的三条同样双用途，理由同 ROLE_CONDITIONS：风险情景需要能表达「跌下来就减仓」
+  add('volume_confirm', { kind: 'closeLocation', op: 'lte', value: 0.33 }, '收盘位置 ≤ 0.33（收在下三分之一，风险）', ['trigger', 'invalidation']);
 
   // 结构确认（4 个）
   add('structure_confirm', { kind: 'ma', maType: 'sma', left: 'close', period: 20, relation: 'above' }, '收盘在 MA20 上方', ['trigger']);
-  add('structure_confirm', { kind: 'ma', maType: 'sma', left: 'close', period: 20, relation: 'below' }, '收盘跌破 MA20', ['invalidation']);
+  add('structure_confirm', { kind: 'ma', maType: 'sma', left: 'close', period: 20, relation: 'below' }, '收盘跌破 MA20', ['trigger', 'invalidation']);
   add('structure_confirm', { kind: 'macd', signal: 'goldCross' }, 'MACD 金叉', ['trigger']);
-  add('structure_confirm', { kind: 'macd', signal: 'deadCross' }, 'MACD 死叉', ['invalidation']);
+  add('structure_confirm', { kind: 'macd', signal: 'deadCross' }, 'MACD 死叉', ['trigger', 'invalidation']);
 
   // 时间窗：live_only，只此一条，数值与 risk.timeStopBars 共用 TIME_STOP_BARS。
   // 曾经并列产出 bars 与 bars*2 两条、还把后者叫「时间止损」，与 risk 字段的口径对不上。
@@ -524,7 +531,7 @@ function buildNonPriceConditions(
 }
 
 /**
- * 标出「当下就已成立」的条件，并把它们从失效用途里摘掉。
+ * 标出「当下就已成立」的条件（摘掉触发与失效用途）与「方向已错过」的事件型条件（摘掉全部用途）。
  *
  * 求值口径必须与盘中复核一致（evaluate.ts）：用最后一根**已收完**的 bar。
  * 差一根就会两边判不一样——目录说没成立、落库后第一次复核说成立，拦截等于漏网。
@@ -562,6 +569,26 @@ function markAlreadySatisfied(
     // 取不到 K 线时一律按「未成立」处理：宁可放过一条，也不能因为没数据
     // 就把一批本可用的失效条件全摘掉，那会让整份计划无失效条件可选而降级成观察计划
     if (!ctx) continue;
+
+    // 事件型价位条件另判「方向已错过」：穿越是一次性事件，状态型判据看不见它。
+    // 支撑位已在现价上方时 crossDown 最后一根并没穿，于是照常留在失效候选里，
+    // 实际要等价格涨回该位上方再跌破才成立——失效保护形同虚设；
+    // 压力位已在现价下方时 crossUp 同理永不成立，而触发条件一律 required、
+    // 求值要求全部满足，一条就够让整份计划永远无法触发。
+    if (c.rule.kind === 'priceLevel') {
+      const lastClose = ctx.series.bars[ctx.i]?.close;
+      const level = c.rule.level;
+      const missed =
+        lastClose != null &&
+        ((c.rule.relation === 'crossDown' && lastClose < level) ||
+          (c.rule.relation === 'crossUp' && lastClose > level));
+      if (missed) {
+        c.directionMissed = true;
+        c.suitableFor = [];
+        continue;
+      }
+    }
+
     let ok = false;
     try {
       ok = evalRule(c.rule, ctx.series, ctx.i, { entryPrice: 0, heldBars: 0, planBars: 0 });
@@ -570,7 +597,10 @@ function markAlreadySatisfied(
     }
     if (!ok) continue;
     c.alreadySatisfied = true;
-    c.suitableFor = c.suitableFor.filter((r) => r !== 'invalidation');
+    // 触发用途同样要摘。看跌关系改成双用途之后，只摘 invalidation 会把「当下就已成立」的条件
+    // 降级成一条合法的触发条件——最典型的是价位在现价上方的 holdBelow，它恒为真，
+    // LLM 选中即得到一份出生就 triggered 的计划。已成立的事实两个用途都当不了。
+    c.suitableFor = c.suitableFor.filter((r) => r !== 'invalidation' && r !== 'trigger');
   }
 }
 
@@ -754,8 +784,12 @@ export function buildCandidateCatalog(input: CatalogInput): CandidateCatalog {
   // 非价格条件只产一份，锚在日线。
   // 三层各复制一遍会让「MACD 金叉」这类条件占掉 3 倍配额，把价位条件挤出目录，
   // 而周线 MACD 金叉与 60 分钟 MACD 金叉对同一份计划的增量信息远不如多几个可交易的价位。
+  // 非价格条件**排在最前**：format.ts 的软上限是按行从尾部裁的，放在最后一旦溢出
+  // 被裁掉的恰是 volume_confirm / structure_confirm / time_window，而 time_window 是
+  // 「所有看跌失效条件都已成立」时唯一还剩的失效候选，它不可见就必然 missing_invalidation 降级。
+  // 裁尾只该吃低分价位条件。
   const nonPrice = buildNonPriceConditions({ contextId: input.contextId, timeframe: 'day' }, seq);
-  let conditions = [...priceConditions, ...nonPrice];
+  let conditions = [...nonPrice, ...priceConditions];
   if (conditions.length > CONDITION_CAP) {
     // 超总量时裁价位条件。按整个价位为单位裁（groupsByLevel 已按层内名次轮转排好），
     // 砍掉的就是各层名次最靠后的低分位，而不是某一层的全部。
@@ -765,7 +799,7 @@ export function buildCandidateCatalog(input: CatalogInput): CandidateCatalog {
       if (trimmedPrice.length + g.length > budget) break;
       trimmedPrice.push(...g);
     }
-    conditions = [...trimmedPrice, ...nonPrice];
+    conditions = [...nonPrice, ...trimmedPrice];
     bump('condition_cap', priceConditions.length - trimmedPrice.length);
   }
 
@@ -774,7 +808,13 @@ export function buildCandidateCatalog(input: CatalogInput): CandidateCatalog {
   markAlreadySatisfied(conditions, new Map(input.periods.map((p) => [p.period, p.bars])), input.code);
   const alreadyTrue = conditions.filter((c) => c.alreadySatisfied).length;
   if (alreadyTrue > 0) {
-    warnings.push(`${alreadyTrue} 条条件在建目录时已成立，已从失效用途中摘除（避免计划一落库即失效）`);
+    warnings.push(
+      `${alreadyTrue} 条条件在建目录时已成立，已从触发与失效用途中摘除（避免计划一落库即失效或即触发）`,
+    );
+  }
+  const missed = conditions.filter((c) => c.directionMissed).length;
+  if (missed > 0) {
+    warnings.push(`${missed} 条穿越型条件的方向已错过（现价已在价位另一侧），不可选用`);
   }
 
   const liveOnly = conditions.filter((c) => c.capability === 'live_only').length;

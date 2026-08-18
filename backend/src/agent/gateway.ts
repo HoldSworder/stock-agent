@@ -155,7 +155,7 @@ async function runAgentCall(opts: AgentCall): Promise<GatewayResult> {
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     finishRun(runId, { status: 'error', error: msg });
-    opts.onEvent?.({ type: 'error', message: msg });
+    opts.onEvent?.({ type: 'error', message: msg, runId });
     opts.onEvent?.({ type: 'run_finished', runId, status: 'error' });
     await notifyFailure(opts.taskName, opts.trigger, msg);
     return { runId, status: 'error', outputText: '', promptTokens: 0, completionTokens: 0, error: msg };

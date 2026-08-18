@@ -209,7 +209,8 @@ export function registerSymbolPlansModule(app: FastifyInstance): void {
         run: async () => {
           const s = await regenerateStalePlans();
           console.log(
-            `[symbolPlans] 收盘重算：待重算 ${s.stale}，成功 ${s.regenerated}，失败 ${s.failed}，顺延 ${s.deferred}`,
+            `[symbolPlans] 收盘重算：待重算 ${s.stale}，成功 ${s.regenerated}，失败 ${s.failed}，` +
+              `顺延 ${s.deferred}，换口径 ${s.outdated}，退出队列 ${s.retired}`,
           );
         },
       },
@@ -223,7 +224,8 @@ export function registerSymbolPlansModule(app: FastifyInstance): void {
         run: async () => {
           const s = await settleDueForecasts();
           console.log(
-            `[symbolPlans] 预测核对：待判 ${s.checked}，兑现 ${s.settled.hit}，落空 ${s.settled.miss}，超时 ${s.settled.timeout}`,
+            `[symbolPlans] 预测核对：待判 ${s.checked}，兑现 ${s.settled.hit}，落空 ${s.settled.miss}，` +
+              `超时 ${s.settled.timeout}，判不了 ${s.unjudgeable}（缺 secid 且无法确认市场，已终止并留痕）`,
           );
         },
       },

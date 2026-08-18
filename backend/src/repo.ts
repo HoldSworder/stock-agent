@@ -57,6 +57,7 @@ export function finishRun(
     .run();
   // 全局广播：run 结束（成功/失败/超时）即从「运行中」列表清除
   broadcast({ type: 'run_finished', runId, status: patch.status });
+  msgSeq.delete(runId);
 }
 
 /**
@@ -116,7 +117,18 @@ export function appendRunMessage(input: {
   toolCalls?: string | null;
   toolName?: string | null;
 }): void {
-  const seq = (msgSeq.get(input.runId) ?? 0) + 1;
+  // finishRun 会释放内存计数；若仍有迟到消息，则从数据库末序号续接，不能回退到 1 产生唯一键冲突
+  const previous =
+    msgSeq.get(input.runId) ??
+    db
+      .select({ seq: schema.runMessages.seq })
+      .from(schema.runMessages)
+      .where(eq(schema.runMessages.runId, input.runId))
+      .orderBy(desc(schema.runMessages.seq))
+      .limit(1)
+      .get()?.seq ??
+    0;
+  const seq = previous + 1;
   msgSeq.set(input.runId, seq);
   db.insert(schema.runMessages)
     .values({
@@ -273,6 +285,7 @@ export function getRun(runId: string) {
     .from(schema.taskRuns)
     .where(eq(schema.taskRuns.id, runId))
     .get();
+  if (!run) return null;
   const messages = db
     .select()
     .from(schema.runMessages)

@@ -38,8 +38,34 @@ import {
 // 同标的同类信号冷却：key=`${code}:${type}` → 上次唤醒时间戳(ms)
 const cooldown = new Map<string, number>();
 
+/**
+ * 冷却键。带 planHit 的信号必须把 `planId:conditionId` 并进来：
+ * 同一只票的同一 type 会由不同 scenario / 不同条件 / 不同计划版本各产一条，
+ * 只按 `code:type` 计冷却的话第一条发出后其余条件整轮静默，
+ * 用户侧就是「计划详情显示条件命中过，却没收到推送」。
+ */
 function cooldownKey(s: WatchSignal): string {
-  return `${s.code}:${s.type}`;
+  return s.planHit
+    ? `${s.code}:${s.type}:${s.planHit.planId}:${s.planHit.conditionId}`
+    : `${s.code}:${s.type}`;
+}
+
+/** 死信重投次数（内存计数，进程重启后由 listUndelivered 的时间下界兜底） */
+const retryCounts = new Map<string, number>();
+const MAX_RETRY_PER_ALERT = 5;
+
+/**
+ * 绕过缓存复用的信号：severity=high（止损/炸板/急跌/尾盘了结等关键卖点）与全部计划类信号。
+ * 这些「一天可能只有一次」的机会不能因为同一只票刚出过别的研判就被整条吞掉。
+ */
+const PLAN_SIGNAL_TYPES = new Set<WatchSignal['type']>([
+  'plan_buy',
+  'plan_stop',
+  'plan_take_profit',
+]);
+
+function bypassCacheReuse(s: WatchSignal): boolean {
+  return s.severity === 'high' || PLAN_SIGNAL_TYPES.has(s.type);
 }
 
 /** 广播一条带去向标签的信号事件（纯展示，便于前端追溯信号管道落点） */
@@ -285,13 +311,22 @@ async function maybeExecuteStrategySell(
   }
 }
 
-/** 处理单条信号：缓存复用 → 唤醒 agent 终审 → 落库 → 广播 → 推送 */
-async function processSignal(s: WatchSignal, cfg: WatchConfig): Promise<void> {
-  // 近期已对该标的出过研判 → 复用，不再唤醒 LLM（控成本、防刷屏）
-  const recent = findRecentAlertByCode(s.code, cfg.cacheReuseMin);
-  if (recent) {
-    broadcastDisposition(s, 'cache_reused');
-    return;
+/**
+ * 处理单条信号：缓存复用 → 唤醒 agent 终审 → 落库 → 广播 → 推送。
+ * 返回是否真正产生了一条留痕（false=被缓存复用或终审硬失败，调用方据此让信号下轮重来）。
+ */
+async function processSignal(s: WatchSignal, cfg: WatchConfig): Promise<boolean> {
+  // 近期已对该标的「同类同级」出过研判 → 复用，不再唤醒 LLM（控成本、防刷屏）。
+  // 关键卖点与计划类信号直通，不受同标的其它研判影响。
+  if (!bypassCacheReuse(s)) {
+    const recent = findRecentAlertByCode(s.code, cfg.cacheReuseMin, {
+      signalType: s.type,
+      severity: s.severity,
+    });
+    if (recent) {
+      broadcastDisposition(s, 'cache_reused');
+      return false;
+    }
   }
 
   // 初筛门：轻度模型先判断是否值得深入研判，不值得则落沉默告警直接返回。
@@ -320,7 +355,7 @@ async function processSignal(s: WatchSignal, cfg: WatchConfig): Promise<void> {
         execNote: null,
       });
       broadcastWatch({ type: 'alert', alert: muted });
-      return;
+      return true;
     }
   }
 
@@ -360,7 +395,7 @@ async function processSignal(s: WatchSignal, cfg: WatchConfig): Promise<void> {
     promptTokens = result.promptTokens;
     completionTokens = result.completionTokens;
     // 硬失败（agent 抛错且无任何产出）：run 已被 gateway 记为 error，跳过落库告警
-    if (status !== 'success' && !result.outputText.trim()) return;
+    if (status !== 'success' && !result.outputText.trim()) return false;
     verdict = parseVerdict(result.outputText);
   }
 
@@ -416,6 +451,7 @@ async function processSignal(s: WatchSignal, cfg: WatchConfig): Promise<void> {
       console.warn('[watch] 计划触发回写失败:', e instanceof Error ? e.message : e);
     }
   }
+  return true;
 }
 
 /** 执行指令拼一行可读摘要（动作 + 关键价位/仓位），无有效内容返回空串 */
@@ -455,8 +491,14 @@ async function pushAlert(
 /**
  * 调度一批信号：按 score 降序，过冷却，限流取前 maxConcurrent，串行研判。
  * 其余信号本轮丢弃（若仍成立下轮会再次触发）。
+ *
+ * 返回真正落库/投递成功的信号集合。引擎据此才把「一天只有一次机会」的按日去重位置位
+ * ——在投递之前就置位的话，被冷却/限流/缓存丢掉的尾盘了结与中线破位当天不会再有第二次。
  */
-export async function dispatchSignals(signals: WatchSignal[], cfg: WatchConfig): Promise<void> {
+export async function dispatchSignals(
+  signals: WatchSignal[],
+  cfg: WatchConfig,
+): Promise<Set<WatchSignal>> {
   const now = Date.now();
 
   const passed = signals
@@ -483,26 +525,38 @@ export async function dispatchSignals(signals: WatchSignal[], cfg: WatchConfig):
   // 超限流的信号本轮丢弃，标注去向（下轮仍成立会再排）
   for (const s of passed.slice(limit)) broadcastDisposition(s, 'over_capacity');
 
+  const processed = new Set<WatchSignal>();
   for (const s of picked) {
     cooldown.set(cooldownKey(s), now);
     broadcastDisposition(s, 'to_ai');
     try {
-      await processSignal(s, cfg);
+      if (await processSignal(s, cfg)) processed.add(s);
     } catch (e) {
       console.warn('[watch] 信号处理失败:', e instanceof Error ? e.message : e);
     }
   }
+  return processed;
 }
 
-/** 死信重投：重试应推送但未投递成功的告警 */
+/**
+ * 死信重投：重试应推送但未投递成功的告警。
+ * 时间下界由 listUndelivered 负责；这里再加一层重试次数上限，避免推不动的那几条
+ * 每 60 秒都把整轮重投队列占满（Telegram 配置错误期间尤其明显）。
+ */
 export async function retryUndelivered(cfg: WatchConfig): Promise<void> {
   if (!cfg.pushTelegram) return;
   for (const a of listUndelivered()) {
+    const tried = retryCounts.get(a.id) ?? 0;
+    if (tried >= MAX_RETRY_PER_ALERT) continue;
+    retryCounts.set(a.id, tried + 1);
     const tag = a.source === 'position' ? '卖点' : '买点';
     const text = `【盯盘${tag}·补发】${a.name}(${a.code})\n触发：${a.detail}\n\n${a.adviceText ?? ''}`;
     try {
       const r = await sendTelegram(text);
-      if (r.ok) markDelivered(a.id);
+      if (r.ok) {
+        markDelivered(a.id);
+        retryCounts.delete(a.id);
+      }
     } catch {
       /* 下个周期再试 */
     }

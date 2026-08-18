@@ -232,6 +232,8 @@ async function reevaluate() {
 const oneclick = ref<OneClickRunState | null>(null);
 const oneclickRunning = computed(() => oneclick.value?.running ?? false);
 let oneclickTimer: ReturnType<typeof setTimeout> | null = null;
+/** 组件是否仍挂载。异步轮询在 await 之后必须判它，否则离页后会自我复活 */
+let alive = true;
 
 const STEP_META: Record<OneClickStepStatus['status'], { label: string; type: string; icon: string }> = {
   pending: { label: '待执行', type: 'info', icon: '○' },
@@ -252,6 +254,9 @@ function stopOneclickPoll() {
 async function pollOneclick() {
   try {
     const st = await api.plan.oneclickStatus();
+    // await 期间可能已卸载。只 clearTimeout 已排定的定时器拦不住这里——
+    // 排下一拍等于让轮询自我复活，此后无人能停，而 load() 还会连带全量取数。
+    if (!alive) return;
     oneclick.value = st;
     if (st.running) {
       oneclickTimer = setTimeout(pollOneclick, 3000);
@@ -262,6 +267,7 @@ async function pollOneclick() {
     }
   } catch {
     // 单次轮询失败不终止，下一拍重试
+    if (!alive) return;
     oneclickTimer = setTimeout(pollOneclick, 3000);
   }
 }
@@ -320,6 +326,11 @@ async function openStep(step: OneClickStepStatus) {
   }
   try {
     const { run } = await api.getRun(step.runId);
+    // 该 run 已不存在（如库被清理）时不开空抽屉，明说一句
+    if (!run) {
+      ElMessage.warning('该运行记录已不存在');
+      return;
+    }
     activeRun.value = run;
     runDrawer.value = true;
   } catch (e) {
@@ -327,11 +338,17 @@ async function openStep(step: OneClickStepStatus) {
   }
 }
 
+/** 作战图折叠态：默认展开，但必须可收起——narrative 是整页最长的一块内容 */
+const narrPanels = ref(['narr']);
+
 const plan = computed(() => detail.value?.plan ?? null);
 const items = computed(() => detail.value?.items ?? []);
 const isLive = computed(() => !viewingDate.value);
 
-// 计划兑现度：纯前端统计当前已加载标的（今日/历史通用），与后端 computePlanFulfillment 口径一致
+// 计划兑现度：纯前端统计当前已加载标的（今日/历史通用）。
+// 分子分母必须同口径：hit 与 withTrigger 都只算带触发价的标的，而 triggered 是全量，
+// 两者混用时（存在「无触发价但已触发」的标的）会显示出大于 1 的比值。
+// hitRate 这里是整数百分比，后端 computePlanFulfillment 返回的是小数，跨端比对前先换算。
 const fulfillment = computed(() => {
   const list = items.value;
   if (!list.length) return null;
@@ -342,6 +359,8 @@ const fulfillment = computed(() => {
   return {
     total: list.length,
     withTrigger: withTrigger.length,
+    /** 带触发价且已触发/完成的条数，与 hitRate 同口径，模板的「命中 x/y」用它 */
+    hit,
     triggered: list.filter((i) => i.status === 'triggered' || i.status === 'done').length,
     done: list.filter((i) => i.status === 'done').length,
     invalid: list.filter((i) => i.status === 'invalid').length,
@@ -630,6 +649,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  alive = false;
   stopOneclickPoll();
   if (clockTimer) clearInterval(clockTimer);
 });
@@ -843,7 +863,7 @@ onUnmounted(() => {
             <span class="fulfill-cap">兑现率</span>
           </div>
           <div class="fulfill-stats">
-            <span>命中 {{ fulfillment.triggered }}/{{ fulfillment.withTrigger }}</span>
+            <span>命中 {{ fulfillment.hit }}/{{ fulfillment.withTrigger }}</span>
             <span>已完成 {{ fulfillment.done }}</span>
             <span class="warn">已失效 {{ fulfillment.invalid }}</span>
             <span class="muted">待触发 {{ fulfillment.pending }}</span>
@@ -1249,7 +1269,7 @@ onUnmounted(() => {
       </el-collapse>
 
       <!-- 完整作战图（默认展开） -->
-      <el-collapse v-if="plan.narrative" class="narr" :model-value="['narr']">
+      <el-collapse v-if="plan.narrative" v-model="narrPanels" class="narr">
         <el-collapse-item name="narr" title="完整作战图（narrative）">
           <MarkdownView :source="plan.narrative" />
         </el-collapse-item>

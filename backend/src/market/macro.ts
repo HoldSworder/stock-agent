@@ -12,6 +12,7 @@ import { callAkshare } from './akshare';
 import { getIndexPointMap } from './eastmoney';
 import { fetchCffexRank } from './cffexRank';
 import { isSourceEnabled } from '../datasource/registry';
+import { shanghaiYmd } from '../datasource/codes';
 
 // 宏观·资金面底稿：6 个低频全局指标（日频/EOD），全部经 aktools 透传 akshare，best-effort 降级。
 // 任一块取数失败仅令该块为 null，不阻断整体。每块带固定 note（影响力 + 如何使用），
@@ -134,8 +135,9 @@ async function fetchMarginSeries(func: 'stock_margin_sse' | 'stock_margin_szse')
 > {
   const end = new Date();
   const start = new Date(end.getTime() - 20 * 24 * 3600 * 1000);
-  const fmt = (d: Date): string =>
-    `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`;
+  // 必须按上海时区取日期：容器时区是 UTC，getFullYear/getMonth/getDate 在 00:00-08:00
+  // 会算出前一天，起止区间整体前移，最新一个交易日的两融数据就取不到
+  const fmt = (d: Date): string => shanghaiYmd(d).compact;
   const rows = asRows(
     await callAkshare(func, { start_date: fmt(start), end_date: fmt(end) }),
   );

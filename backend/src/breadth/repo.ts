@@ -19,6 +19,15 @@ export interface BoardBreadthSnapshotInput {
   coreCodes: string[];
 }
 
+/**
+ * LIMIT 参数兜底：路由层的 `?limit=abc` 会带进 NaN，而 Math.min/Math.max 对 NaN 返回 NaN，
+ * better-sqlite3 在绑定阶段就抛错（本条路由无 try/catch，直接 500）。在此统一钳制。
+ */
+function clampLimit(limit: number, fallback: number, max: number): number {
+  if (!Number.isFinite(limit)) return fallback;
+  return Math.min(Math.max(Math.trunc(limit), 1), max);
+}
+
 /** core_codes 列存 JSON 数组；历史行为 '[]' 或非法值时按空数组处理 */
 function parseCoreCodes(raw: string | null | undefined): string[] {
   if (!raw) return [];
@@ -151,6 +160,6 @@ export function listHistoryByBoard(boardCode: string, limit = 30): BoardBreadthH
     .from(schema.boardNewHighSnapshots)
     .where(eq(schema.boardNewHighSnapshots.boardCode, boardCode))
     .orderBy(desc(schema.boardNewHighSnapshots.tradeDate))
-    .limit(Math.min(Math.max(limit, 1), 120))
+    .limit(clampLimit(limit, 30, 120))
     .all();
 }

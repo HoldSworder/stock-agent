@@ -100,6 +100,35 @@ export interface VolumePriceInput {
 /** 回看窗口：前 20 个完整交易日（分母不含当根） */
 const LOOKBACK = 20;
 
+/**
+ * 疑似除权/份额折算的跳空幅度门槛。与 datasource/adjust.ts 的 SPLIT_GAP 同源口径：
+ * 单日向下 30% 以上的开盘跳空，A 股跌幅限制下不可能由真实交易产生。
+ */
+const SPLIT_GAP = 0.3;
+
+/**
+ * 分母窗口内成交量是否可比。
+ *
+ * 必须实测：`pickBasis` 在本源不给成交额时会回退成交量口径（腾讯 fqkline 日线正是这种源），
+ * 而 10 送 10 或 ETF 1:2 折算后成交量直接翻倍，会算出「极端放量 / 突破获量能确认」的
+ * 假结论，并一路影响阶段判定与仓位。判据取「向下大跳空」——已做前复权的源不会留下这个跳空，
+ * 于是结果为可比，正是想要的效果。
+ *
+ * @param bars 日线，取末尾 LOOKBACK+1 根（与量比分母同一窗口）
+ */
+export function isVolumeComparable(bars: KlineBar[], lookback = LOOKBACK): boolean {
+  const win = bars.slice(-(lookback + 1));
+  for (let i = 1; i < win.length; i += 1) {
+    const prevClose = win[i - 1].close;
+    if (!(prevClose > 0)) continue;
+    // 用 open 与 low 双判：折算当日的开盘价与最低价都会同步下移，
+    // 只看 close 会被「折算后当天大涨」掩盖过去
+    const ratio = Math.min(win[i].open, win[i].low) / prevClose;
+    if (Number.isFinite(ratio) && ratio < 1 - SPLIT_GAP) return false;
+  }
+  return true;
+}
+
 /** 分母窗口内至少需要的有效样本数。长期停牌标的可能只剩两三根，此时不得给出量能结论 */
 const MIN_VALID_SAMPLES = 15;
 
@@ -246,7 +275,15 @@ export function buildVolumeReadout(
 ): VolumeReadout | null {
   const turnoverRate = input.turnoverRate ?? null;
   if (input.completeBar) {
-    const vp = computeVolumePrice({ period: 'day', bars, completeBar: true, turnoverRate });
+    const vp = computeVolumePrice({
+      period: 'day',
+      bars,
+      completeBar: true,
+      turnoverRate,
+      // 与 technicalEvidence 同口径：不实测的话默认按可比处理，本源不给成交额时
+      // pickBasis 会回退成交量口径，10 送 10 或份额折算后照样读出「极端放量」
+      volumeComparable: isVolumeComparable(bars),
+    });
     // 口径选择已收敛到 computeVolumePrice 的 basis（成交额优先、本源无成交额才回退成交量），
     // 这里不再自行拼一套，避免读数与形态判定各用一个口径
     const picked = vp.basis;

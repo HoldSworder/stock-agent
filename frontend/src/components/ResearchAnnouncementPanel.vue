@@ -12,6 +12,8 @@ const msg = (e: unknown) => (e instanceof Error ? e.message : '请求失败');
 const days = ref(2);
 const list = ref<ResearchAnnouncementItem[]>([]);
 const loading = ref(false);
+/** 后端翻页部分失败：列表不完整，不能让用户据此认定「今日就这些公告」 */
+const partial = ref(false);
 
 // 正文抽屉（点开时实时抓 notice_content，不留存）
 const drawer = ref(false);
@@ -22,7 +24,9 @@ const contentLoading = ref(false);
 async function load() {
   loading.value = true;
   try {
-    list.value = await api.research.announcements({ days: days.value });
+    const r = await api.research.announcements({ days: days.value });
+    list.value = r.items;
+    partial.value = r.partial;
   } catch (e) {
     ElMessage.error(msg(e));
   } finally {
@@ -65,6 +69,16 @@ onMounted(() => {
       </div>
     </div>
 
+    <el-alert
+      v-if="partial"
+      type="warning"
+      show-icon
+      :closable="false"
+      class="ann-partial"
+      title="公告列表不完整"
+      description="上游翻页部分失败，下面只是已成功拉到的部分，请勿据此判断「今日无重大公告」。可点刷新重试。"
+    />
+
     <div v-loading="loading" class="panel">
       <el-table v-if="list.length" :data="list" size="small" @row-click="openDetail">
         <el-table-column prop="time" label="时间" width="130" />
@@ -84,7 +98,11 @@ onMounted(() => {
         </el-table-column>
         <el-table-column prop="title" label="标题" min-width="280" show-overflow-tooltip />
       </el-table>
-      <el-empty v-else-if="!loading" description="暂无重大公告，调整时间范围后重试" :image-size="80" />
+      <el-empty
+        v-else-if="!loading"
+        :description="partial ? '本次抓取失败，未取到公告，请点刷新重试' : '暂无重大公告，调整时间范围后重试'"
+        :image-size="80"
+      />
     </div>
 
     <!-- 正文抽屉 -->
@@ -136,6 +154,9 @@ onMounted(() => {
 }
 .muted {
   color: var(--text-2);
+}
+.ann-partial {
+  margin-bottom: 8px;
 }
 .panel {
   background: var(--bg-2);

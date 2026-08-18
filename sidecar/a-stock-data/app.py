@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
@@ -72,13 +73,24 @@ def to_jsonable(obj: Any) -> Any:
 
 
 # ── mootdx wrapper（上游内联片段无 def，这里补成函数）────────────────────────
+def _with_tdx(call: Callable[[Any], Any], market: str = "std") -> Any:
+    """mootdx 调用统一出口：委托 af.tdx_call，全程持锁复用缓存 client，抛错即作废。
+
+    client 是模块级缓存（不作废的话选中的节点一旦半死就会一直抛错；反过来每次重建
+    又要重跑节点探测，那正是 sidecar 假死的来源）。而缓存的代价是同一条通达信 TCP
+    连接会被线程池里的多个线程共用，pytdx 的有状态协议在并发下会串包、静默返回
+    另一只标的的数据——所以「取 client + 调用 + 出错作废」必须整体在锁内完成，
+    这一段收口在 af.tdx_call 里，不要在这里自己拆开做。
+    """
+    return af.tdx_call(call, market)
+
+
 # category: 4=日 5=周 6=月 7=1m 8=5m 9=15m 10=30m 11=60m
 def mootdx_kline(symbol: str, category: int = 4, offset: int = 100) -> Any:
     # 注意：mootdx Quotes.bars 的周期参数名是 frequency（默认 9=日K）；
     # 传 category=... 会落进 **kwargs 被静默忽略 → 所有周期都返回日线。必须用 frequency=。
     # mootdx 频率码：0=5分 1=15分 2=30分 3=60分 4=日 5=周 6=月 7/8=1分 9=日 10=季 11=年
-    client = af.tdx_client()
-    return client.bars(symbol=symbol, frequency=category, offset=offset)
+    return _with_tdx(lambda c: c.bars(symbol=symbol, frequency=category, offset=offset))
 
 
 def mootdx_index(symbol: str, frequency: int = 9, offset: int = 100) -> Any:
@@ -86,33 +98,27 @@ def mootdx_index(symbol: str, frequency: int = 9, offset: int = 100) -> Any:
     # 个股/ETF 用 mootdx_kline(client.bars)——板块指数走 bars 会返回空。
     # frequency 频率码同 bars：4/9=日 5=周 6=月 7/8=1分 0=5分 1=15分 2=30分 3=60分。
     # 返回除 OHLC/量额外，含 up_count/down_count 成分股涨跌家数（等权宽度可直接用）。
-    client = af.tdx_client()
-    return client.index(symbol=symbol, frequency=frequency, offset=offset)
+    return _with_tdx(lambda c: c.index(symbol=symbol, frequency=frequency, offset=offset))
 
 
 def mootdx_quote(symbols: list[str]) -> Any:
-    client = af.tdx_client()
-    return client.quotes(symbol=symbols)
+    return _with_tdx(lambda c: c.quotes(symbol=symbols))
 
 
 def mootdx_transaction(symbol: str, date: str) -> Any:
-    client = af.tdx_client()
-    return client.transaction(symbol=symbol, date=date)
+    return _with_tdx(lambda c: c.transaction(symbol=symbol, date=date))
 
 
 def mootdx_finance(symbol: str) -> Any:
-    client = af.tdx_client()
-    return client.finance(symbol=symbol)
+    return _with_tdx(lambda c: c.finance(symbol=symbol))
 
 
 def mootdx_f10(symbol: str, name: str = "公司概况") -> Any:
-    client = af.tdx_client()
-    return client.F10(symbol=symbol, name=name)
+    return _with_tdx(lambda c: c.F10(symbol=symbol, name=name))
 
 
 def mootdx_f10_announcement(symbol: str) -> Any:
-    client = af.tdx_client()
-    return client.F10(symbol=symbol, name="最新提示")
+    return _with_tdx(lambda c: c.F10(symbol=symbol, name="最新提示"))
 
 
 # ── 大盘阶段 HMM 影子信号（hmmlearn，纯确定性，零 token）─────────────────────
@@ -287,7 +293,7 @@ _SPEC: list[dict] = [
      "desc": "同花顺北向资金实时分钟流向", "sample": {}},
     {"name": "northbound_history", "fn": _af("_load_northbound_history"), "layer": "信号",
      "params": [("n", "int", False, 20)],
-     "desc": "北向资金本地自缓存历史（首跑只有当天，越跑越多）", "sample": {"n": 20}},
+     "desc": "北向资金本地自缓存历史（每次调 hsgt_realtime 落一次当日快照，首跑只有当天，越跑越多）", "sample": {"n": 20}},
     {"name": "eastmoney_concept_blocks", "fn": _af("eastmoney_concept_blocks"), "layer": "信号",
      "params": [("code", "str", True, None)],
      "desc": "东财个股所属板块/概念归属（行业/概念/地域+BK码+龙头）", "sample": {"code": "600519"}},
@@ -377,11 +383,37 @@ def _coerce(value: str, typ: str) -> Any:
     return value
 
 
+# 按参数名的取值约束。str 类参数 _coerce 是原样返回的，而 code/symbol 一路会被拼进
+# 东财 datacenter 的 filter DSL（`(SECURITY_CODE="…")`）与各家 URL——带引号的入参
+# 可以闭合字符串改写过滤条件，故在入口就按形态卡死。
+_CODE_RE = re.compile(r"^\d{6}$")
+_PARAM_PATTERNS: dict[str, re.Pattern] = {
+    "code": _CODE_RE,
+    "codes": _CODE_RE,
+    "symbol": _CODE_RE,
+    "symbols": _CODE_RE,
+    "trade_date": re.compile(r"^\d{4}-\d{2}-\d{2}$"),
+    "date": re.compile(r"^(\d{8}|\d{4}-\d{2}-\d{2})$"),
+}
+
+
+def _validate_param(name: str, value: Any) -> None:
+    pattern = _PARAM_PATTERNS.get(name)
+    if pattern is None:
+        return
+    values = value if isinstance(value, list) else [value]
+    for v in values:
+        if not pattern.match(str(v)):
+            raise HTTPException(status_code=400, detail=f"参数 {name} 格式非法：{v}")
+
+
 def _build_kwargs(spec: dict, query: dict) -> dict:
     kwargs: dict = {}
     for name, typ, required, default in spec["params"]:
         if name in query and query[name] != "":
-            kwargs[name] = _coerce(query[name], typ)
+            value = _coerce(query[name], typ)
+            _validate_param(name, value)
+            kwargs[name] = value
         elif required:
             raise HTTPException(status_code=400, detail=f"缺少必需参数 {name}")
         elif default is not None:
@@ -392,8 +424,7 @@ def _build_kwargs(spec: dict, query: dict) -> dict:
 @app.get("/health")
 def health() -> dict:
     try:
-        client = af.tdx_client()
-        bars = client.bars(symbol="000001", category=4, offset=1)
+        bars = _with_tdx(lambda c: c.bars(symbol="000001", category=4, offset=1))
         ok = bars is not None
         return {"ok": ok, "mootdx": ok, "endpoints": len(ENDPOINTS)}
     except Exception as e:  # noqa
@@ -422,7 +453,14 @@ def call_endpoint(endpoint: str, request: Request) -> JSONResponse:
     if spec is None:
         raise HTTPException(status_code=404, detail=f"未知端点 {endpoint}")
     query = dict(request.query_params)
-    kwargs = _build_kwargs(spec, query)
+    # 类型转换必须包进来：offset=abc 会抛裸 ValueError，逃到这里就是 500 + traceback，
+    # 而它显然是「参数错误」，应与 _build_kwargs 里的缺参一样给 400
+    try:
+        kwargs = _build_kwargs(spec, query)
+    except HTTPException:
+        raise
+    except (ValueError, TypeError) as e:
+        raise HTTPException(status_code=400, detail=f"参数错误：{e}")
     try:
         result = spec["fn"](**kwargs)
         return JSONResponse(content=to_jsonable(result))

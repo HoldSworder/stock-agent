@@ -6,10 +6,13 @@ import {
   appendIntradayBars,
   getCacheStats,
   listCachedCodes,
+  listCachedSymbols,
   prewarmDaily,
   pruneCache,
   PREWARM_BARS,
+  type CacheSymbol,
 } from './klineCache';
+import { toSecid } from './codes';
 
 // 日K缓存的定时与运维入口：盘前预热、盘中增量追加、每周全量重刷（推进复权基准日）。
 // 挂 /api/datasource/kline-cache*，供数据源页展示覆盖情况与手动触发。
@@ -19,17 +22,23 @@ import {
  * ponytail: 不做「全市场非 ST 全量预热」——那是几千只，对自建 sidecar 压力过大且多数用不到。
  * 代价是首次访问陌生标的仍要回源一次（之后自动进入缓存宇宙）。要全市场覆盖需换更强的批量日线源。
  */
-export function cacheUniverse(): string[] {
-  const codes = new Set<string>(listCachedCodes());
+export function cacheUniverse(): CacheSymbol[] {
+  // 以 (code, secid) 为身份去重：已缓存的标的按库里实际的 secid 参与，
+  // 只有各名单表（只存 6 位代码）才退回默认映射，指数这类显式 secid 的行不会被漏刷或误删
+  const bySymbol = new Map<string, CacheSymbol>();
+  const add = (s: CacheSymbol): void => {
+    bySymbol.set(`${s.code}|${s.secid}`, s);
+  };
+  for (const s of listCachedSymbols()) add(s);
   const push = (rows: { code: string }[]): void => {
-    for (const r of rows) if (r.code) codes.add(r.code);
+    for (const r of rows) if (r.code) add({ code: r.code, secid: toSecid(r.code) });
   };
   push(db.select({ code: schema.watchlist.code }).from(schema.watchlist).all());
   push(db.select({ code: schema.etfPool.code }).from(schema.etfPool).all());
   push(db.select({ code: schema.researchUniverse.code }).from(schema.researchUniverse).all());
   push(db.selectDistinct({ code: schema.positions.code }).from(schema.positions).all());
   push(db.selectDistinct({ code: schema.simPositions.code }).from(schema.simPositions).all());
-  return [...codes].sort();
+  return [...bySymbol.values()].sort((a, b) => (a.code === b.code ? (a.secid < b.secid ? -1 : 1) : a.code < b.code ? -1 : 1));
 }
 
 /**
@@ -38,9 +47,9 @@ export function cacheUniverse(): string[] {
  * 它已含连续性修正，故落库的就是修正后的数据——本模块不得再自建 provider 遍历绕过它。
  */
 export async function runPrewarm(full = false): Promise<{ total: number; ok: number; failed: number }> {
-  const codes = cacheUniverse();
-  if (codes.length === 0) return { total: 0, ok: 0, failed: 0 };
-  const r = await prewarmDaily(codes, fetchDailyAdjusted, { full });
+  const symbols = cacheUniverse();
+  if (symbols.length === 0) return { total: 0, ok: 0, failed: 0 };
+  const r = await prewarmDaily(symbols, fetchDailyAdjusted, { full });
   console.info(
     `[klineCache] ${full ? '全量重刷' : '盘前预热'}完成：${r.ok}/${r.total} 成功，复权基准 ${r.adjBase}`,
   );

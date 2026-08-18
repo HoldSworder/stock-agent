@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { computed, ref } from 'vue';
 import type { StreamEvent, TaskRun } from '@stock-agent/shared';
 import { api, openWs } from '@/api';
+import { createWsRetry } from '@/composables/wsRetry';
 
 // 全局 Agent 运行状态：维护 /ws/runs 长连接，聚合最近运行记录，
 // 供侧栏入口展示「运行中」数量与运行列表抽屉下钻。
@@ -15,7 +16,7 @@ export const useAgentsStore = defineStore('agents', () => {
   const history = computed(() => runs.value.filter((r) => r.status !== 'running'));
 
   let ws: WebSocket | null = null;
-  let reconnectTimer: number | null = null;
+  const retry = createWsRetry('Agent 运行状态');
 
   async function loadRuns() {
     try {
@@ -32,11 +33,17 @@ export const useAgentsStore = defineStore('agents', () => {
     }
   }
 
-  function openSocket() {
+  /**
+   * @param fromRetry 是否由退避重连触发。store 是单例，退避计数跨页面存活，
+   *   用户主动连接算一次新的连接意图，必须重置计数，否则打满上限后再也不会重连。
+   */
+  function openSocket(fromRetry = false) {
+    if (!fromRetry) retry.reset();
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
     ws = openWs('/ws/runs');
     ws.onopen = () => {
       connected.value = true;
+      retry.reset();
     };
     ws.onmessage = (ev) => {
       try {
@@ -47,13 +54,7 @@ export const useAgentsStore = defineStore('agents', () => {
     };
     ws.onclose = () => {
       connected.value = false;
-      // 断线 5s 重连
-      if (reconnectTimer == null) {
-        reconnectTimer = window.setTimeout(() => {
-          reconnectTimer = null;
-          openSocket();
-        }, 5000);
-      }
+      retry.schedule(() => openSocket(true));
     };
     ws.onerror = () => ws?.close();
   }
@@ -64,12 +65,9 @@ export const useAgentsStore = defineStore('agents', () => {
   }
 
   function disconnect() {
-    if (reconnectTimer != null) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
+    retry.cancel();
     if (ws) {
-      // 主动断开：先摘除处理器，避免 onclose 重新调度 5s 重连导致断开后仍僵尸重连
+      // 主动断开：先摘除处理器，避免 onclose 重新调度重连导致断开后仍僵尸重连
       ws.onclose = null;
       ws.onerror = null;
       ws.close();

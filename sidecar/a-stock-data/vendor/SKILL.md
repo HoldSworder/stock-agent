@@ -193,36 +193,61 @@ export IWENCAI_BASE_URL="https://openapi.iwencai.com"
 
 ```python
 import socket
+import threading
+import time as _time
 from mootdx.quotes import Quotes
 
-# 实测可用的备选服务器（按延迟排序，2026-06 验证）
+# mootdx 底层 socket 无读超时：选到「连得上但返空/半死」的节点会让 bars/index 永久阻塞，
+# 并把上层调用方（乃至运维 SSH 会话）一起拖死。设全局默认超时，坏节点读超时抛错而非死等。
+# 20s × 13 个节点 = 单请求最坏 260s，远超调用方 30s 超时；调用方超时重试时 Python 线程
+# 并不会中止，几轮就把线程池打满、sidecar 假死。故收紧到 8s。
+socket.setdefaulttimeout(8)
+
+# 备选服务器：把「实测能真正返回K线」的节点排在前（2026-07 验证）。
+# 仅 TCP 可达但返空的死节点（如 119.97.185.59）保留在后，靠 _make_client 的数据校验自动剔除。
 _TDX_SERVERS = [
+    ('220.178.55.71', 7709), ('218.106.92.183', 7709), ('180.153.18.170', 7709),
     ('119.97.185.59', 7709), ('124.70.133.119', 7709), ('116.205.183.150', 7709),
     ('123.60.73.44', 7709),  ('116.205.163.254', 7709), ('121.36.225.169', 7709),
     ('123.60.70.228', 7709), ('124.71.9.153', 7709),    ('110.41.147.114', 7709),
     ('124.71.187.122', 7709),
 ]
 
-def _probe(ip, port, timeout=2.0):
-    """TCP 握手探测，判断服务器是否可达"""
-    try:
-        with socket.create_connection((ip, port), timeout=timeout):
-            return True
-    except Exception:
-        return False
+def _make_client(ip, port, market='std'):
+    """连到指定节点并校验其「能真正返回日线」（规避连得上却返空的死节点）；不合格抛错。"""
+    c = Quotes.factory(market=market, server=(ip, port))
+    df = c.bars(symbol='000001', market=0, frequency=9, offset=2)  # 平安银行(深)日线试探
+    if df is None or len(df) == 0:
+        raise ValueError('节点 %s:%s 连通但返回空数据' % (ip, port))
+    return c
 
-def tdx_client(market='std'):
+# 节点探测的总耗时预算（秒）。没有预算时最坏要把 13 个节点各等满一个 socket 超时，
+# 单个 HTTP 请求就能占住一个工作线程好几分钟；宁可几秒内放弃并明确抛错，让调用方降级。
+_TDX_PROBE_BUDGET = 10.0
+
+# 缓存已连通的 client + 建连锁：每个 HTTP 请求都重建 client 等于每次都重跑节点探测，
+# 同步路由跑在线程池里，N 个并发就是 N 轮探测同时打通达信节点。
+_tdx_lock = threading.RLock()
+_tdx_clients: dict = {}
+
+
+def _connect_tdx(market='std'):
     """
-    创建 mootdx 客户端，规避 0.11.x BESTIP.HQ 空串 bug。
-    顺序兜底，保证 IP 列表老化/换网时仍能工作：
-      1) 顺序探测 _TDX_SERVERS，用第一个 TCP 可达的显式 server；
-      2) 全部不可达 → 回退 mootdx 自带 bestip 测速选优；
+    连一个 mootdx 客户端，规避 0.11.x BESTIP.HQ 空串 bug + 「连得上但返空」死节点。
+    顺序兜底，保证 IP 列表老化/换网/节点半死时仍能工作：
+      1) 顺序试 _TDX_SERVERS（受 _TDX_PROBE_BUDGET 约束），用第一个「能真正返回K线」的显式 server；
+      2) 全部失败/预算耗尽 → 回退 mootdx 自带 bestip 测速选优；
       3) 再不行 → 回退裸 factory（老用户 config 已有可用 BESTIP 时成立）；
       4) 仍失败 → 抛 RuntimeError，明确报错而非死等。
     """
+    deadline = _time.time() + _TDX_PROBE_BUDGET
     for ip, port in _TDX_SERVERS:
-        if _probe(ip, port):
-            return Quotes.factory(market=market, server=(ip, port))
+        if _time.time() >= deadline:
+            break
+        try:
+            return _make_client(ip, port, market)
+        except Exception:
+            continue
     try:
         return Quotes.factory(market=market, bestip=True)   # fallback 1
     except Exception:
@@ -231,11 +256,47 @@ def tdx_client(market='std'):
         return Quotes.factory(market=market)                # fallback 2
     except Exception as e:
         raise RuntimeError(
-            "所有 mootdx 服务器均不可达。海外网络通常全部超时（TCP 7709），"
+            "所有 mootdx 服务器均不可达/返空。海外网络通常全部超时（TCP 7709），"
             "请走国内代理或更新 _TDX_SERVERS 列表。原始错误：%s" % e
         )
 
-# 用法：client = tdx_client()   # 替代所有 Quotes.factory(market='std')
+
+def tdx_client(market='std'):
+    """取（必要时新建）该市场的 mootdx 客户端。建连全程持锁，并发只会探测一次。"""
+    with _tdx_lock:
+        client = _tdx_clients.get(market)
+        if client is None:
+            client = _connect_tdx(market)
+            _tdx_clients[market] = client
+        return client
+
+
+def drop_tdx_client(market='std'):
+    """作废缓存的客户端。调用抛错时必须调一次——节点可能已半死，留着会一直抛。"""
+    with _tdx_lock:
+        _tdx_clients.pop(market, None)
+
+
+def tdx_call(fn, market='std'):
+    """在持锁状态下用缓存 client 执行一次 mootdx 调用；抛错即作废该 client。
+
+    锁必须覆盖「调用」本身，不能只覆盖建连：client 是模块级缓存、被 FastAPI 线程池的
+    多个线程共用，而 pytdx 是「发请求 → 读定长响应头 → 读 body」的有状态 TCP 协议。
+    两个线程交错读写同一 socket 不会抛错，而是各自拿到对方的响应体——静默返回另一只
+    标的的 K 线，这比报错危险得多。单连接本来就只能串行，锁的代价等于它固有的吞吐上限。
+    """
+    with _tdx_lock:
+        client = _tdx_clients.get(market)
+        if client is None:
+            client = _connect_tdx(market)
+            _tdx_clients[market] = client
+        try:
+            return fn(client)
+        except Exception:
+            _tdx_clients.pop(market, None)
+            raise
+
+# 用法：data = tdx_call(lambda c: c.bars(symbol='600519'))   # 替代所有 Quotes.factory(market='std')
 ```
 
 > **海外 IP 用户：** mootdx 走通达信 TCP 7709，海外环境通常全部超时。`tdx_client()` 会快速失败给出明确报错，而非死等。
@@ -272,6 +333,7 @@ def get_prefix(code: str) -> str:
 ```python
 import time
 import random
+import threading
 import requests
 
 UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36"
@@ -282,22 +344,42 @@ DATACENTER_URL = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 #   每秒 >5 次 / 单 IP 并发 ≥10 / 1 分钟 ≥200 次  →  临时封 IP。
 # 所有 eastmoney.com 请求一律走 em_get()：串行限流（最小间隔 + 随机抖动）+ 复用
 # Keep-Alive 会话，批量调用时自动降速，避免被封。详见「数据源优先级 & 东财防封」章节。
+# 兼容保留：外部代码可能直接引用 EM_SESSION。实际请求走 _em_session() 的线程私有会话。
 EM_SESSION = requests.Session()
 EM_SESSION.headers.update({"User-Agent": UA})
 EM_MIN_INTERVAL = 1.0          # 两次东财请求最小间隔(秒)；批量筛选建议调大到 1.5~2
 _em_last_call = [0.0]          # 模块级上次请求时间戳
+_em_lock = threading.Lock()    # 只保护「算等待→sleep→打标」这段发起闸门，见 em_get
+_em_local = threading.local()  # 每线程一个 Session：requests.Session 非线程安全
+
+def _em_session():
+    """取当前线程私有的 Session（复用 Keep-Alive，又不跨线程共用连接）。"""
+    s = getattr(_em_local, "session", None)
+    if s is None:
+        s = requests.Session()
+        s.headers.update({"User-Agent": UA})
+        _em_local.session = s
+    return s
 
 def em_get(url: str, params: dict | None = None, headers: dict | None = None,
            timeout: int = 15, **kwargs):
     """东财统一请求入口：自动节流 + 复用 session + 默认 UA。
-    所有 eastmoney.com 接口都应通过它请求，避免高频被封 IP。"""
-    wait = EM_MIN_INTERVAL - (time.time() - _em_last_call[0])
-    if wait > 0:
-        time.sleep(wait + random.uniform(0.1, 0.5))
-    try:
-        return EM_SESSION.get(url, params=params, headers=headers, timeout=timeout, **kwargs)
-    finally:
+    所有 eastmoney.com 接口都应通过它请求，避免高频被封 IP。
+
+    锁只圈住「算等待→sleep→打时间戳」这段发起闸门，**请求本身在锁外执行**：
+    把 timeout=15 的网络往返也圈进锁里，实际发起间隔会变成
+    `间隔 + 抖动 + 响应耗时`，而且东财一次超时期间所有线程都在排队——
+    上层 30 秒超时下，排在第三位之后的请求必然超时。
+    时间戳在发请求前置位（而不是 finally 写）：要节流的是「发起」间隔，
+    等响应回来才打标的话，慢请求期间后来者算出的间隔是虚高的。
+    线程安全由 thread-local Session 保证，不再依赖这把锁。
+    """
+    with _em_lock:
+        wait = EM_MIN_INTERVAL - (time.time() - _em_last_call[0])
+        if wait > 0:
+            time.sleep(wait + random.uniform(0.1, 0.5))
         _em_last_call[0] = time.time()
+    return _em_session().get(url, params=params, headers=headers, timeout=timeout, **kwargs)
 
 def eastmoney_datacenter(report_name: str, columns: str = "ALL",
                           filter_str: str = "", page_size: int = 50,
@@ -356,6 +438,20 @@ HTTP GET，GBK 编码，`~` 分隔 88 个字段，不封IP。
 ```python
 import urllib.request
 
+def _f(v):
+    """腾讯行情字段 → float；缺失（停牌/新股首日/ETF 无 PE-PB 时返回空串）给 None。
+
+    补 0 会让下游分不清「没数据」与「真的是 0」：昨收补 0 算出 -100% 涨跌幅，
+    PE 补 0 被当成极度便宜。JSON 序列化时 None 就是 null，缺就让它缺。
+    """
+    if v is None or str(v).strip() in ("", "-"):
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
 def tencent_quote(codes: list[str]) -> dict[str, dict]:
     """
     批量拉取腾讯财经实时行情。
@@ -390,24 +486,24 @@ def tencent_quote(codes: list[str]) -> dict[str, dict]:
         code = key[2:]
         result[code] = {
             "name":         vals[1],
-            "price":        float(vals[3]) if vals[3] else 0,
-            "last_close":   float(vals[4]) if vals[4] else 0,
-            "open":         float(vals[5]) if vals[5] else 0,
-            "change_amt":   float(vals[31]) if vals[31] else 0,
-            "change_pct":   float(vals[32]) if vals[32] else 0,
-            "high":         float(vals[33]) if vals[33] else 0,
-            "low":          float(vals[34]) if vals[34] else 0,
-            "amount_wan":   float(vals[37]) if vals[37] else 0,
-            "turnover_pct": float(vals[38]) if vals[38] else 0,
-            "pe_ttm":       float(vals[39]) if vals[39] else 0,
-            "amplitude_pct":float(vals[43]) if vals[43] else 0,
-            "mcap_yi":      float(vals[44]) if vals[44] else 0,
-            "float_mcap_yi":float(vals[45]) if vals[45] else 0,
-            "pb":           float(vals[46]) if vals[46] else 0,
-            "limit_up":     float(vals[47]) if vals[47] else 0,
-            "limit_down":   float(vals[48]) if vals[48] else 0,
-            "vol_ratio":    float(vals[49]) if vals[49] else 0,
-            "pe_static":    float(vals[52]) if vals[52] else 0,
+            "price":        _f(vals[3]),
+            "last_close":   _f(vals[4]),
+            "open":         _f(vals[5]),
+            "change_amt":   _f(vals[31]),
+            "change_pct":   _f(vals[32]),
+            "high":         _f(vals[33]),
+            "low":          _f(vals[34]),
+            "amount_wan":   _f(vals[37]),
+            "turnover_pct": _f(vals[38]),
+            "pe_ttm":       _f(vals[39]),
+            "amplitude_pct":_f(vals[43]),
+            "mcap_yi":      _f(vals[44]),
+            "float_mcap_yi":_f(vals[45]),
+            "pb":           _f(vals[46]),
+            "limit_up":     _f(vals[47]),
+            "limit_down":   _f(vals[48]),
+            "vol_ratio":    _f(vals[49]),
+            "pe_static":    _f(vals[52]),
         }
     return result
 
@@ -847,6 +943,7 @@ print(df[["代码", "名称", "涨幅%", "题材归因"]].head(10))
 ```python
 import requests
 import pandas as pd
+from datetime import datetime
 from pathlib import Path
 
 HSGT_HEADERS = {
@@ -872,11 +969,25 @@ def hsgt_realtime() -> pd.DataFrame:
     sgt = d.get("sgt", [])
 
     n = len(times)
-    return pd.DataFrame({
+    df = pd.DataFrame({
         "time": times,
         "hgt_yi": hgt[:n] + [None] * (n - len(hgt)),
         "sgt_yi": sgt[:n] + [None] * (n - len(sgt)),
     })
+    # 顺手落一次当日快照：northbound_history 端点读的就是这份 CSV，而写入方原本
+    # 只存在于下面的「用法」示例里（会被 extract.py 截掉），运行时无人调用，
+    # 那个端点因此永远返回空。落库是 best-effort，失败不影响实时数据。
+    try:
+        done = df.dropna()
+        if not done.empty:
+            last = done.iloc[-1]
+            _save_northbound_snapshot(
+                datetime.now().strftime("%Y-%m-%d"),
+                float(last["hgt_yi"]), float(last["sgt_yi"]),
+            )
+    except Exception as e:  # noqa
+        print(f"[WARN] 北向当日快照落库失败: {e}")
+    return df
 
 # === 自缓存辅助函数 ===
 
@@ -1014,7 +1125,9 @@ def eastmoney_fund_flow_minute(code: str) -> list[dict]:
         return []
 
     rows = []
-    for line in d.get("data", {}).get("klines", []):
+    # 东财无结果时返回的是 "data": null（键在、值为 None），d.get("data", {}) 拿到的就是
+    # None，紧跟的 .get 立刻 AttributeError。一律用 (… or {}) 兜住
+    for line in (d.get("data") or {}).get("klines", []):
         parts = line.split(",")
         if len(parts) >= 6:
             rows.append({
@@ -1075,7 +1188,11 @@ def dragon_tiger_board(code: str, trade_date: str, look_back: int = 30) -> dict:
         })
 
     # 2. 最近上榜的买卖席位
+    # buy_data/sell_data 必须先初始化：绝大多数个股近 30 天没上过榜，records 为空时
+    # 下面第 3 步仍要遍历它们，只在 if 分支里赋值会抛 UnboundLocalError → 端点 502
     seats = {"buy": [], "sell": []}
+    buy_data: list = []
+    sell_data: list = []
     if records:
         latest_date = records[0]["date"]
         # 买入席位
@@ -1221,7 +1338,7 @@ def industry_comparison(top_n: int = 20) -> dict:
     headers = {"User-Agent": UA}
     r = em_get(url, params=params, headers=headers, timeout=15)
     d = r.json()
-    items = d.get("data", {}).get("diff", [])
+    items = (d.get("data") or {}).get("diff", [])
     if not items:
         return {"top": [], "bottom": [], "total": 0}
 
@@ -1512,7 +1629,7 @@ def stock_fund_flow_120d(code: str) -> list[dict]:
     except Exception as e:
         print(f"[WARN] push2 资金流请求失败: {e}")
         return []
-    klines = d.get("data", {}).get("klines", [])
+    klines = (d.get("data") or {}).get("klines", [])
 
     rows = []
     for line in klines:
@@ -1622,7 +1739,7 @@ def cls_telegraph(page_size: int = 50) -> list[dict]:
     d = r.json()
 
     rows = []
-    for item in d.get("data", {}).get("roll_data", []):
+    for item in (d.get("data") or {}).get("roll_data", []):
         rows.append({
             "title": item.get("title", "") or item.get("brief", ""),
             "content": item.get("content", "") or item.get("brief", ""),
@@ -1660,7 +1777,7 @@ def eastmoney_global_news(page_size: int = 50) -> list[dict]:
     d = r.json()
 
     rows = []
-    for item in d.get("data", {}).get("fastNewsList", []):
+    for item in (d.get("data") or {}).get("fastNewsList", []):
         rows.append({
             "title": item.get("title", ""),
             "summary": item.get("summary", "")[:200],
@@ -1736,7 +1853,7 @@ def eastmoney_stock_info(code: str) -> dict:
     }
     headers = {"User-Agent": UA}
     r = em_get(url, params=params, headers=headers, timeout=10)
-    d = r.json().get("data", {})
+    d = r.json().get("data") or {}
     return {
         "code": d.get("f57", ""),
         "name": d.get("f58", ""),
@@ -1783,7 +1900,7 @@ def sina_financial_report(code: str, report_type: str = "lrb", num: int = 8) -> 
     r = requests.get(url, params=params, headers=headers, timeout=15)
     # 新浪实际结构: result.data.report_list 是「按报告期(如 '20260331')为键」的 dict,
     # 每期对象的 data 字段才是行项列表 [{item_title, item_value, item_tongbi}]。
-    report_list = r.json().get("result", {}).get("data", {}).get("report_list", {}) or {}
+    report_list = ((r.json().get("result") or {}).get("data") or {}).get("report_list") or {}
 
     rows = []
     for period in sorted(report_list.keys(), reverse=True)[:num]:
@@ -1993,11 +2110,18 @@ def full_valuation(code: str) -> dict:
     req.add_header("User-Agent", "Mozilla/5.0")
     resp = urllib.request.urlopen(req, timeout=10)
     data = resp.read().decode("gbk")
-    vals = data.split('"')[1].split("~")
-    price = float(vals[3])
-    mcap = float(vals[44])
-    pe_ttm = float(vals[39]) if vals[39] else 0
-    pb = float(vals[46]) if vals[46] else 0
+    # 停牌/退市/代码不存在时腾讯回的是一行空壳，字段数不够就下标越界（IndexError）、
+    # 空串 float() 又是 ValueError；两者都会被上层包成语焉不详的 502。先校验再取值。
+    parts = data.split('"')
+    vals = parts[1].split("~") if len(parts) > 1 else []
+    if len(vals) < 53:
+        raise ValueError(f"腾讯行情返回字段不足（{code}，{len(vals)} 段），该代码可能停牌或不存在")
+    price = _f(vals[3])
+    if price is None:
+        raise ValueError(f"腾讯行情无现价（{code}），无法估值")
+    mcap = _f(vals[44])
+    pe_ttm = _f(vals[39])
+    pb = _f(vals[46])
 
     # 2. 机构一致预期（直连同花顺）
     df = ths_eps_forecast(code)

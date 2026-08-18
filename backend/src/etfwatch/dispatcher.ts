@@ -9,7 +9,7 @@ import type {
 import { sendTelegram } from '../notify/telegram';
 import { broadcastEtfWatch } from './bus';
 import { confirmBuy } from './confidence';
-import { insertEtfAlert, listEtfUndelivered, markEtfDelivered } from './store';
+import { REPUSH_VERDICTS, insertEtfAlert, listEtfUndelivered, markEtfDelivered } from './store';
 
 // ETF 盯盘信号分发：买点走置信度管道（agent 增信 + 置信门 + 护栏指令），卖点/硬止损纯确定性直发。
 // 仅告警不下单。落库 → WS 广播 → Telegram 推送 + 死信重投。
@@ -133,21 +133,20 @@ export async function processEtfSignal(
     }
     buyCooldown.set(key, Date.now());
 
-    const { confidence, action, advice, confirm, instruction, runId } = await confirmBuy(
-      s,
-      cfg,
-      resonance,
-      heldPct,
-    );
+    const { confidence, action, agentAction, advice, confirm, instruction, runId } =
+      await confirmBuy(s, cfg, resonance, heldPct);
 
-    // 最终裁决：AI 否决（放弃/观察）或置信不达标 → 降级观察（落库留痕但不推送、不建层）。
+    // 最终裁决：AI 否决（放弃/观察）、置信不达标、或买点护栏把指令降级 → 降级观察
+    // （落库留痕但不推送、不建层）。action 已是护栏后的最终动作，与指令口径一致。
     const confidencePass = !(cfg.minConfidence > 0 && confidence < cfg.minConfidence);
     const buildIt = action === '建仓' && confidencePass;
 
     if (!buildIt) {
       const verdict = action === '放弃' ? '放弃' : '观察';
-      const reason =
-        action === '建仓'
+      const guardBlocked = agentAction === '建仓' && confidencePass && action !== '建仓';
+      const reason = guardBlocked
+        ? `买点护栏拦下：${instruction.guardrailNote ?? '不满足建仓条件'}`
+        : !confidencePass
           ? `置信度 ${confidence} 低于门槛 ${cfg.minConfidence}，降级观察`
           : action === '放弃'
             ? 'AI 研判放弃，不建仓'
@@ -222,12 +221,17 @@ function toAlertInput(s: EtfWatchSignal) {
   };
 }
 
-/** 死信重投：重试应推送但未投递成功的告警（含层数 ≥1 的真实动作告警） */
+/**
+ * 死信重投：重试应推送但未投递成功的告警。
+ * 时间下界在 listEtfUndelivered 里（避免 pushTelegram 关闭期间落库的卖点被跨日补发）。
+ * 补发正文带上执行指令，否则补发的只有一句 advice、没有可照做的动作。
+ */
 export async function retryEtfUndelivered(cfg: EtfWatchConfig): Promise<void> {
   if (!cfg.pushTelegram) return;
   for (const a of listEtfUndelivered()) {
     if (!shouldRepush(a)) continue;
-    const text = `【ETF多周期·补发】${a.name}(${a.code})\n触发：${a.detail}\n\n${a.advice ?? ''}`;
+    const body = a.instruction ? `${formatInstruction(a.instruction)}\n\n${a.advice ?? ''}` : (a.advice ?? '');
+    const text = `【ETF多周期·补发】${a.name}(${a.code})\n触发：${a.detail}\n\n${body}`.trimEnd();
     try {
       const r = await sendTelegram(text);
       if (r.ok) markEtfDelivered(a.id);
@@ -237,8 +241,15 @@ export async function retryEtfUndelivered(cfg: EtfWatchConfig): Promise<void> {
   }
 }
 
-/** 仅重投真实推送动作（观察/低置信降级的留痕告警不补发） */
+/**
+ * 仅重投真正推送过的动作，按 verdict 白名单判定（白名单与 SQL 过滤同一出处）。
+ * 原先按 positionPct>0 + confidence>0 + delivered=false 判：这三项在「低置信/AI 观察降级」
+ * 的留痕告警上全部成立（positionPct 保持信号原值、confidence 是正数），
+ * 于是本该只留痕的观察记录 60 秒后被当成正式买点补发出去。
+ * 这里保留一层内存兜底，SQL 已先过滤，正常不会命中。
+ */
+const REPUSH_SET = new Set<EtfWatchAlert['verdict']>(REPUSH_VERDICTS);
+
 function shouldRepush(a: EtfWatchAlert): boolean {
-  if (a.signalType !== 'buy_layer') return true;
-  return a.positionPct > 0 && (a.confidence == null || a.confidence > 0);
+  return REPUSH_SET.has(a.verdict);
 }

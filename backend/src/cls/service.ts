@@ -21,10 +21,17 @@ function makeId(source: string, time: string, text: string): string {
   return createHash('md5').update(`${source} ${time} ${text}`).digest('hex').slice(0, 12);
 }
 
-/** 完整 datetime 串（YYYY-MM-DD HH:mm:ss）转 ISO；解析失败回退原串 */
+/**
+ * 完整 datetime 串（YYYY-MM-DD HH:mm:ss）转 ISO；解析失败回退原串。
+ *
+ * 必须显式按 +08:00 解析：各源给的都是不带时区的上海时间文本，而容器时区是 UTC
+ * （compose 与 Dockerfile 均未设 TZ），按运行时本地时区解析会整体偏 8 小时——
+ * 与首选源（unix 秒，时区无歧义）拼在同一个列表里时间轴对不上，排序也跟着错。
+ */
 function datetimeToIso(raw: string): string {
   if (!raw) return '';
-  const d = new Date(raw.replace(' ', 'T'));
+  const t = raw.replace(' ', 'T');
+  const d = new Date(/([zZ]|[+-]\d{2}:?\d{2})$/.test(t) ? t : `${t}+08:00`);
   return Number.isNaN(d.getTime()) ? raw : d.toISOString();
 }
 

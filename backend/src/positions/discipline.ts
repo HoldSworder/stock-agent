@@ -53,9 +53,15 @@ const ETF_DEFAULT_CONFIG: DisciplineConfig = {
   totalMaxPositionPct: 95,
 };
 
-/** 判定是否 ETF/LOF 场内基金（15/5 开头代码或名称含 ETF/LOF），复用 ETF 模块口径 */
-function isEtfPosition(code: string, name: string): boolean {
-  return /^(15|5)\d{4}$/.test(code) || /ETF|LOF/i.test(name);
+/**
+ * 判定是否 ETF/LOF 场内基金：深市 15xxxx 与沪市 5xxxxx，名称匹配作补充。
+ * 旧写法 `5\d{4}` 只有 5 位，512880/588000/563000 这类沪市 ETF 匹配不到，
+ * 名称里又不一定带「ETF/LOF」，于是被当个股套用 8% 止损（应为 12%）、单票上限从 40% 收到 30%。
+ * 但 1 开头只能收到 `15\d{4}`：放宽成 `1\d{5}` 会把沪市转债 110/113、深市转债 123/127
+ * 全划进 ETF 口径，可转债日内波动远大于 ETF，套 12% 止损与 40% 单票上限是在放松风控。
+ */
+export function isEtfPosition(code: string, name: string): boolean {
+  return /^(15\d{4}|5\d{5})$/.test(code) || /ETF|LOF/i.test(name);
 }
 
 /** 取 ETF 跟踪池信号（best-effort，动态导入避免与 agent/runner 形成静态循环依赖） */
@@ -498,11 +504,13 @@ function rowToEvent(row: typeof schema.disciplineEvents.$inferSelect): Disciplin
 }
 
 export function listDisciplineEvents(limit = 50): DisciplineEvent[] {
+  // Math.max(NaN, 1) 仍是 NaN：路由层传的是 Number(req.query.limit)，非数字须回落默认而非绑进 SQL
+  const safe = Number.isFinite(limit) ? Math.min(Math.max(Math.floor(limit), 1), 200) : 50;
   return db
     .select()
     .from(schema.disciplineEvents)
     .orderBy(desc(schema.disciplineEvents.createdAt))
-    .limit(Math.min(Math.max(limit, 1), 200))
+    .limit(safe)
     .all()
     .map(rowToEvent);
 }

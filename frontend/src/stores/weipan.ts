@@ -2,6 +2,7 @@ import { defineStore } from 'pinia';
 import { ref } from 'vue';
 import type { WeipanAlert, WeipanEvent, WeipanSignal, WeipanStatus } from '@stock-agent/shared';
 import { api, openWs } from '@/api';
+import { createWsRetry } from '@/composables/wsRetry';
 
 /** 信号流折叠行：按 code:reason 聚合，记录触发次数与首次时间 */
 export interface WeipanSignalRow extends WeipanSignal {
@@ -27,7 +28,7 @@ export const useWeipanStore = defineStore('weipan', () => {
   const connected = ref(false);
 
   let ws: WebSocket | null = null;
-  let reconnectTimer: number | null = null;
+  const retry = createWsRetry('尾盘套利盯盘');
   let feedDay = shanghaiToday();
 
   function rolloverIfNewDay(): void {
@@ -57,11 +58,17 @@ export const useWeipanStore = defineStore('weipan', () => {
     }
   }
 
-  function connect() {
+  /**
+   * @param fromRetry 是否由退避重连触发。store 是单例，退避计数跨页面存活，
+   *   用户主动进页面算一次新的连接意图，必须重置计数，否则打满上限后再进来永不重连。
+   */
+  function connect(fromRetry = false) {
+    if (!fromRetry) retry.reset();
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
     ws = openWs('/ws/weipan');
     ws.onopen = () => {
       connected.value = true;
+      retry.reset();
     };
     ws.onmessage = (ev) => {
       try {
@@ -72,21 +79,13 @@ export const useWeipanStore = defineStore('weipan', () => {
     };
     ws.onclose = () => {
       connected.value = false;
-      if (reconnectTimer == null) {
-        reconnectTimer = window.setTimeout(() => {
-          reconnectTimer = null;
-          connect();
-        }, 5000);
-      }
+      retry.schedule(() => connect(true));
     };
     ws.onerror = () => ws?.close();
   }
 
   function disconnect() {
-    if (reconnectTimer != null) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
+    retry.cancel();
     if (ws) {
       ws.onclose = null;
       ws.onerror = null;

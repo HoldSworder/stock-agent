@@ -102,6 +102,34 @@ export interface SourceImage {
 }
 
 /**
+ * 允许下载的图床域名后缀白名单。
+ *
+ * img.url 直接来自上游 JSON（小红书 imageList.urlDefault 等），若不校验就 fetch，
+ * 上游一改字段/被投毒就成了一条从外部响应直通的服务端请求面——落盘的结果还会以
+ * /media/kol 对外暴露。新增抓取源时把对应图床后缀补进来，宁可少缓存一张图。
+ */
+const ALLOWED_HOST_SUFFIXES = [
+  // 小红书图床（sns-webpic-qc / sns-img-* / ci 等子域均落在此后缀下）
+  'xhscdn.com',
+  'xiaohongshu.com',
+  // 微博图床
+  'sinaimg.cn',
+];
+
+/** 目标是否为白名单内的 https 图床地址 */
+function isAllowedImageUrl(raw: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== 'https:') return false;
+  const host = u.hostname.toLowerCase();
+  return ALLOWED_HOST_SUFFIXES.some((s) => host === s || host.endsWith(`.${s}`));
+}
+
+/**
  * 下载并缓存一组图片，返回可直接给前端用的本地地址。
  *
  * 整体 best-effort：单张失败只 warn 并跳过，绝不让配图问题打断笔记入库
@@ -120,6 +148,10 @@ export async function cacheImages(
   const out: KolImage[] = [];
   for (const img of images.slice(0, MAX_PER_POST)) {
     if (signal?.aborted) break;
+    if (!isAllowedImageUrl(img.url)) {
+      console.warn(`[kol] 跳过非白名单图床地址 ${img.url.slice(0, 80)}`);
+      continue;
+    }
     const base = baseName(img);
     const hit = findCached(dir, base);
     if (hit) {

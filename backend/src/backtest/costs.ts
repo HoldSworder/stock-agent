@@ -12,8 +12,31 @@ export const DEFAULT_A_SHARE_COSTS: BacktestCosts = {
   slippageBps: 2,
 };
 
+/**
+ * ETF 档：场内基金**免征印花税、免过户费**，直接套股票默认档会凭空多扣 5bps 卖出成本，
+ * 在高换手模式上足以把收益压掉一大截，故单独一档。
+ */
+export const DEFAULT_ETF_COSTS: BacktestCosts = {
+  commissionBps: 2.5,
+  minCommission: 5,
+  stampDutyBps: 0,
+  transferFeeBps: 0,
+  slippageBps: 2,
+};
+
 export function resolveCosts(input?: Partial<BacktestCosts>): BacktestCosts {
   return { ...DEFAULT_A_SHARE_COSTS, ...(input ?? {}) };
+}
+
+export function resolveEtfCosts(input?: Partial<BacktestCosts>): BacktestCosts {
+  return { ...DEFAULT_ETF_COSTS, ...(input ?? {}) };
+}
+
+/** 单边成本率（bps）：买入不含印花税，卖出含。不含最低佣金（需知名义本金才能折算） */
+export function sideCostBps(c: BacktestCosts, side: 'buy' | 'sell'): number {
+  return (
+    c.commissionBps + c.transferFeeBps + c.slippageBps + (side === 'sell' ? c.stampDutyBps : 0)
+  );
 }
 
 /**

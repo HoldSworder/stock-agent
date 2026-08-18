@@ -8,7 +8,7 @@ import type {
   CoreContinuity,
 } from '@stock-agent/shared';
 import { nowIso, shanghaiToday } from '../util';
-import { prevTradingDay } from '../market/calendar';
+import { isTradingDay, prevTradingDay } from '../market/calendar';
 import {
   fetchBoardConstituents,
   fetchBoards,
@@ -256,8 +256,11 @@ interface Persistence {
  * 供实时总览与今日计划底稿复用，保证两处口径一致（DRY）。
  *
  * @param tradeDate 当日交易日。传入时会校验 hist[0] 确实是上一交易日的快照，
- *   否则核心股延续度按未知处理——收盘快照漏跑时 hist[0] 可能是三天前的名单，
- *   拿它做「跨日延续」比对得出的结论是假的。不传则跳过校验（自检脚本直接喂构造数据）。
+ *   否则核心股延续度与「较昨」环比一并按未知处理——收盘快照漏跑时 hist[0] 可能是三天前的行，
+ *   拿它做跨日比对得出的「较昨 -12」「腰斩」都是假的。不传则跳过校验（自检脚本直接喂构造数据）。
+ * @param recentDates 近端快照实际存在的交易日序列（新→旧，不含当日）。
+ *   连续达标天数必须按它对齐：hist 只含该板块出现过的行，某天缺席时直接把前后两天接起来，
+ *   会把「达标—缺席—达标」报成连续 2 日。缺省则退回按 hist 逐行计算（自检构造数据用）。
  */
 export function assessPersistence(
   rank: number,
@@ -266,17 +269,29 @@ export function assessPersistence(
   hist: BoardBreadthSnapshotRow[],
   coreCodes: string[] = [],
   tradeDate?: string,
+  recentDates?: string[],
 ): Persistence {
   const prevRow = hist[0];
   const prevIsYesterday =
     tradeDate == null || (prevRow != null && prevRow.tradeDate === prevTradingDay(tradeDate));
-  const prevCount = prevRow?.newHighCount ?? null;
+  // 环比/腰斩判据与 continuity 共用同一个新鲜度口径：不是上一交易日的行一律不当「昨天」用
+  const prevCount = prevIsYesterday ? prevRow?.newHighCount ?? null : null;
   const delta = prevCount != null ? count - prevCount : null;
   const continuity = prevIsYesterday
     ? assessContinuity(coreCodes, prevRow?.coreCodes)
     : { kept: 0, prevCount: 0, overlap: null };
-  // 连续达标天数：今日 + 历史中连续满足地板的天数
-  const flooredSeq = [meetsFloor(count, ratio), ...hist.map((h) => meetsFloor(h.newHighCount, h.ratio))];
+  // 连续达标天数：今日 + 历史中连续满足地板的天数（缺席日按未达标断开）
+  const histByDate = new Map(hist.map((h) => [h.tradeDate, h]));
+  const flooredSeq =
+    recentDates != null
+      ? [
+          meetsFloor(count, ratio),
+          ...recentDates.map((d) => {
+            const row = histByDate.get(d);
+            return row != null && meetsFloor(row.newHighCount, row.ratio);
+          }),
+        ]
+      : [meetsFloor(count, ratio), ...hist.map((h) => meetsFloor(h.newHighCount, h.ratio))];
   let streakDays = 0;
   for (const ok of flooredSeq) {
     if (!ok) break;
@@ -304,7 +319,8 @@ export function boardStageActionOf(
   if (!date) return null;
   const row = listSnapshotsByDate(date).find((r) => r.boardCode === boardCode);
   if (!row) return null;
-  const hist = groupHistory(listRecentSnapshots(date, LOOKBACK_DAYS)).get(boardCode) ?? [];
+  const recent = listRecentSnapshots(date, LOOKBACK_DAYS);
+  const hist = groupHistory(recent).get(boardCode) ?? [];
   const { stage, action } = assessPersistence(
     row.rank,
     row.newHighCount,
@@ -312,8 +328,66 @@ export function boardStageActionOf(
     hist,
     row.coreCodes,
     date,
+    distinctDates(recent),
   );
   return { action, stage, tradeDate: date };
+}
+
+/**
+ * 并列第一的上限：超过这么多个板块新高数打平，就没有「主线」可言。
+ * 不设上限时 TOP_RANK=1 的独占语义会被悄悄放宽成「所有并列第一」——
+ * wasMainline 的命中面跟着变宽，次日它们只要掉出并列第一或环比腰斩就被判 fading → exit_only，
+ * 而这是标的计划的板块闸门。
+ */
+const MAX_TOP_TIES = 3;
+
+/**
+ * 竞争排名：新高数相同即并列同名次（1,1,3,4…）。
+ * 严格递增序号会让「新高数并列第一、占比低 0.1pt」的板块拿到 rank=2，
+ * 在 TOP_RANK=1 口径下它一天都不计入 topDays/wasMainline，PERSIST_TOP_DAYS>=3 永远无法满足。
+ * 但并列第一超过 MAX_TOP_TIES 个时视为当日无明确主线，整组降到 TOP_RANK 之外（谁都不给 isTop）。
+ * @param countsDesc 已按新高数降序排好的计数序列
+ * @returns 与入参等长的名次数组（非递减，后续名次仍按位次给）
+ */
+export function competitiveRanks(countsDesc: number[]): number[] {
+  let tieCount = Number.NaN;
+  let tieRank = 0;
+  const topTies = countsDesc.filter((c) => c === countsDesc[0]).length;
+  const noMainline = topTies > MAX_TOP_TIES;
+  return countsDesc.map((count, i) => {
+    if (count !== tieCount) {
+      tieCount = count;
+      tieRank = i + 1;
+    }
+    return noMainline && tieRank === 1 ? TOP_RANK + 1 : tieRank;
+  });
+}
+
+/**
+ * 今日新高归零的板块是否仍要保留进榜（参与判定并落库）。
+ * 只保留「近端曾居榜首」的那几个——它们正处在最该报警的退潮形态；
+ * 全市场几百个从未成为主线的零值板块仍然排除，否则响应会被灌爆。
+ * @param hist 该板块近端历史快照（新→旧）
+ */
+export function shouldKeepFadedBoard(hist: BoardBreadthSnapshotRow[]): boolean {
+  return hist.some((h) => h.rank <= TOP_RANK);
+}
+
+/**
+ * 展示/落库截取：先取前 limit 名，再把被截掉的退幕板块补回来。
+ * 退幕板块（尤其今日归零的）排在末尾，直接 slice 会连同「只退出」提示一起抹掉，
+ * 而持仓还在里面的人恰恰只需要这一条。
+ */
+export function takeWithFading<T extends { stage: BoardMainlineStage }>(
+  items: T[],
+  limit: number,
+): T[] {
+  return [...items.slice(0, limit), ...items.slice(limit).filter((it) => it.stage === 'fading')];
+}
+
+/** 近端快照集里实际存在的 distinct 交易日（新→旧），作为连续达标天数的对齐基准 */
+function distinctDates(history: BoardBreadthSnapshotRow[]): string[] {
+  return [...new Set(history.map((r) => r.tradeDate))].sort((a, b) => (a < b ? 1 : -1));
 }
 
 /** 按 boardCode 把历史快照分组并按交易日新→旧排序 */
@@ -361,9 +435,14 @@ function judge(args: {
 
 /**
  * 组装板块新高宽度总览（确定性只读 + 落库当日快照供持续性判定）。
- * @param persist 是否写入当日快照（GET 与收盘定时均写，按 (date,code) upsert 幂等）
+ *
+ * @param persist 是否写入当日快照。默认 false：落库只由收盘任务负责。
+ *   页面/agent 的随机时点访问一旦落库，盘中会把半天的部分计数写成当日定盘值，
+ *   周末/节假日更会写出「非交易日快照」——它会挤占 listRecentSnapshots 的最近 5 个交易日窗口，
+ *   并让周一的 prevIsYesterday 恒为 false（核心股延续度永久停在「待积累」）。
+ *   传 true 时仍会再过一道交易日闸门，非交易日一律不写。
  */
-export async function buildBreadthOverview(persist = true): Promise<BoardBreadthOverview> {
+export async function buildBreadthOverview(persist = false): Promise<BoardBreadthOverview> {
   const tradeDate = shanghaiToday();
   let stale = false;
 
@@ -391,13 +470,13 @@ export async function buildBreadthOverview(persist = true): Promise<BoardBreadth
   if (boards.length === 0) stale = true;
 
   // 3) 逐板块取成分并与创新高集合求交集计数（并发受限 + 错峰抖动，best-effort）
-  const counts: RawCount[] = newHighSet.size === 0 || boards.length === 0
+  const raw: RawCount[] = newHighSet.size === 0 || boards.length === 0
     ? []
     : (
         await mapLimit(boards, FETCH_CONCURRENCY, async (meta): Promise<RawCount | null> => {
           await jitterDelay(FETCH_JITTER_MS); // 错峰发包，降低对 push2 的瞬时 req/s
           const cons = await fetchBoardConstituents(meta.kind, meta.name).catch(() => [] as string[]);
-          if (cons.length === 0) return null; // 成分取数失败/为空，不参与排名
+          if (cons.length === 0) return null; // 成分取数失败/为空：这是数据缺失，不是「真的 0 只新高」，不参与排名
           // 记下「哪些股在创新高」而不只是「几只在创新高」：跨日确认要比对是不是同一批股
           const hits = cons.filter((code) => newHighSet.has(code)).sort();
           const newHighCount = hits.length;
@@ -405,17 +484,36 @@ export async function buildBreadthOverview(persist = true): Promise<BoardBreadth
           const ratio = consTotal > 0 ? (newHighCount / consTotal) * 100 : 0;
           return { meta, newHighCount, consTotal, ratio, coreCodes: hits.slice(0, CORE_CODES_CAP) };
         })
-      ).filter((x): x is RawCount => x != null && x.newHighCount > 0);
+      ).filter((x): x is RawCount => x != null);
 
-  // 4) 横向排名：新高数降序，平手按占比降序
-  counts.sort((a, b) => b.newHighCount - a.newHighCount || b.ratio - a.ratio);
+  // 4) 历史快照（近 LOOKBACK_DAYS 交易日）按 boardCode 分组（新→旧）
+  const recentSnapshots = listRecentSnapshots(tradeDate, LOOKBACK_DAYS);
+  const histByBoard = groupHistory(recentSnapshots);
+  const recentDates = distinctDates(recentSnapshots);
 
-  // 5) 历史快照（近 LOOKBACK_DAYS 交易日）按 boardCode 分组（新→旧）
-  const histByBoard = groupHistory(listRecentSnapshots(tradeDate, LOOKBACK_DAYS));
+  // 5) 排名池：当日有新高的板块。新高数降序，平手按占比降序，
+  //    但名次用竞争排名（并列同名次 1,1,3）——按序号严格递增时，「新高数并列第一、占比低 0.1pt」
+  //    的板块会拿到 rank=2，在 TOP_RANK=1 口径下一天都不计入 topDays，PERSIST_TOP_DAYS 永远达不到。
+  const active = raw.filter((c) => c.newHighCount > 0);
+  active.sort((a, b) => b.newHighCount - a.newHighCount || b.ratio - a.ratio);
+  const ranks = competitiveRanks(active.map((c) => c.newHighCount));
+  const rankByCode = new Map(active.map((c, i) => [c.meta.code, ranks[i]]));
 
-  // 6) 逐项算持续性 + 判定 + 映射 ETF
-  const items: BoardBreadthItem[] = counts.map((c, i) => {
-    const rank = i + 1;
+  // 6) 退幕补入：历史上曾居榜首、今日新高归零的板块。整条丢弃的话「昨日 30 只、今日 0 只」
+  //    这个最该报警的退潮形态既进不了榜也不落库，judge 的 fading 分支永远拿不到当日记录，
+  //    次日 hist[0] 还会变成两天前的行导致延续性判定失真；持仓者也就看不到「只退出」提示。
+  //    普通零值板块（全市场几百个）仍然排除，只补曾是主线的那几个。
+  const fadedOut = raw.filter(
+    (c) => c.newHighCount === 0 && shouldKeepFadedBoard(histByBoard.get(c.meta.code) ?? []),
+  );
+  // 归零板块统一给排名池之后的名次（不占用真实名次，也保证 isTop 为假）
+  const outRank = active.length + 1;
+  for (const c of fadedOut) rankByCode.set(c.meta.code, outRank);
+  const counts = [...active, ...fadedOut];
+
+  // 7) 逐项算持续性 + 判定 + 映射 ETF
+  const items: BoardBreadthItem[] = counts.map((c) => {
+    const rank = rankByCode.get(c.meta.code) ?? outRank;
     const { streakDays, topDays, delta, verdict, stage, action, continuity } = assessPersistence(
       rank,
       c.newHighCount,
@@ -423,6 +521,7 @@ export async function buildBreadthOverview(persist = true): Promise<BoardBreadth
       histByBoard.get(c.meta.code) ?? [],
       c.coreCodes,
       tradeDate,
+      recentDates,
     );
 
     const deltaText = delta == null ? '' : `·较昨${delta >= 0 ? '+' : ''}${delta}`;
@@ -455,11 +554,11 @@ export async function buildBreadthOverview(persist = true): Promise<BoardBreadth
     };
   });
 
-  // 7) 落库（仅当有真实计数；按上限截取，控制每日行数）
-  if (persist && items.length > 0) {
+  // 8) 落库（仅当有真实计数；按上限截取，控制每日行数）
+  if (persist && isTradingDay() && items.length > 0) {
     const coreByCode = new Map(counts.map((c) => [c.meta.code, c.coreCodes]));
     upsertSnapshots(
-      items.slice(0, Math.max(MAX_BOARDS, 60)).map((it) => ({
+      takeWithFading(items, Math.max(MAX_BOARDS, 60)).map((it) => ({
         tradeDate,
         boardCode: it.boardCode,
         boardName: it.boardName,
@@ -480,7 +579,7 @@ export async function buildBreadthOverview(persist = true): Promise<BoardBreadth
     tradeDate,
     window: WINDOW,
     marketNewHighTotal: newHighSet.size,
-    items: items.slice(0, MAX_BOARDS),
+    items: takeWithFading(items, MAX_BOARDS),
     mainlines,
     note:
       '板块新高宽度（主线识别，确定性只读，仅供参考，不构成投资建议）：' +
@@ -503,10 +602,20 @@ export function formatBreadthForPlan(): string {
   const rows = listSnapshotsByDate(date);
   if (rows.length === 0) return '【板块新高宽度·最新】无快照数据。';
 
-  const histByBoard = groupHistory(listRecentSnapshots(date, LOOKBACK_DAYS));
+  const recent = listRecentSnapshots(date, LOOKBACK_DAYS);
+  const histByBoard = groupHistory(recent);
+  const recentDates = distinctDates(recent);
   const enriched = rows.map((r) => ({
     ...r,
-    ...assessPersistence(r.rank, r.newHighCount, r.ratio, histByBoard.get(r.boardCode) ?? [], r.coreCodes, date),
+    ...assessPersistence(
+      r.rank,
+      r.newHighCount,
+      r.ratio,
+      histByBoard.get(r.boardCode) ?? [],
+      r.coreCodes,
+      date,
+      recentDates,
+    ),
     etf: mapBoardEtf(r.boardName),
   }));
   const mains = enriched.filter((e) => e.stage === 'advancing');

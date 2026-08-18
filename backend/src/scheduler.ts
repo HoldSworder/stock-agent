@@ -7,6 +7,7 @@ import { getLastRunStartedAt } from './repo';
 import { getMeta, setMeta } from './settings';
 import { sendTelegram } from './notify/telegram';
 import { withJobLock } from './scheduling/locks';
+import { previousScheduledSlot } from './scheduling/cronSlots';
 
 const jobs = new Map<string, Cron>();
 
@@ -64,7 +65,8 @@ export function rescheduleTask(taskId: string): void {
  * 启动时 missed-run 检查：对每个已启用任务，若其「今日最近一次应触发时刻」已过、当天非节假日、
  * 且该时刻之后没有任何运行记录，则判为「停机期间错过」。默认只 Telegram 提示不自动补跑
  * （尾盘类任务过点补跑反而有害，交由用户在 WebUI 决定）。用持久化水位线做幂等防重复告警。
- * 须在 reloadScheduler() 之后调用（依赖各任务的 Cron 实例计算 previousRun）。
+ * 「上一次应触发时刻」由 previousScheduledSlot 从 cron 表达式推算，不用 croner 的 previousRun
+ * （后者只回该实例实际跑过的上一次，启动即调用时恒为 null）。
  */
 export async function catchUpMissedRuns(): Promise<void> {
   const now = new Date();
@@ -77,15 +79,9 @@ export async function catchUpMissedRuns(): Promise<void> {
 
   for (const task of listTasks()) {
     if (!task.enabled || !task.cronExpr) continue;
-    const job = jobs.get(task.id);
-    if (!job) continue;
+    if (!jobs.has(task.id)) continue; // cron 解析失败的任务不参与判定
 
-    let prev: Date | null = null;
-    try {
-      prev = job.previousRun();
-    } catch {
-      prev = null;
-    }
+    const prev = previousScheduledSlot(task.cronExpr, task.tz, now);
     if (!prev) continue;
 
     // 仅补当日错过；跨日的不追（避免重启时拉起过时任务）

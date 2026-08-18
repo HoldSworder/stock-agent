@@ -80,6 +80,9 @@ async function openMode(id: string): Promise<void> {
   selectedId.value = id;
   detailLoading.value = true;
   const d = await fetchDetail(id);
+  // 连点模式 A→B 且 A 后落地时，若不比对就会把 selectedBtId 写成 A 的回测 id，
+  // 而 selectedDetail 已是 B，selectedBt 计算为 null，回测区直接空白
+  if (id !== selectedId.value) return;
   detailLoading.value = false;
   selectedBtId.value = d?.backtests.find((b) => b.isRecommended)?.id ?? d?.backtests[0]?.id ?? '';
 }
@@ -310,8 +313,13 @@ async function removeUniverse(code: string): Promise<void> {
   } catch {
     return;
   }
-  await api.researchUniverse.remove(code);
-  universe.value = universe.value.filter((u) => u.code !== code);
+  try {
+    await api.researchUniverse.remove(code);
+    universe.value = universe.value.filter((u) => u.code !== code);
+    ElMessage.success(`已从研究标的库移除 ${code}`);
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : String(e));
+  }
 }
 
 // ---- 展示辅助 ----

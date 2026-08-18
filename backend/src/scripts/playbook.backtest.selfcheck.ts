@@ -3,8 +3,9 @@
 // 运行：cd backend && pnpm exec tsx src/scripts/playbook.backtest.selfcheck.ts
 import assert from 'node:assert/strict';
 import type { KlineBar, PlaybookSpec } from '@stock-agent/shared';
-import { mergeNames, runOnBars } from '../playbook/backtest';
+import { combineEquity, mergeNames, runOnBars, type SymbolRun } from '../playbook/backtest';
 import { buildSeries, evalRule } from '../playbook/rules';
+import { PlaybookSpecError, validatePlaybookSpec } from '../playbook/validate';
 
 /** 合成日线：只给收盘价，开盘价可单独指定（默认等于收盘） */
 function bars(rows: Array<{ close: number; open?: number; volume?: number }>): KlineBar[] {
@@ -175,6 +176,128 @@ const baseSpec: PlaybookSpec = {
   const trades = runOnBars('600000', b, spec, undefined, universe[0].name);
   assert.equal(trades.length, 1);
   assert.equal(trades[0].name, '浦发银行', '逐笔成交应带标的名称');
+}
+
+// ============ 6. 指标预热：不足样本一律 null，不得用垃圾值开仓 ============
+{
+  // EMA 自播种，第 1 根就有数值；ema3 在前 2 根必须判 null，否则 `close above ema3` 会在预热期开仓
+  const b = bars([{ close: 10 }, { close: 20 }, { close: 30 }, { close: 40 }]);
+  const s = buildSeries('600000', b, [
+    { mode: 'all', rules: [{ kind: 'ma', maType: 'ema', left: 'close', period: 3, relation: 'above' }] },
+  ]);
+  const rule = { kind: 'ma', maType: 'ema', left: 'close', period: 3, relation: 'above' } as const;
+  assert.equal(evalRule(rule, s, 0), false, 'EMA 第 1 根必须判不足样本，不能等于当根收盘价');
+  assert.equal(evalRule(rule, s, 1), false, 'EMA 预热期一律 false');
+  assert.equal(evalRule(rule, s, 2), true, 'EMA 满周期后正常求值');
+
+  // MACD：DEA 的 EMA(9) 也要吃满才认交叉，第 26 根附近的金叉建立在 dea≈dif 的无意义信号线上
+  const rise = bars(Array.from({ length: 60 }, (_, i) => ({ close: 100 + i })));
+  const ms = buildSeries('600000', rise, [
+    { mode: 'all', rules: [{ kind: 'macd', signal: 'goldCross' }] },
+  ]);
+  for (let i = 0; i < 26 + 9; i++) {
+    assert.equal(ms.macd[i], null, `MACD 第 ${i} 根应判预热未完成`);
+  }
+  assert.ok(ms.macd[26 + 9] != null, 'MACD 满 26+9 根后应出值');
+
+  // KDJ：国内 1/3 递推口径，全程单调上涨时 K 应逼近 100 且 K>D（国际口径的 SMA 平滑读数不同）
+  const ks = buildSeries('600000', rise, [{ mode: 'all', rules: [{ kind: 'kdj', signal: 'kAbove', value: 80 }] }]);
+  assert.equal(ks.kdj[7], null, 'KDJ 不足 9 根应为 null');
+  assert.ok(ks.kdj[8] != null, 'KDJ 第 9 根起出值');
+  const lastK = ks.kdj[rise.length - 1]!;
+  assert.ok(lastK.k > 80 && lastK.k <= 100, `单边上涨 K 应高位，实际 ${lastK.k}`);
+  assert.ok(lastK.k > lastK.d, '单边上涨 K 应在 D 上方');
+  assert.ok(Math.abs(lastK.j - (3 * lastK.k - 2 * lastK.d)) < 1e-9, 'J = 3K - 2D');
+}
+
+// ============ 7. spec 运行时校验：非法窗口参数必须被拒，不能跑出假曲线 ============
+{
+  const bad: PlaybookSpec = {
+    ...baseSpec,
+    // days=0 时 `i < 0` 恒不成立、`bars.slice(i,i)` 为空、Math.max() 得 -Infinity，
+    // 于是每根 bar 都判「创新高」，产出一条每日开仓的假曲线
+    entry: { mode: 'all', rules: [{ kind: 'extreme', extreme: 'newHigh', days: 0 }] },
+    exit: { mode: 'any', rules: [] },
+    maxHoldBars: 2,
+  };
+  assert.throws(() => validatePlaybookSpec(bad), PlaybookSpecError, 'days=0 必须被拒');
+  assert.throws(
+    () => validatePlaybookSpec({ ...baseSpec, barLimit: 0 } as PlaybookSpec),
+    PlaybookSpecError,
+    'barLimit=0 必须被拒',
+  );
+  assert.throws(
+    () => validatePlaybookSpec({ ...baseSpec, entry: { mode: 'all', rules: [{ kind: 'rsi', period: -3, op: 'gt', value: 50 }] } } as PlaybookSpec),
+    PlaybookSpecError,
+    '负周期必须被拒',
+  );
+  const ok: PlaybookSpec = {
+    ...baseSpec,
+    entry: { mode: 'all', rules: [{ kind: 'extreme', extreme: 'newHigh', days: 20 }] },
+    exit: { mode: 'any', rules: [{ kind: 'pnlPct', op: 'lte', value: -5 }] },
+  };
+  assert.equal(validatePlaybookSpec(ok), ok, '合法 spec 应原样透传');
+
+  // 生产代码用 `?.` 容忍 universe/entry/exit 整体缺失（resolveUniverse 有默认值、
+  // assertRunnableSpec 明确放行「没有 exit 字段、只配止损」的 spec），schema 不得先把它判 400
+  const noExit = { period: 'day', barLimit: 500, fill: 'nextOpen', entry: ok.entry, stopLossPct: 5 };
+  assert.equal(validatePlaybookSpec(noExit), noExit, '缺 exit 字段（只配止损）的 spec 必须放行');
+  const bare = { period: 'day', barLimit: 500, fill: 'nextOpen' };
+  assert.equal(validatePlaybookSpec(bare), bare, '缺 universe/entry/exit 交给 assertRunnableSpec 报人话');
+
+  // codes 先 trim 再校验值域：resolveUniverse 本来就 trim，历史脏数据不该被判非法
+  const padded = { ...ok, universe: { kind: 'codes', codes: [' 600000', '000001\n'] } };
+  assert.equal(validatePlaybookSpec(padded), padded, '带空白的代码应先 trim 再校验');
+  assert.throws(
+    () => validatePlaybookSpec({ ...ok, universe: { kind: 'codes', codes: ['60000'] } } as PlaybookSpec),
+    PlaybookSpecError,
+    '5 位代码仍必须被拒',
+  );
+
+  // 止损/止盈 0：UI 的 :min="0" 放行、后端判空用 `!= null` 把 0 当已启用，schema 不能单方面拒
+  const zeroStop = { ...ok, stopLossPct: 0, takeProfitPct: 0 };
+  assert.equal(validatePlaybookSpec(zeroStop), zeroStop, '止损/止盈填 0 必须与 UI、后端语义一致地放行');
+  assert.throws(
+    () => validatePlaybookSpec({ ...ok, stopLossPct: -1 } as PlaybookSpec),
+    PlaybookSpecError,
+    '负止损仍必须被拒',
+  );
+}
+
+// ============ 8. 组合权益合成：新标的入池不得造出假回撤 ============
+{
+  // 每只标的的 equityByDate 都从它自己第一根 bar 起算、初值 1。
+  // 直接对「当日有数据的标的」的权益取平均，会在 B 首次出现数据那天把均值从 2.0 拉到 1.5，
+  // 凭空造出 −25% 的单日回撤，而 maxDrawdownPct 正是从这条曲线取的。
+  const run = (code: string, pairs: Array<[string, number]>): SymbolRun => ({
+    code,
+    trades: [],
+    equityByDate: new Map(pairs),
+    badEntryPrice: false,
+  });
+  const a = run('AAA', [['2026-01-01', 1], ['2026-01-02', 2], ['2026-01-03', 2], ['2026-01-04', 2]]);
+  const b = run('BBB', [['2026-01-03', 1], ['2026-01-04', 1.1]]);
+  const eq = combineEquity([a, b]);
+  assert.deepEqual(eq.map((p) => p.date), ['2026-01-01', '2026-01-02', '2026-01-03', '2026-01-04']);
+  assert.equal(eq[0].equity, 1, '首日无前值可比，权益应为 1');
+  assert.equal(eq[1].equity, 2, 'A 单只翻倍，组合权益应为 2');
+  assert.equal(eq[2].equity, 2, 'B 入池当天不得把组合权益拉回 1.5');
+  // B 从次日起才贡献收益：(0% + 10%) / 2 = +5%
+  assert.ok(Math.abs(eq[3].equity - 2.1) < 1e-9, `B 入池次日应按等权收益计入，实际 ${eq[3].equity}`);
+  let peak = 1;
+  let maxDD = 0;
+  for (const p of eq) {
+    peak = Math.max(peak, p.equity);
+    maxDD = Math.min(maxDD, p.equity / peak - 1);
+  }
+  assert.equal(maxDD, 0, '全程无下跌，最大回撤必须为 0');
+
+  // 中途缺数据（停牌）按上一可得值延续，不得当成「权益归 1」
+  const holed = run('CCC', [['2026-01-01', 1], ['2026-01-03', 1.2]]);
+  const steady = run('DDD', [['2026-01-01', 1], ['2026-01-02', 1], ['2026-01-03', 1]]);
+  const eqHoled = combineEquity([holed, steady]);
+  assert.equal(eqHoled[1].equity, 1, '停牌当日只按有数据的标的算收益，权益不动');
+  assert.ok(Math.abs(eqHoled[2].equity - 1.1) < 1e-9, `跨缺口那天记一次跨缺口涨跌，实际 ${eqHoled[2].equity}`);
 }
 
 console.log('✓ 战法回测引擎自检通过');

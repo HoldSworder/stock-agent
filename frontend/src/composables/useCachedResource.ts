@@ -56,6 +56,12 @@ export function useCachedResource<T>(
   const loading = ref(false);
   const refreshing = ref(false);
   const error = ref<unknown>(null);
+  /**
+   * 请求代际。key 支持 getter，快速连切参数（电报窗口、KOL 平台）时会有多发在飞，
+   * 而后端 concepts/hot 之类的超时给到 60s，窗口足够大——后返回的旧请求会覆盖新数据，
+   * loading/refreshing 也会被先完成的那一发提前复位。写回前必须确认自己仍是最新一发。
+   */
+  let token = 0;
 
   async function fetchInto(k: string): Promise<void> {
     const hasData = data.value != null;
@@ -63,17 +69,29 @@ export function useCachedResource<T>(
     if (hasData) refreshing.value = true;
     else loading.value = true;
     error.value = null;
+    const mine = ++token;
+    /** 自己仍是最新一发、且 key 没被切走时才允许写回 data */
+    const isCurrent = (): boolean => mine === token && resolveKey() === k;
+    /**
+     * loading/refreshing 的复位只判代际：key 已切走时 isCurrent 恒为假，
+     * 若连复位也一并跳过，切回原 key（走缓存早退）后就没有任何一发会再复位，面板永久转圈。
+     */
+    const ownsFlags = (): boolean => mine === token;
     try {
       const result = await fetcher();
-      data.value = result;
+      // 缓存与 key 一一对应，落库无害；只有写回 data 需要判代际
       store.set(k, { data: result, fetchedAt: Date.now() });
+      if (isCurrent()) data.value = result;
     } catch (e) {
+      if (!isCurrent()) return; // 已被更新的一发接管，失败也不该冒泡干扰调用方
       error.value = e;
       // 保留已有 data（serve-stale），无旧数据时由调用方根据 error 处理
       if (!hasData) throw e;
     } finally {
-      loading.value = false;
-      refreshing.value = false;
+      if (ownsFlags()) {
+        loading.value = false;
+        refreshing.value = false;
+      }
     }
   }
 
@@ -82,7 +100,14 @@ export function useCachedResource<T>(
     const entry = store.get(k) as CacheEntry<T> | undefined;
     // 切到新 key 且无缓存时清空旧数据，避免串显上一个参数的内容
     data.value = entry ? entry.data : null;
-    if (entry && !force && Date.now() - entry.fetchedAt < ttlMs) return; // 新鲜且非强刷：纯内存命中
+    if (entry && !force && Date.now() - entry.fetchedAt < ttlMs) {
+      // 纯内存命中也要作废在飞的旧请求并收掉它的 loading：
+      // 否则「切走 → 切回有缓存的 key」时，旧请求回来发现 key 已变而不复位，转圈永不停止。
+      token += 1;
+      loading.value = false;
+      refreshing.value = false;
+      return;
+    }
     await fetchInto(k);
   }
 

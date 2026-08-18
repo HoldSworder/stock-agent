@@ -158,6 +158,8 @@ export const symbolTradePlans = sqliteTable(
     name: text('name').notNull(),
     /** stock | etf | index */
     assetType: text('asset_type').notNull(),
+    /** 东财 secid（如 1.000300）。指数与个股撞码，缺它求值就会拿另一只标的的 K 线判触及 */
+    secid: text('secid'),
     version: integer('version').notNull(),
     /** next_session | swing */
     horizon: text('horizon').notNull(),
@@ -260,6 +262,8 @@ export const symbolPlanForecasts = sqliteTable(
     planId: text('plan_id').notNull(),
     planVersion: integer('plan_version').notNull(),
     code: text('code').notNull(),
+    /** 与计划同源的 secid，结算取 K 线必须用它而不是单凭 code 猜市场 */
+    secid: text('secid'),
     scenarioId: text('scenario_id').notNull(),
     scenarioRank: text('scenario_rank').notNull(),
     /** 模型报的主观概率 0~100 */
@@ -271,9 +275,11 @@ export const symbolPlanForecasts = sqliteTable(
     basePrice: real('base_price').notNull(),
     /** 到期日（含），过了这天无论如何都要判定 */
     dueDate: text('due_date').notNull(),
-    /** hit=先到目标价，miss=先破失效价，timeout=到期都没到 */
+    /** hit=先到目标价，miss=先破失效价，timeout=到期都没到，unjudgeable=永远判不了（不计入校准分母） */
     outcome: text('outcome'),
     settledAt: text('settled_at'),
+    /** 判不了的原因，仅 unjudgeable 时写；留痕以便事后追查而不是静默丢弃 */
+    settleNote: text('settle_note'),
     createdAt: text('created_at').notNull(),
   },
   (t) => ({
@@ -382,6 +388,12 @@ export const researchModeBacktests = sqliteTable(
      * 没有这个字段时，改完规则的新结果和旧结果会混在同一个版本列表里，看上去像是同一套策略的多次验证。
      */
     protocol: text('protocol').notNull().default(''),
+    /**
+     * 引擎语义版本（protocol 串的一部分，单列一份便于按版本过滤与回填）。
+     * 改造前的历史记录统一回填 v1-legacy：那批结果出自「supertrend 恒不触发 + 零成本回放」的引擎，
+     * 与新版收益不可横向比较。
+     */
+    engineVersion: text('engine_version'),
     createdAt: text('created_at').notNull(),
   },
   (t) => ({ byMode: index('idx_mode_bt_mode').on(t.modeId) }),
@@ -403,6 +415,22 @@ export const researchModeDaily = sqliteTable(
     drawdown: real('drawdown'),
     /** system / external */
     source: text('source').notNull().default('system'),
+    // ===== 引擎协议标记 =====
+    // 引擎规则一改（修好一条从未触发的离场、给回放加上成本），同一份 spec 就会跑出不同曲线。
+    // 旧行不删不改，靠这几列区分口径，晋级门只取「与最新快照同协议的连续区段」，避免新旧样本混算。
+    /** 完整口径串，如 v2-2026.08|themeFirst|univ=db-etf-pool:71440cd7…:53|cost=b25/s25bps */
+    protocolVersion: text('protocol_version'),
+    /** 引擎语义版本；null / v1-legacy = 加列之前的历史行 */
+    engineVersion: text('engine_version'),
+    /** db-etf-pool / research-fallback / custom */
+    universePolicy: text('universe_policy'),
+    /** 排序后实际引擎输入的哈希（含影响主题归类的规范化名称） */
+    universeHash: text('universe_hash'),
+    poolSize: integer('pool_size'),
+    costBuyBps: real('cost_buy_bps'),
+    costSellBps: real('cost_sell_bps'),
+    /** 与该模式研究基准池是否同源；null = 未知（历史行或 modeId 无研究基准） */
+    sameAsResearchPool: integer('same_as_research_pool', { mode: 'boolean' }),
     createdAt: text('created_at').notNull(),
   },
   (t) => ({ byKey: uniqueIndex('idx_mode_daily_key').on(t.modeId, t.date) }),

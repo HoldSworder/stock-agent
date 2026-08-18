@@ -28,10 +28,13 @@ function mean(xs: number[]): number {
 async function trendScore(code: string): Promise<number | null> {
   const bars = await getKline(code, 'day', KLINE_DAYS).catch(() => []);
   if (bars.length < 20) return null;
-  const closes = bars.map((b) => b.close).filter((c) => c > 0);
-  const highs = bars.map((b) => b.high).filter((h) => h > 0);
-  const vols = bars.map((b) => b.volume).filter((v) => v > 0);
-  if (closes.length < 20) return null;
+  // 按 bar 整行过滤再拆数组：三个序列各自 filter 会破坏索引对齐（停牌日 volume=0 是常态），
+  // 于是 vols 的末位未必对应最新那根 K 线，highs.slice(-20) 与 closes.slice(-20) 也可能落在不同的 20 天上。
+  const valid = bars.filter((b) => b.close > 0 && b.high > 0);
+  if (valid.length < 20) return null;
+  const closes = valid.map((b) => b.close);
+  const highs = valid.map((b) => b.high);
+  const vols = valid.map((b) => b.volume);
 
   const last = closes[closes.length - 1];
   const ma = (n: number) => mean(closes.slice(-n));
@@ -51,10 +54,11 @@ async function trendScore(code: string): Promise<number | null> {
   const proximity = high20 > 0 ? last / high20 : 0;
   const highScore = clamp((proximity - 0.8) / 0.2 * 100); // 0.8 以下记 0，1.0 满分
 
-  // ③ 量能放大：最新量 / 近 5 日均量（不含最新），理想 1.5-2.5 倍
+  // ③ 量能放大：最新量 / 近 5 日均量（不含最新），理想 1.5-2.5 倍。
+  // 最新一根为停牌日（量 0）时该维度无信号，记中性 ratio=1，不当成「缩量到极致」打 0 分。
   const recentVol = vols[vols.length - 1] ?? 0;
-  const baseVol = mean(vols.slice(-6, -1));
-  const ratio = baseVol > 0 ? recentVol / baseVol : 1;
+  const baseVol = mean(vols.slice(-6, -1).filter((v) => v > 0));
+  const ratio = recentVol > 0 && baseVol > 0 ? recentVol / baseVol : 1;
   const volScore = ratio <= 1 ? clamp(ratio * 40) : clamp(40 + (ratio - 1) * 40);
 
   return clamp(Math.round(maScore * 0.5 + highScore * 0.3 + volScore * 0.2));

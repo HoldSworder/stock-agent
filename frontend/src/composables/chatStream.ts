@@ -73,6 +73,22 @@ export function useChatStream(opts: ChatStreamOptions) {
   let runGen = 0;
   /** 当前 socket 上正在接收的 run 属于哪一代；0 表示没有在飞 run */
   let activeGen = 0;
+  /**
+   * runId → 世代号。两个全局计数器现场比较判不出归属：
+   * 切标的只递增 runGen 不等旧 run 收尾，用户随即发新消息使 activeGen === runGen，
+   * 旧 run 迟到的 run_finished 就会被当成新 run 的收尾，把新 run 的 busy/activeGen 清掉，
+   * 之后新 run 的所有内容事件都被丢弃，气泡永远空白且无任何报错。
+   * 后端 run_started/run_finished 都带 runId，按 runId 查回它自己的世代才能正确归属。
+   */
+  const genOfRun = new Map<string, number>();
+  /**
+   * 已发出但还没收到 run_started 的世代队列（FIFO，与后端在同一条 socket 上的应答顺序一致）。
+   * 只按「当前世代」认领 run_started 是不够的：切会话只递增 runGen，随后 send() 使
+   * activeGen === runGen，此时旧 run 迟到的 run_started 会被钉到新世代，
+   * 它后面的 run_finished 就能通过校验、把新一轮的 busy 清掉。
+   * 按发送顺序配对后，迟到的那个 run_started 只会领到它自己那一代（已作废）。
+   */
+  const pendingRunGens: number[] = [];
   /** 握手期间挂起的发送，切会话时要能取消 */
   let pendingSend: AbortController | null = null;
 
@@ -108,6 +124,8 @@ export function useChatStream(opts: ChatStreamOptions) {
         /* 已关闭时忽略 */
       }
     }
+    // 换了连接，旧 socket 上待认领的 run_started 永远不会再来，留着会与新一发错位
+    pendingRunGens.length = 0;
     ws = openWs('/ws/chat');
     ws.onopen = () => {
       retryCount = 0;
@@ -126,8 +144,20 @@ export function useChatStream(opts: ChatStreamOptions) {
       // 但 run_finished / error 这类收尾事件要照常处理，否则 busy 会永久卡在「运行中」。
       const stale = activeGen !== runGen;
 
+      if (e.type === 'run_started') {
+        // 按发送顺序取回这一发所属的世代，收尾事件才有据可查（迟到的旧 run 领到的是旧世代）
+        const own = pendingRunGens.shift();
+        if (own != null) genOfRun.set(e.runId, own);
+        return;
+      }
       if (e.type === 'run_finished') {
-        if (!stale && e.status === 'canceled') {
+        // 按 runId 查回这个 run 自己的世代：查不到（run_started 早于本次连接 / 已清理）
+        // 或世代不是当前世代，都只做映射清理，绝不碰 busy 与 activeGen——
+        // 否则会把另一轮正在跑的 run 的状态误清成空闲。
+        const ownGen = genOfRun.get(e.runId);
+        genOfRun.delete(e.runId);
+        if (ownGen == null || ownGen !== runGen) return;
+        if (e.status === 'canceled') {
           // 用户停止：补一句占位，避免空气泡
           const cur = lastAssistant();
           if (cur && !cur.content.trim()) cur.steps.push({ kind: 'text', content: '(已停止)' });
@@ -135,16 +165,28 @@ export function useChatStream(opts: ChatStreamOptions) {
         runFinished = true;
         busy.value = false;
         activeGen = 0;
-        if (!stale) opts.onRunFinished?.();
+        opts.onRunFinished?.();
         return;
       }
       if (e.type === 'error') {
-        if (!stale) ElMessage.error(e.message);
+        // 带 runId 时按它查回自己的世代（与 run_finished 同一套归属判定）；
+        // 不带的老后端才退回世代比较。归属不上就只静默丢弃，绝不碰另一轮的状态。
+        if (e.runId != null) {
+          const ownGen = genOfRun.get(e.runId);
+          genOfRun.delete(e.runId);
+          if (ownGen == null || ownGen !== runGen) return;
+        } else {
+          if (stale || activeGen === 0) return;
+        }
+        // 后端出错时会紧跟一个 run_finished，本轮已在这里收尾，
+        // 摘掉映射避免它再触发一次 onRunFinished
+        for (const [id, gen] of genOfRun) if (gen === activeGen) genOfRun.delete(id);
+        ElMessage.error(e.message);
         runFinished = true;
         busy.value = false;
         activeGen = 0;
         // 出错前 agent 可能已经落库了标注或计划，同样要通知调用方刷新
-        if (!stale) opts.onRunFinished?.();
+        opts.onRunFinished?.();
         return;
       }
 
@@ -197,7 +239,13 @@ export function useChatStream(opts: ChatStreamOptions) {
     if (!busy.value) return;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ action: 'stop' }));
+      return;
     }
+    // CONNECTING/CLOSING 时停止指令发不出去，若不本地收尾 busy 会一直为 true，
+    // 输入框与发送按钮永久禁用，用户只剩刷新页面一条路。
+    runFinished = true;
+    busy.value = false;
+    activeGen = 0;
   }
 
   async function send(sendOpts?: SendOptions): Promise<void> {
@@ -222,6 +270,8 @@ export function useChatStream(opts: ChatStreamOptions) {
     // 否则后端曾长时间不可用后计数打满，手动重试一次失败就再也不会自动重连
     retryCount = 0;
     activeGen = ++runGen;
+    // 世代号只增不减，比新世代旧的映射永远匹配不上，直接清掉避免无界增长
+    for (const [id, gen] of genOfRun) if (gen < activeGen) genOfRun.delete(id);
     const thinking = deepThinking.value;
     const planIntent = sendOpts?.planIntent;
     messages.value.push({ role: 'user', content, steps: [] });
@@ -238,6 +288,7 @@ export function useChatStream(opts: ChatStreamOptions) {
       // 切会话已把这轮作废，或连接已被替换，就不要再发出去凭空起一轮 run
       if (gen !== runGen || target.readyState !== WebSocket.OPEN) return;
       target.send(JSON.stringify({ sessionId, content, thinking, planIntent }));
+      pendingRunGens.push(gen); // 真的发出去才入队，否则与后端的应答顺序会错位
     };
     if (target.readyState === WebSocket.OPEN) {
       trySend();
@@ -257,7 +308,21 @@ export function useChatStream(opts: ChatStreamOptions) {
       clearTimeout(retryTimer);
       retryTimer = null;
     }
-    ws?.close();
+    genOfRun.clear();
+    pendingRunGens.length = 0;
+    // 必须先摘处理器再 close：onclose 里的中断提示在 closingByUser 判断之前，
+    // agent 还在跑时关掉弹窗会莫名弹出「连接中断，回答未完成，请重新发送」。
+    if (ws) {
+      const stale = ws;
+      stale.onmessage = null;
+      stale.onclose = null;
+      stale.onerror = null;
+      try {
+        stale.close();
+      } catch {
+        /* 已关闭时忽略 */
+      }
+    }
     ws = null;
   }
 

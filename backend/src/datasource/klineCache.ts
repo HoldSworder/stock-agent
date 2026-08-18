@@ -100,13 +100,22 @@ export function isFresh(updatedAt: string, now = new Date(), provisional = false
   const writtenDay = shanghaiToday(new Date(updatedAt));
   if (writtenDay === today) {
     if (provisional) {
-      if (!isAShareTradingTime(now)) return false;
+      if (!inTradingSession(now)) return false;
       return now.getTime() - new Date(updatedAt).getTime() < INTRADAY_MAX_AGE_MS;
     }
-    if (!isAShareTradingTime(now)) return true;
+    if (!inTradingSession(now)) return true;
     return now.getTime() - new Date(updatedAt).getTime() < INTRADAY_MAX_AGE_MS;
   }
-  return !isAShareTradingTime(now) && shanghaiClockMinutes(now) < OPEN_MINUTE;
+  return !inTradingSession(now) && shanghaiClockMinutes(now) < OPEN_MINUTE;
+}
+
+/**
+ * 是否真的处在连续竞价中：交易日 且 落在 09:30-11:30 / 13:00-15:00。
+ * 只用 isAShareTradingTime 不够——它不判节假日，于是国庆整周都被当成「盘中」，
+ * 缓存每 10 分钟对全市场整体失效，休市日反而把上游打满。与 isIntradayWindow 同口径。
+ */
+function inTradingSession(now: Date): boolean {
+  return isTradingDay(now) && isAShareTradingTime(now);
 }
 
 /**
@@ -241,25 +250,79 @@ export async function getDailyCached(
   const newest = cached[cached.length - 1];
   if (
     !opts.fresh &&
-    cached.length >= limit &&
+    hasEnoughCached(code, secid, cached.length, limit) &&
     newest &&
     isFresh(newest.updatedAt, new Date(), newest.provisional === 1)
   ) {
-    return adjustedFromCache(cached);
+    // 命中路径也要走同一道临时 bar 剔除：收盘回填失败时当日行会停在 provisional=1，
+    // 次日开盘前 isFresh 的跨日分支判它新鲜，于是那根合成的假 bar 会从这里原样交出去。
+    return fallbackFromCache(cached);
   }
   try {
     const fetched = await fetcher();
     if (fetched.length > 0) {
+      lastFetchedCount.set(cacheKeyOf(code, secid), { requested: limit, got: fetched.length });
       writeCachedDaily(code, secid, fetched);
       return fetched;
     }
   } catch (e) {
     // 回源失败时，有旧缓存就先顶上（这正是本模块要消灭的整块降级），无缓存才继续抛
-    if (cached.length > 0) return adjustedFromCache(cached);
+    if (cached.length > 0) return fallbackFromCache(cached);
     throw e;
   }
-  if (cached.length > 0) return adjustedFromCache(cached);
+  if (cached.length > 0) return fallbackFromCache(cached);
   return [];
+}
+
+const cacheKeyOf = (code: string, secid: string): string => `${code}|${secid}`;
+
+/**
+ * 上次回源的「请求根数」与「实际拿到根数」（key = code|secid）。
+ *
+ * 必须同时记住 requested：只记 got 无法区分「上游只有这么多」与「上次只要了这么多」。
+ * 同一只标的在全仓被以差异极大的 limit 请求（盯盘 3 根、regime 260 根、ETF 500 根），
+ * 只比 got 会让「上次要 260 拿到 260」被误判成「历史只有 260 根」，
+ * 之后 500 根的请求永久命中 260 行的短缓存，静默返回被截断的历史——
+ * 而 MA120／回测／ETF 这类消费方拿到短序列不会报错，只会算出偏短窗口的指标。
+ *
+ * ponytail: 进程内 Map，重启后第一次读会多回源一次即重新学到，故不落库。
+ * 上限是缓存宇宙的标的数，不会随请求量增长。
+ */
+const lastFetchedCount = new Map<string, { requested: number; got: number }>();
+
+/**
+ * 缓存深度是否够用。不能只判 cached.length >= limit：新上市几个月的标的历史本就不足
+ * 250 根（getKline 默认 limit），那样它永远命中不了缓存、每次都全量回源，
+ * 恰恰丢掉了「上游一慢就整块降级」的防护。
+ *
+ * 放宽的唯一依据是「上次回源被上游截断」（got < requested），即已经触达该标的历史起点；
+ * 拿满的那次说明不到起点，不能作为放宽依据。判据与当前 limit 无关。
+ */
+function hasEnoughCached(code: string, secid: string, cachedLen: number, limit: number): boolean {
+  if (cachedLen >= limit) return true;
+  const rec = lastFetchedCount.get(cacheKeyOf(code, secid));
+  return rec != null && rec.got < rec.requested && cachedLen >= rec.got;
+}
+
+/**
+ * 回源失败/取空时的缓存兜底：非交易时段遇到末根 provisional 一律剔除那一根。
+ *
+ * 临时 bar 的 high/low/close 由 max/min(参考价, 现价) 合成，三者必然共线，
+ * 下游（如 symbolPlans/volumePrice 的收盘位置）会把它当成已收盘完整日线解读，
+ * 算出恒为 1.0 或 0.0 的「突破获量能确认」——那是一个被确定性伪造的信号。
+ * 少一根完整日线远好过多一根假的；盘中读取临时 bar 的既有行为不受影响。
+ */
+function fallbackFromCache(rows: CachedRow[], now = new Date()): KlineBar[] {
+  if (dropsTrailingProvisional(rows[rows.length - 1], now)) return adjustedFromCache(rows.slice(0, -1));
+  return adjustedFromCache(rows);
+}
+
+/** 兜底返回时末根该不该丢：非交易时段的临时 bar 一律丢（判据见 fallbackFromCache） */
+export function dropsTrailingProvisional(
+  newest: { provisional: number } | undefined,
+  now = new Date(),
+): boolean {
+  return newest?.provisional === 1 && !inTradingSession(now);
 }
 
 /**
@@ -325,14 +388,29 @@ export function getCacheStats(): KlineCacheStats {
   };
 }
 
-/** 已缓存的全部标的代码（预热与盘中追加以此为宇宙，避免为不关心的标的白拉数据） */
+/** 已缓存的全部标的代码（盘中批量报价以此为宇宙，避免为不关心的标的白拉数据） */
 export function listCachedCodes(): string[] {
-  return db
-    .selectDistinct({ code: schema.klineDaily.code })
-    .from(schema.klineDaily)
-    .orderBy(asc(schema.klineDaily.code))
-    .all()
-    .map((r) => r.code);
+  return [...new Set(listCachedSymbols().map((s) => s.code))];
+}
+
+/** 缓存里的一个标的身份：code 单独不足以定位（上证指数 000001 与平安银行 000001 撞码） */
+export interface CacheSymbol {
+  code: string;
+  secid: string;
+}
+
+/** 已缓存的全部 (code, secid) 对；预热宇宙必须按对来，否则显式 secid 的指数会被漏掉或误删 */
+export function listCachedSymbols(): CacheSymbol[] {
+  return (
+    db
+      .selectDistinct({ code: schema.klineDaily.code, secid: schema.klineDaily.secid })
+      .from(schema.klineDaily)
+      .orderBy(asc(schema.klineDaily.code))
+      .all()
+      // 历史脏行（code 为空、只有 secid）必须挡在这里：它们取数必然失败，
+      // 会让每一轮预热都固定报一批 failed，把真正需要关注的失败淹掉。
+      .filter((r) => !!r.code?.trim())
+  );
 }
 
 /** 并发受限 map（与 breadth 同口径，控制对上游的瞬时压力） */
@@ -358,45 +436,62 @@ export interface PrewarmResult {
 
 /**
  * 预热：为给定标的批量拉取前复权日线并落库（预热 PREWARM_BARS 根，全量重刷 FULL_REFRESH_BARS 根）。
- * 预热宇宙都是 6 位代码，secid 一律取默认映射；指数等需显式 secid 的标的由 getKline 按需回源。
+ *
+ * 标的身份必须是 (code, secid) 对而非纯 code：旧实现对所有标的一律 toSecid(code)，
+ * 只为个股写了新基准行，而全量重刷的旧行清理又只按 code 过滤——
+ * 上证指数（1.000001，显式 secid）与平安银行（0.000001）撞码，指数历史每周被整段删空。
+ * 纯字符串入参仍兼容（按 toSecid 默认映射），方便调用方与自检逐步迁移。
+ *
  * @param full 全量重刷：推进复权基准日并覆盖全部历史行（每周一次，防前复权口径漂移）
  */
 export async function prewarmDaily(
-  codes: string[],
+  symbols: Array<string | CacheSymbol>,
   fetcher: (code: string, secid: string, limit: number) => Promise<KlineBar[]>,
   opts: { full?: boolean; concurrency?: number } = {},
 ): Promise<PrewarmResult> {
   const full = opts.full === true;
   const adjBase = full ? shanghaiToday() : currentAdjBase();
   const bars = full ? FULL_REFRESH_BARS : PREWARM_BARS;
+  const targets: CacheSymbol[] = symbols.map((s) =>
+    typeof s === 'string' ? { code: s, secid: toSecid(s) } : s,
+  );
   let failed = 0;
   const errors: string[] = [];
-  const okCodes: string[] = [];
-  await mapLimit(codes, opts.concurrency ?? 4, async (code) => {
-    const secid = toSecid(code);
+  const okSymbols: CacheSymbol[] = [];
+  await mapLimit(targets, opts.concurrency ?? 4, async ({ code, secid }) => {
     try {
       const fresh = await fetcher(code, secid, bars);
       if (fresh.length === 0) throw new Error('返回空日线');
       writeCachedDaily(code, secid, fresh, { adjBase });
-      okCodes.push(code);
+      okSymbols.push({ code, secid });
     } catch (e) {
       failed += 1;
       if (errors.length < 3) errors.push(`${code}: ${e instanceof Error ? e.message : String(e)}`);
     }
   });
-  const ok = okCodes.length;
-  if (full && okCodes.length > 0) {
+  const ok = okSymbols.length;
+  if (full && okSymbols.length > 0) {
     // 基准推进后清掉旧基准残留行，避免同一标的混两套复权口径。
-    // 只清「本轮成功写入新基准」的标的：本轮取数失败的标的没有新行，无条件按基准删会清空它的全部历史。
-    for (let i = 0; i < okCodes.length; i += 400) {
-      db.delete(schema.klineDaily)
-        .where(
-          and(
-            inArray(schema.klineDaily.code, okCodes.slice(i, i + 400)),
-            sql`${schema.klineDaily.adjBase} <> ${adjBase}`,
-          ),
-        )
-        .run();
+    // 只清「本轮成功写入新基准」的 (code, secid) 对：只按 code 删会连带清空同码不同 secid 的标的；
+    // 本轮取数失败的标的没有新行，无条件按基准删会清空它的全部历史。
+    const bySecid = new Map<string, string[]>();
+    for (const s of okSymbols) {
+      const list = bySecid.get(s.secid) ?? [];
+      list.push(s.code);
+      bySecid.set(s.secid, list);
+    }
+    for (const [secid, codes] of bySecid) {
+      for (let i = 0; i < codes.length; i += 400) {
+        db.delete(schema.klineDaily)
+          .where(
+            and(
+              eq(schema.klineDaily.secid, secid),
+              inArray(schema.klineDaily.code, codes.slice(i, i + 400)),
+              sql`${schema.klineDaily.adjBase} <> ${adjBase}`,
+            ),
+          )
+          .run();
+      }
     }
   }
   writeMeta({
@@ -406,7 +501,7 @@ export async function prewarmDaily(
     lastError: failed > 0 ? `${failed} 只失败：${errors.join(' | ')}` : null,
     ...(full ? { lastFullRefreshAt: nowIso() } : {}),
   });
-  return { total: codes.length, ok, failed, adjBase };
+  return { total: targets.length, ok, failed, adjBase };
 }
 
 /**
@@ -417,8 +512,8 @@ export async function prewarmDaily(
  * 覆盖 9-14 点整段，会在 09:00/09:10/09:20 触发，那时报价的 price 就是昨收，写进去等于伪造一根当日 bar。
  *
  * ponytail: StockQuote 只有现价/昨收/成交额，没有当日 OHLC 与成交量。当日 bar 的 open 用昨收近似
- * （除权日的未除权昨收会被弃用，见 intradayOpenRef）、high/low 用 max/min(现价, 参考价) 近似，
- * volume 由成交额反推，故临时 bar 的振幅被低估、
+ * （除权日的未除权昨收会被弃用，见 intradayOpenRef）、high/low 由历次采样的 max/min 累积
+ * （见 mergeIntradayBar，两次采样之间的极值仍会漏掉），volume 由成交额反推，故临时 bar 的振幅仍偏窄、
  * 量能是估算值（不是撮合真实手数）。该行 provisional=1，收盘后预热会用真实日线整行覆盖。
  * 要精确盘中 OHLC/量能需换带这些字段的报价源。
  */
@@ -441,6 +536,42 @@ export function intradayOpenRef(prevClose: number, price: number): number {
   return price / prevClose < 1 - SPLIT_GAP ? price : prevClose;
 }
 
+/**
+ * 合成当日临时 bar：库里已有当日行时在其上累积，没有才从报价凭空造一根。
+ *
+ * 为什么必须累积而不是整行覆盖：K 线弹窗的 fresh=1 已把上游真实当日 OHLC 写进这一行，
+ * 十分钟后本任务用 max/min(参考价, 现价) 整行盖掉，真实最高/最低就被抹成两点之间的直线，
+ * 当日振幅与 ATR 被系统性低估。对上一轮自己写的临时行同样累积——它记的是历次采样的极值，
+ * 比单点快照更接近真实振幅。
+ *
+ * 例外是除权/份额折算日：折算前写下的那行仍停在旧价位，累积会把旧高点带进新价位的 bar
+ * （正是 intradayOpenRef 要避免的假 K），故现价相对旧行 open 跌破 SPLIT_GAP 时整行弃用重造。
+ *
+ * @param prev 库里当日那一行（无则 undefined）
+ */
+export function mergeIntradayBar(
+  prev: KlineBar | undefined,
+  next: KlineBar,
+): KlineBar {
+  const usable = prev && prev.open > 0 && next.close / prev.open >= 1 - SPLIT_GAP;
+  if (!usable) return next;
+  // 成交额是当日累计值、真正单调，取 max 防某一轮报价滞后把读数打回去。
+  const amount = Math.max(prev.amount, next.amount);
+  return {
+    time: next.time,
+    open: prev.open,
+    high: Math.max(prev.high, next.high),
+    low: Math.min(prev.low, next.low),
+    close: next.close,
+    // volume 不能同样取 max：它不是上游给的累计量，而是由 amount ÷ 现价 ÷ 每手股数估算出来的
+    // （见 appendIntradayBars）。分母随价格波动，价格上行时同一份成交额会推出更小的手数，
+    // 取 max 会把当日量能永久钉在「价格最低那一刻算出的最大估值」上、再也回不来，
+    // 直接抬高量比与放量确认。改为与合并后的 amount 同源重算，保证两者口径一致。
+    volume: next.close > 0 ? Math.round(amount / next.close / SHARES_PER_LOT) : next.volume,
+    amount,
+  };
+}
+
 export function appendIntradayBars(quotes: StockQuote[], now = new Date()): number {
   if (!isIntradayWindow(now)) return 0;
   const today = shanghaiToday(now);
@@ -453,24 +584,21 @@ export function appendIntradayBars(quotes: StockQuote[], now = new Date()): numb
     const amountYuan = (q.amount ?? 0) * 1e8; // StockQuote.amount 单位是亿元，KlineBar.amount 是元
     if (!(amountYuan > 0)) continue;
     const secid = toSecid(q.code);
-    if (readCachedDaily(q.code, secid, 1).length === 0) continue; // 未预热过的标的不凭空建行
+    const newest = readCachedDaily(q.code, secid, 1)[0];
+    if (!newest) continue; // 未预热过的标的不凭空建行
     const ref = intradayOpenRef(q.prevClose, q.price);
-    writeCachedDaily(
-      q.code,
-      secid,
-      [
-        {
-          time: today,
-          open: ref,
-          high: Math.max(ref, q.price),
-          low: Math.min(ref, q.price),
-          close: q.price,
-          volume: Math.round(amountYuan / q.price / SHARES_PER_LOT), // 估算手数：成交额 ÷ 现价 ÷ 每手股数
-          amount: amountYuan,
-        },
-      ],
-      { adjBase, provisional: true },
-    );
+    const synthesized: KlineBar = {
+      time: today,
+      open: ref,
+      high: Math.max(ref, q.price),
+      low: Math.min(ref, q.price),
+      close: q.price,
+      volume: Math.round(amountYuan / q.price / SHARES_PER_LOT), // 估算手数：成交额 ÷ 现价 ÷ 每手股数
+      amount: amountYuan,
+    };
+    const bar = mergeIntradayBar(newest.time === today ? newest : undefined, synthesized);
+    // 仍标 provisional：这根终究不是收盘定格的日线，收盘后必须回源刷成真实行
+    writeCachedDaily(q.code, secid, [bar], { adjBase, provisional: true });
     n += 1;
   }
   if (n > 0) writeMeta({ lastIntradayAt: nowIso() });

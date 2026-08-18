@@ -72,6 +72,7 @@ export async function getTrendsTencent(code: string, secid?: string): Promise<Tr
   const rows = node.data?.data ?? [];
   const qt = node.qt?.[txcode] ?? [];
   const prevClose = num(qt[4]);
+  const tradeDate = toTradeDate(node.data?.date);
 
   let prevCumVol = 0;
   const points: TrendPoint[] = rows.map((row) => {
@@ -96,7 +97,18 @@ export async function getTrendsTencent(code: string, secid?: string): Promise<Tr
     name: String(qt[1] ?? ''),
     prevClose,
     points,
+    ...(tradeDate ? { tradeDate } : {}),
   };
+}
+
+/**
+ * 腾讯分时的 data.date → YYYY-MM-DD。实测有 "20260807" 与 "260807" 两种写法，
+ * 都补齐成完整日期；认不出的形态返回 null（宁可缺字段，也不给消费方一个错日期）。
+ */
+function toTradeDate(raw: string | undefined): string | null {
+  const s = String(raw ?? '');
+  const full = /^\d{8}$/.test(s) ? s : /^\d{6}$/.test(s) ? `20${s}` : '';
+  return full ? `${full.slice(0, 4)}-${full.slice(4, 6)}-${full.slice(6, 8)}` : null;
 }
 
 /**

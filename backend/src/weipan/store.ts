@@ -19,7 +19,9 @@ export function listWeipanAlerts(limit = 100, todayOnly = false): WeipanAlert[] 
   const src = todayOnly
     ? alerts.filter((a) => shanghaiToday(new Date(a.createdAt)) === shanghaiToday())
     : alerts;
-  return src.slice(0, Math.max(1, limit));
+  // slice(0, NaN) 会返回空数组，用户看到的是「无告警」而不是「参数错了」，故非数字回落默认条数
+  const safe = Number.isFinite(limit) ? Math.min(Math.max(Math.floor(limit), 1), CAP) : 100;
+  return src.slice(0, safe);
 }
 
 export function countWeipanAlertsToday(): number {

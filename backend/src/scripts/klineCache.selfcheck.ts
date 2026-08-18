@@ -5,7 +5,13 @@ import assert from 'node:assert/strict';
 import type { KlineBar } from '@stock-agent/shared';
 import { volumeUnitDivisor } from '../astock/market';
 import { frontAdjustDaily, frontAdjustMinute } from '../datasource/adjust';
-import { isFresh, isIntradayWindow, intradayOpenRef } from '../datasource/klineCache';
+import {
+  isFresh,
+  isIntradayWindow,
+  intradayOpenRef,
+  dropsTrailingProvisional,
+  mergeIntradayBar,
+} from '../datasource/klineCache';
 import { fetchDailyAdjusted } from '../datasource/scheduler';
 import { KLINE_PROVIDERS_DAILY } from '../datasource/providers';
 
@@ -81,6 +87,40 @@ assert.equal(isIntradayWindow(sh('2026-08-04T12:00:00')), true, '午休仍在开
 assert.equal(isIntradayWindow(sh('2026-08-04T15:00:00')), false, '15:00 起交由收盘预热写正式行');
 assert.equal(isIntradayWindow(sh('2026-08-08T10:00:00')), false, '非交易日（周六）不得追加');
 
+// 9b. 新鲜度判据必须排除法定节假日。只按星期与时钟判的话，国庆这种整周休市日
+// 会被当成「盘中」，当天写入的缓存每 10 分钟就对全市场整体失效一次，
+// 休市日反而把上游打满。10-01 是周四，落在 09:30-11:30 内。
+assert.equal(
+  isFresh(sh('2026-10-01T09:00:00').toISOString(), sh('2026-10-01T10:30:00')),
+  true,
+  '节假日不是交易日，当天写入的缓存不应按盘中 10 分钟窗口失效',
+);
+assert.equal(
+  isFresh(sh('2026-08-04T09:00:00').toISOString(), sh('2026-08-04T10:30:00')),
+  false,
+  '真正的交易日仍须按 10 分钟窗口失效（节假日判据不得放宽正常盘中）',
+);
+
+// ===== 9c. 回源失败兜底：非交易时段的末根临时 bar 必须剔除 =====
+// 临时 bar 的 high/low/close 由 max/min(参考价, 现价) 合成必然共线，
+// 当成已收盘完整日线交给下游，会把「收盘位置」算成恒等于 1.0 或 0.0 的伪信号。
+assert.equal(
+  dropsTrailingProvisional({ provisional: 1 }, sh('2026-08-04T15:05:00')),
+  true,
+  '收盘后兜底返回缓存时必须剔除末根临时 bar',
+);
+assert.equal(
+  dropsTrailingProvisional({ provisional: 1 }, sh('2026-08-04T10:30:00')),
+  false,
+  '盘中读取临时 bar 是既有行为，不得因本修复被改掉',
+);
+assert.equal(
+  dropsTrailingProvisional({ provisional: 0 }, sh('2026-08-04T15:05:00')),
+  false,
+  '正式收盘行不得被误剔除',
+);
+assert.equal(dropsTrailingProvisional(undefined, sh('2026-08-04T15:05:00')), false, '空缓存不得报错');
+
 // ===== 10. 日线连续性自修正（frontAdjustDaily）=====
 
 /** 造一根日线；amount 缺省按 close×volume 估 */
@@ -93,6 +133,54 @@ const bar = (
   volume = 1000,
   amount?: number,
 ): KlineBar => ({ time, open, high, low, close, volume, amount: amount ?? close * volume });
+
+// ===== 9d. 盘中临时 bar 必须在已有当日行上累积，不能整行覆盖 =====
+// K线弹窗 fresh=1 已把真实当日 OHLC 写进这一行；整行盖成 max/min(参考价, 现价)
+// 会把真实最高/最低抹平，当日振幅与 ATR 被系统性低估。
+{
+  // amount 单位是元、volume 单位是手（1 手 = 100 股），故 amount = close × volume × 100。
+  // 早先这里按 close × volume 估 amount，把两个量纲混在一起，正好掩盖了下面 9e 要锁的问题。
+  const amt = (close: number, lots: number): number => close * lots * 100;
+  const real = bar('2026-08-04', 10, 12, 9, 11, 5000, amt(11, 5000));
+  const quote = bar('2026-08-04', 11, 11.5, 10.8, 11.5, 6000, amt(11.5, 6000));
+  const merged = mergeIntradayBar(real, quote);
+  assert.equal(merged.open, 10, '已有真实开盘价不得被报价参考价覆盖');
+  assert.equal(merged.high, 12, '真实最高价必须保留（新价更低时不得下调）');
+  assert.equal(merged.low, 9, '真实最低价必须保留');
+  assert.equal(merged.close, 11.5, '收盘价应更新为最新报价');
+  assert.equal(merged.volume, 6000, '当日累计量只增不减');
+
+  // 新价创出新高/新低时要合并进去
+  const breakout = mergeIntradayBar(real, bar('2026-08-04', 11, 13, 8.5, 13, 7000, amt(13, 7000)));
+  assert.equal(breakout.high, 13, '新价创新高应更新最高价');
+  assert.equal(breakout.low, 8.5, '新价创新低应更新最低价');
+
+  // 无当日行时退化为纯合成（未预热/开盘第一轮）
+  const synth = bar('2026-08-04', 11, 11.5, 10.8, 11.5, 6000, amt(11.5, 6000));
+  assert.deepEqual(mergeIntradayBar(undefined, synth), synth, '无当日行时应原样使用合成 bar');
+
+  // 除权/份额折算日：折算前写下的旧行停在旧价位，累积会把旧高点带进新价位的 bar，
+  // 正是 intradayOpenRef 要避免的假 K，必须整行弃用重造
+  const preSplit = bar('2026-07-10', 1.945, 1.95, 1.9, 1.92, 4000, 7700);
+  const postSplit = bar('2026-07-10', 0.905, 0.91, 0.9, 0.905, 9000, 8145);
+  assert.deepEqual(
+    mergeIntradayBar(preSplit, postSplit),
+    postSplit,
+    '折算日的旧价位行必须整行弃用，不得把旧高点累积进来',
+  );
+
+  // 9e. volume 必须与合并后的 amount 同源重算，不能对 volume 自身取 max。
+  // volume 不是上游给的累计量，而是 amount ÷ 现价 ÷ 每手股数估出来的：分母随价格变，
+  // 价格上行时同一份成交额会推出更小的手数。对 volume 取 max 会把当日量能永久钉在
+  // 「价格最低那一刻算出的最大估值」上，直接抬高量比与放量确认。
+  const lowPrice = bar('2026-08-04', 9, 9, 9, 9, 10_000, amt(9, 10_000)); // 900 万元 → 9 元时 10000 手
+  const highPrice = bar('2026-08-04', 9, 11, 9, 11, 0, 10_000_000); // 成交额涨到 1000 万，现价 11
+  const rebased = mergeIntradayBar(lowPrice, highPrice);
+  assert.equal(rebased.amount, 10_000_000, '成交额是真正的累计值，取 max');
+  // 1000 万 ÷ 11 ÷ 100 ≈ 9091 手：比低价时算出的 10000 手更小，但这才是与 amount 一致的读数
+  assert.equal(rebased.volume, Math.round(10_000_000 / 11 / 100), 'volume 必须按合并后的 amount 与最新价重算');
+  assert.ok(rebased.volume < lowPrice.volume, '价格上行时估算手数应下降，不得被 max 钉住');
+}
 
 {
   // 复刻线上实例：159516 于 2026-07-10 做 1:2 份额折算，
@@ -385,5 +473,5 @@ assert.equal(frontAdjustDaily([bar('2026-08-04', 1, 1, 1, 1)]).length, 1);
 }
 
 console.log(
-  '✅ 取数层自检通过（缓存新鲜度 · 盘中增量闸门 · 日线连续性自修正与幂等 · 分钟量能同口径 · 除权日临时bar参考价 · 缓存写入前共用修正出口 · mootdx 成交量单位自校准）',
+  '✅ 取数层自检通过（缓存新鲜度含节假日 · 盘中增量闸门 · 兜底剔除临时bar · 临时bar累积不覆盖 · 日线连续性自修正与幂等 · 分钟量能同口径 · 除权日临时bar参考价 · 缓存写入前共用修正出口 · mootdx 成交量单位自校准）',
 );

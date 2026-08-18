@@ -182,14 +182,8 @@ export function listPlanMarks(planId: string, planVersion?: number) {
   return db.select().from(schema.symbolMarks).where(where).all();
 }
 
-/** 计划标注在各周期图上的过滤规则：价位线可跨周期，其余只在所属周期展示 */
-export function shouldRenderOnTimeframe(
-  markKind: SymbolMarkKind,
-  markTimeframe: string | null,
-  viewTimeframe: string,
-): boolean {
-  if (markKind === 'price_line') return true;
-  return markTimeframe == null || markTimeframe === viewTimeframe;
-}
+// 这里曾有一个 shouldRenderOnTimeframe：价位线一律跨周期展示。
+// 它与实际渲染依据 shared 的 isPlanLineVisible 相互矛盾（后者按角色与周期决定可见性），
+// 生产无任何调用方，只被自检断言锁着，等于把一条废弃规则当成契约在维护。已删除。
 
 export type { TradeLevel };

@@ -16,6 +16,11 @@ export interface AssetMetadata {
   assetType: SymbolAssetType;
   /** 涨跌幅上限（%），ETF 为 10，主板 10，创业板/科创 20，北交所 30 */
   limitPct: number;
+  /**
+   * limitPct 不可信（主板个股但名称未知，分不清 ST 的 5% 与普通的 10%）。
+   * 调用方据此不得拿 limitPct 反推涨停价，只能显式声明未覆盖。
+   */
+  limitPctUncertain: boolean;
   /** T+1 是否适用（A 股全适用，留字段以备将来） */
   t1: boolean;
   /** 所属板块（个股用于广度与 RS），取不到为 null */
@@ -39,17 +44,33 @@ export interface SymbolIdentity {
   code: string;
   name: string;
   secid?: string;
+  /** name 是代码的占位值（回源也没取到真名），此时 ST 判定不可信 */
+  nameUnknown?: boolean;
 }
 
 /**
  * 涨跌幅上限（与 playbook/rules.ts 的 limitPct 口径一致）。
  * ST/*ST 主板股是 5%，只看代码段会漏判——涨停时算不出阻断，等于给出不可成交的买入建议。
+ *
+ * 名称未知时按代码段上限而**不是**最保守的 5%：一次瞬时取数失败就能让 lookupName 返回 null，
+ * 而 5% 会把一只 +4.6% 的普通主板股判成涨停并整份计划锁成等待，这类误伤远多于漏判的 ST 股。
+ * 漏判的代价改由 limitPctUncertain 显式声明：不产出涨停价候选，只留一条 warning。
  */
-function limitPctOf(code: string, name?: string): number {
-  if (name && /^\s*\*?ST/i.test(name)) return 5;
-  if (/^(30|68)/.test(code)) return 20;
-  if (/^(43|83|87|88|92)/.test(code)) return 30;
+function limitPctOf(id: SymbolIdentity): number {
+  if (/^(30|68)/.test(id.code)) return 20;
+  if (/^(43|83|87|88|92)/.test(id.code)) return 30;
+  if (/^\s*\*?ST/i.test(id.name)) return 5;
   return 10;
+}
+
+/**
+ * 上限是否不可信。只有主板个股有 ST 制度（5%），名称取不到时就分不清它是 5% 还是 10%，
+ * 于是既算不出可信的涨停价，也判不准「涨停买入不可成交」。
+ * 创业板/科创板/北交所没有 ST 制度，代码段本身就定死了上限，不受名称影响。
+ */
+function limitPctUncertainOf(id: SymbolIdentity): boolean {
+  if (!id.nameUnknown) return false;
+  return !/^(30|68|43|83|87|88|92)/.test(id.code);
 }
 
 /** 场内基金代码段：51/52/56/58 沪市 ETF，15 深市 ETF，16 深市 LOF */
@@ -184,7 +205,7 @@ function commonHardBlocks(id: SymbolIdentity, bars: KlineBar[]): string[] {
   if (!last) return ['无行情数据'];
   if (prev && prev.close > 0) {
     const pct = ((last.close - prev.close) / prev.close) * 100;
-    const cap = limitPctOf(id.code, id.name);
+    const cap = limitPctOf(id);
     if (pct >= cap - 0.5) out.push('当根涨停，买入不可成交');
     if (pct <= -(cap - 0.5)) out.push('当根跌停，止损可能无法执行');
   }
@@ -217,7 +238,13 @@ function stockMetadataOf(id: SymbolIdentity): AssetMetadata {
   const now = Date.now();
   const hit = STOCK_BOARD_CACHE.get(id.code);
   if (hit && now - hit.at < STOCK_META_TTL_MS) {
-    return { assetType: 'stock', limitPct: limitPctOf(id.code, id.name), t1: true, ...hit.board };
+    return {
+      assetType: 'stock',
+      limitPct: limitPctOf(id),
+      limitPctUncertain: limitPctUncertainOf(id),
+      t1: true,
+      ...hit.board,
+    };
   }
 
   let boardCode: string | null = null;
@@ -256,7 +283,13 @@ function stockMetadataOf(id: SymbolIdentity): AssetMetadata {
     STOCK_BOARD_CACHE.delete(oldest);
   }
   STOCK_BOARD_CACHE.set(id.code, { board, at: now });
-  return { assetType: 'stock', limitPct: limitPctOf(id.code, id.name), t1: true, ...board };
+  return {
+    assetType: 'stock',
+    limitPct: limitPctOf(id),
+    limitPctUncertain: limitPctUncertainOf(id),
+    t1: true,
+    ...board,
+  };
 }
 
 export const stockAdapter: SymbolAnalysisAdapter = {
@@ -298,7 +331,14 @@ export const stockAdapter: SymbolAnalysisAdapter = {
 
   async loadExecutionQuality(id, bars) {
     const out = commonExecutionQuality(bars);
-    out.push({ key: '涨跌幅上限', value: `${limitPctOf(id.code, id.name)}%`, missing: false });
+    const uncertain = limitPctUncertainOf(id);
+    out.push({
+      key: '涨跌幅上限',
+      value: uncertain
+        ? `${limitPctOf(id)}%（名称未知，若为 ST 实际是 5%，涨停判定可能漏报）`
+        : `${limitPctOf(id)}%`,
+      missing: uncertain,
+    });
     out.push({ key: '交易制度', value: 'T+1，当日买入不可当日卖出', missing: false });
     return out;
   },
@@ -351,7 +391,14 @@ export const etfAdapter: SymbolAnalysisAdapter = {
   },
 
   async loadAssetMetadata(id) {
-    return { assetType: 'etf', limitPct: 10, t1: true, boardCode: null, boardName: null };
+    return {
+      assetType: 'etf',
+      limitPct: 10,
+      limitPctUncertain: false,
+      t1: true,
+      boardCode: null,
+      boardName: null,
+    };
   },
 
   async loadBreadthEvidence(id) {
@@ -448,7 +495,14 @@ export const indexAdapter: SymbolAnalysisAdapter = {
     return [BROAD_MARKET];
   },
   async loadAssetMetadata() {
-    return { assetType: 'index', limitPct: 0, t1: false, boardCode: null, boardName: null };
+    return {
+      assetType: 'index',
+      limitPct: 0,
+      limitPctUncertain: false,
+      t1: false,
+      boardCode: null,
+      boardName: null,
+    };
   },
   async loadBreadthEvidence() {
     return null;

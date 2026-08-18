@@ -11,6 +11,7 @@ import type {
 } from '@stock-agent/shared';
 import * as gateway from '../agent/gateway';
 import { getValue } from '../settings';
+import { shanghaiToday } from '../util';
 import { listWatch } from '../watchlist';
 import { listResearchReviews } from '../repo';
 import {
@@ -336,7 +337,8 @@ export async function aggregateDailyReports(daysOverride?: number): Promise<Dail
   const morningSamples = await collectCategorySamples(morning, 'morning', 6);
 
   return {
-    date: new Date().toISOString().slice(0, 10),
+    // 东财 publishDate 是上海日期，聚合日期必须同口径；UTC 日期在上海 00:00–08:00 会差一天
+    date: shanghaiToday(),
     totalStock: stock.length,
     totalIndustry: industry.length,
     hotSectors,
@@ -468,19 +470,36 @@ function announcementScore(type: string, title: string): number {
 }
 
 /**
+ * 窗口起点：N 天前那个上海自然日的 00:00。
+ *
+ * 不能用「此刻往前 N×24 小时」——盘前 8 点跑 days=1 时，那样会把前一日早间的公告切掉，
+ * 而 display_time 本身就是上海时间口径，窗口理应也按上海自然日对齐。
+ */
+function announcementWindowStartMs(days: number, now: Date = new Date()): number {
+  const todayStart = new Date(`${shanghaiToday(now)}T00:00:00+08:00`).getTime();
+  return todayStart - Math.max(1, days) * 86400_000;
+}
+
+/** 候选公告 + 数据完整性标记 */
+export interface AnnouncementCandidates {
+  candidates: AnnouncementCandidate[];
+  /** 翻页部分失败，候选集不完整 */
+  partial: boolean;
+}
+
+/**
  * 拉取全市场公告列表，按窗口落时间、类型/标题材料性过滤打分，取 Top N 候选（仅元数据）。
  * 供 agent 阶段1 按标题甄别；正文由 fetchAnnouncementContents 二次抓取。
+ * 列表首页失败会由 client 抛错（不再静默返回空集，避免被误读为「今日无公告」）。
  */
-export async function aggregateAnnouncementCandidates(
+export async function collectAnnouncementCandidates(
   daysOverride?: number,
   topN = 120,
-): Promise<AnnouncementCandidate[]> {
+): Promise<AnnouncementCandidates> {
   const days = daysOverride ?? discoverWindowDays();
-  const begin = new Date();
-  begin.setDate(begin.getDate() - Math.max(1, days));
-  const beginMs = begin.getTime();
+  const beginMs = announcementWindowStartMs(days);
 
-  const raw = await fetchAnnouncementList({ pages: 4, pageSize: 100 });
+  const { items: raw, partial } = await fetchAnnouncementList({ pages: 4, pageSize: 100 });
   const seen = new Set<string>();
   const scored: { cand: AnnouncementCandidate; score: number; t: number }[] = [];
 
@@ -512,21 +531,25 @@ export async function aggregateAnnouncementCandidates(
     });
   }
 
-  return scored
-    .sort((a, b) => b.score - a.score || b.t - a.t)
-    .slice(0, topN)
-    .map((s) => s.cand);
+  return {
+    candidates: scored
+      .sort((a, b) => b.score - a.score || b.t - a.t)
+      .slice(0, topN)
+      .map((s) => s.cand),
+    partial,
+  };
 }
 
 /**
  * 公告列表（UI 用）：复用材料性筛选产出，按发布时间倒序，附原文链接。纯爬取，不落库。
+ * partial=true 表示翻页部分失败、列表不完整，路由层据此提示用户。
  */
 export async function listMaterialAnnouncements(
   daysOverride?: number,
   topN = 60,
-): Promise<ResearchAnnouncementItem[]> {
-  const cands = await aggregateAnnouncementCandidates(daysOverride, Math.max(topN, 60));
-  return cands
+): Promise<{ items: ResearchAnnouncementItem[]; partial: boolean }> {
+  const { candidates, partial } = await collectAnnouncementCandidates(daysOverride, Math.max(topN, 60));
+  const items = candidates
     .slice()
     .sort((a, b) => (b.time ?? '').localeCompare(a.time ?? ''))
     .slice(0, topN)
@@ -539,6 +562,7 @@ export async function listMaterialAnnouncements(
       time: c.time ?? '',
       url: announcementUrl(c.code, c.artCode),
     }));
+  return { items, partial };
 }
 
 /** 候选公告标题清单（供 agent 甄别；含 art_code 供二次取正文） */

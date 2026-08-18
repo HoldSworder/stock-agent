@@ -311,23 +311,31 @@ assert.equal(clusterTolerance(1, null, 0.01), 0.02, 'ATR 缺失时不应把容�
   const levelRole = new Map(
     cat.levels.map((l) => [l.candidateId, l.compatibleRoles] as const),
   );
-  /** (角色, relation) → 期望用途。未列出的组合视为不该被展开 */
-  const EXPECT: Record<string, 'trigger' | 'invalidation' | 'target'> = {
-    'resistance|holdAbove': 'trigger',
-    'resistance|crossUp': 'trigger',
-    'support|holdAbove': 'trigger',
-    'support|holdBelow': 'invalidation',
-    'support|crossDown': 'invalidation',
-    'entry_trigger|crossUp': 'trigger',
-    'entry_trigger|holdAbove': 'trigger',
-    'add_trigger|crossUp': 'trigger',
-    'add_trigger|holdAbove': 'trigger',
-    'invalidation|crossDown': 'invalidation',
-    'invalidation|holdBelow': 'invalidation',
-    'stop|crossDown': 'invalidation',
-    'stop|holdBelow': 'invalidation',
-    'target|touch': 'target',
-    'target|holdAbove': 'target',
+  /**
+   * (角色, relation) → 期望用途。未列出的组合视为不该被展开。
+   *
+   * 看跌关系一律**双用途**（trigger + invalidation）：同一个事实「收盘跌破支撑」既是
+   * 多头计划的失效，也是风险情景的减仓触发。只挂 invalidation 的话目录里一条
+   * suitableFor 含 trigger 的看跌条件都没有，rank='risk' 情景在结构上无法表达，
+   * 而每个情景都必填触发条件，于是风险情景必被 purpose_mismatch 打回、两次即降级观察计划。
+   * 看涨关系反过来不能加 invalidation：那会让计划一生效就失效（见下面压力位那段）。
+   */
+  const EXPECT: Record<string, Array<'trigger' | 'invalidation' | 'target'>> = {
+    'resistance|holdAbove': ['trigger'],
+    'resistance|crossUp': ['trigger'],
+    'support|holdAbove': ['trigger'],
+    'support|holdBelow': ['trigger', 'invalidation'],
+    'support|crossDown': ['trigger', 'invalidation'],
+    'entry_trigger|crossUp': ['trigger'],
+    'entry_trigger|holdAbove': ['trigger'],
+    'add_trigger|crossUp': ['trigger'],
+    'add_trigger|holdAbove': ['trigger'],
+    'invalidation|crossDown': ['trigger', 'invalidation'],
+    'invalidation|holdBelow': ['trigger', 'invalidation'],
+    'stop|crossDown': ['trigger', 'invalidation'],
+    'stop|holdBelow': ['trigger', 'invalidation'],
+    'target|touch': ['target'],
+    'target|holdAbove': ['target'],
   };
   // 同一价位同一 relation 只展开一条，由 compatibleRoles 里**第一个**列出该 relation
   // 的角色决定用途，断言必须按同样的口径找期望值
@@ -338,14 +346,42 @@ assert.equal(clusterTolerance(1, null, 0.01), 0.02, 'ATR 缺失时不应把容�
     const owner = roles.find((r) => EXPECT[`${r}|${c.rule.kind === 'priceLevel' ? c.rule.relation : ''}`]);
     if (!owner) continue;
     const key = `${owner}|${c.rule.relation}`;
+    // 方向已错过的穿越条件被摘空所有用途，此处不参与极性比对（它的语义由 5c 节单独锁）
+    if (c.directionMissed) {
+      assert.deepEqual(c.suitableFor, [], `${key} 方向已错过时必须摘空全部用途`);
+      continue;
+    }
+    // 当下已成立的条件同样两个用途都摘空（第 12 节单独锁），极性断言只管未成立的那些
+    if (c.alreadySatisfied) {
+      assert.ok(
+        !c.suitableFor.includes('trigger') && !c.suitableFor.includes('invalidation'),
+        `${key} 当下已成立时不得留下触发或失效用途，实际 ${c.suitableFor.join('/')}`,
+      );
+      continue;
+    }
     assert.deepEqual(
       c.suitableFor,
-      [EXPECT[key]],
-      `${key} 的用途必须是 ${EXPECT[key]}，实际 ${c.suitableFor.join('/')}`,
+      EXPECT[key],
+      `${key} 的用途必须是 ${EXPECT[key].join('/')}，实际 ${c.suitableFor.join('/')}`,
     );
     checked += 1;
   }
   assert.ok(checked > 0, '本 fixture 应覆盖到价位条件，否则极性断言等于没跑');
+
+  // 减仓车道必须真的可用：目录里得存在至少一条「可作触发」的看跌条件，
+  // 否则 rank='risk' 情景永远填不出触发数组，减仓/清仓指令整体给不出来
+  const bearishTriggers = cat.conditions.filter(
+    (c) =>
+      c.suitableFor.includes('trigger') &&
+      ((c.rule.kind === 'priceLevel' &&
+        (c.rule.relation === 'holdBelow' || c.rule.relation === 'crossDown')) ||
+        (c.rule.kind === 'ma' && c.rule.relation === 'below') ||
+        (c.rule.kind === 'macd' && c.rule.signal === 'deadCross')),
+  );
+  assert.ok(
+    bearishTriggers.length > 0,
+    '目录必须含可作触发的看跌条件，否则风险情景在结构上无法表达，减仓车道失效',
+  );
 
   // 防断言空转：支撑位必须真的产出「收盘跌破」这条失效条件，
   // 且「收盘守住」在任何情况下都不得被当成失效
@@ -620,6 +656,13 @@ assert.equal(clusterTolerance(1, null, 0.01), 0.02, 'ATR 缺失时不应把容�
     !below.suitableFor.includes('invalidation'),
     '已成立的条件必须摘掉 invalidation 用途，否则模型仍能选它，落库即失效',
   );
+  // 触发用途也必须摘。看跌关系改成双用途之后只摘 invalidation 的话，这条已成立的看跌条件
+  // 会剩下一个合法的 trigger 用途——模型选中即得到一份出生就 triggered 的计划，
+  // 与「出生即失效」是同一个坑的另一面。
+  assert.ok(
+    !below.suitableFor.includes('trigger'),
+    '已成立的看跌条件也必须摘掉 trigger 用途，否则计划一落库第一次复核就判触发',
+  );
 
   const above = cat.conditions.find((c) => c.description === '收盘在 MA20 上方');
   assert.ok(above, 'fixture 应同时产出「收盘在 MA20 上方」候选');
@@ -658,6 +701,110 @@ assert.equal(clusterTolerance(1, null, 0.01), 0.02, 'ATR 缺失时不应把容�
   );
 }
 
+// ===== 13. 方向已错过的穿越型条件必须被摘空（第 2 条）=====
+//
+// 穿越是一次性事件，状态型判据（alreadySatisfied）看不见它：支撑位已在现价上方时
+// 「盘中下穿」在最后一根并没有穿，于是照常留在失效候选里，而它实际要等价格涨回该位
+// 上方再跌破才成立——失效保护形同虚设。压力位已在现价下方时 crossUp 同理永不成立，
+// 而触发条件一律 required、求值要求全部满足，一条就够让整份计划永远无法触发。
+
+{
+  const DOWN_BARS = zigzag([140, 100], 40);
+  const downClose = DOWN_BARS[DOWN_BARS.length - 1].close;
+  const cat = buildCandidateCatalog({
+    contextId: 'ctx-missed',
+    code: '600000',
+    periods: [
+      {
+        period: 'day',
+        bars: DOWN_BARS,
+        // 现价约 100，价位表里的 120/113/118 等位子都在现价上方
+        levels: { ...LEVELS, close: downClose, period: 'day' },
+        dow: null,
+        chan: null,
+      },
+    ],
+    createdAt: '2026-08-04T07:00:00.000Z',
+    expiresAt: '2026-08-05T07:00:00.000Z',
+  });
+
+  const priceConds = cat.conditions.filter((c) => c.rule.kind === 'priceLevel');
+  const crossDownAbove = priceConds.filter(
+    (c) => c.rule.kind === 'priceLevel' && c.rule.relation === 'crossDown' && c.rule.level > downClose,
+  );
+  assert.ok(
+    crossDownAbove.length > 0,
+    'fixture 应产出「价位在现价上方的下穿条件」，否则本节断言空转',
+  );
+  for (const c of crossDownAbove) {
+    assert.equal(c.directionMissed, true, `${c.description} 的下穿方向已错过，必须被标记`);
+    assert.deepEqual(
+      c.suitableFor,
+      [],
+      `${c.description} 方向已错过后任何角色都用不了，必须摘空全部用途`,
+    );
+  }
+
+  const crossUpBelow = priceConds.filter(
+    (c) => c.rule.kind === 'priceLevel' && c.rule.relation === 'crossUp' && c.rule.level < downClose,
+  );
+  for (const c of crossUpBelow) {
+    assert.equal(c.directionMissed, true, `${c.description} 的上穿方向已错过，必须被标记`);
+  }
+
+  // 方向仍成立的穿越条件不得被误伤——一刀切会把可用的失效保护全砍光
+  const stillValid = priceConds.filter(
+    (c) => c.rule.kind === 'priceLevel' && c.rule.relation === 'crossDown' && c.rule.level < downClose,
+  );
+  for (const c of stillValid) {
+    assert.ok(!c.directionMissed, `${c.description} 方向仍成立，不得被摘除`);
+  }
+
+  assert.ok(
+    cat.warnings.some((w) => w.includes('方向已错过')),
+    '摘空用途必须写进 warnings，不能静默改变目录',
+  );
+}
+
+// ===== 14. 满配额 + 满额 warnings 下仍不得触发软上限裁尾（第 9 条）=====
+//
+// 非价格条件曾排在 conditions 末尾，一旦溢出被裁掉的恰是 volume_confirm /
+// structure_confirm / time_window，而 time_window 是「所有看跌失效条件都已成立」时
+// 唯一还剩的失效候选，它不可见会让 missing_invalidation 必然降级成观察计划。
+
+{
+  const { formatCandidates } = await import('../symbolPlans/format');
+  const cat = buildCandidateCatalog(mkInput('ctx-full'));
+  // 造出最坏情形：塞满 warnings（每条都会占一行）再看长度与可见性
+  const stressed = {
+    ...cat,
+    warnings: [
+      ...cat.warnings,
+      ...Array.from({ length: 8 }, (_, i) => `压力测试警告 ${i + 1}：这是一条长度接近真实警告的说明文本，用于逼近软上限`),
+    ],
+  };
+  for (const which of ['levels', 'conditions'] as const) {
+    const text = formatCandidates(stressed, which);
+    assert.ok(
+      !text.includes('为控制上下文长度省略'),
+      `${which} 在满配额 + 满额 warnings 下不得触发裁尾（当前 ${text.length} 字符），` +
+        '请下调配额或上调 CATALOG_SOFT_LIMIT',
+    );
+    // 仍需低于 tools.ts 的 preview 截断线，否则中段会被静默吃掉
+    assert.ok(text.length < 6000, `${which} 文本 ${text.length} 字符已逼近 preview 截断线`);
+  }
+  // 非价格条件必须排在价位条件之前，裁尾才只吃低分价位条件
+  const firstPriceIdx = cat.conditions.findIndex((c) => c.purpose === 'price_level');
+  const lastNonPriceIdx = cat.conditions.reduce(
+    (acc, c, i) => (c.purpose === 'price_level' ? acc : i),
+    -1,
+  );
+  assert.ok(
+    lastNonPriceIdx < firstPriceIdx,
+    '非价格条件必须整体排在价位条件之前，否则软上限裁尾会先吃掉 time_window',
+  );
+}
+
 console.log(
-  '✅ 候选目录自检通过（容差公式 · 可复现 catalogHash · 分层上限与三层出货 · 缺层不顶替 · 非价格条件不按周期复制 · omittedCounts 不静默 · 白名单非笛卡尔 · 用途极性 · 实时专用标记 · 保底候选 · 全量可追溯 · 近价位合并成带且止损取下沿 · 止损锚定日线不被60m抢占 · 全部 candidateId 对 LLM 可见 · 已成立条件摘掉失效用途且不误伤未成立条件）',
+  '✅ 候选目录自检通过（容差公式 · 可复现 catalogHash · 分层上限与三层出货 · 缺层不顶替 · 非价格条件不按周期复制 · omittedCounts 不静默 · 白名单非笛卡尔 · 用途极性与看跌双用途 · 实时专用标记 · 保底候选 · 全量可追溯 · 近价位合并成带且止损取下沿 · 止损锚定日线不被60m抢占 · 全部 candidateId 对 LLM 可见 · 已成立条件摘掉失效用途 · 方向已错过的穿越条件摘空 · 满配额不裁尾）',
 );

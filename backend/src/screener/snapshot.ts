@@ -1,5 +1,6 @@
 import { getJson } from '../market/eastmoney';
 import { num, numOrNull } from '../datasource/codes';
+import { prevTradingDay, shanghaiDateStr } from '../market/calendar';
 import { getMeta, setMeta } from '../settings';
 
 // 选股引擎唯一净新增取数：东方财富 clist/get 分页拉全市场沪深 A 股快照。
@@ -149,15 +150,38 @@ export function saveLastCloseSnapshot(rows: SnapshotRow[]): void {
   }
 }
 
-/** 读取收盘快照缓存；无缓存/解析失败返回 null */
-export function loadLastCloseSnapshot(): SnapshotRow[] | null {
+/**
+ * 读取收盘快照缓存。
+ *
+ * 必须校验 capturedAt：长假或系统停机后缓存里躺的可能是几周前的行情，
+ * 而调用方会把它当「上一交易日收盘」呈现给用户——那时给出的选股结论建立在过期价格上。
+ * 只接受「上一交易日或之后抓取」的缓存，超期返回 null 并给出可展示的过期说明。
+ *
+ * @returns rows 为 null 时 staleNote 说明原因（无缓存时两者皆空）
+ */
+export function loadLastCloseSnapshot(): { rows: SnapshotRow[] | null; staleNote: string | null } {
   const raw = getMeta(META_LAST_CLOSE_SNAPSHOT);
-  if (!raw) return null;
+  if (!raw) return { rows: null, staleNote: null };
+  let parsed: CachedSnapshot;
   try {
-    const parsed = JSON.parse(raw) as CachedSnapshot;
-    const rows = parsed?.rows;
-    return Array.isArray(rows) && rows.length > 0 ? rows : null;
+    parsed = JSON.parse(raw) as CachedSnapshot;
   } catch {
-    return null;
+    return { rows: null, staleNote: null };
   }
+  const rows = parsed?.rows;
+  if (!Array.isArray(rows) || rows.length === 0) return { rows: null, staleNote: null };
+
+  const capturedMs = Date.parse(parsed?.capturedAt ?? '');
+  if (Number.isNaN(capturedMs)) {
+    return { rows: null, staleNote: '收盘快照缓存无抓取时间，无法确认时效，已弃用' };
+  }
+  const capturedDate = shanghaiDateStr(new Date(capturedMs));
+  const earliest = prevTradingDay(shanghaiDateStr(new Date()));
+  if (capturedDate < earliest) {
+    return {
+      rows: null,
+      staleNote: `收盘快照缓存已过期（抓取于 ${capturedDate}，早于上一交易日 ${earliest}），已弃用`,
+    };
+  }
+  return { rows, staleNote: null };
 }

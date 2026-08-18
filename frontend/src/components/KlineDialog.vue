@@ -304,6 +304,10 @@ async function onGeneratePlan(): Promise<void> {
 let chart: Chart | null = null;
 // 自增 token：切换标的/周期时丢弃过期请求
 let reqToken = 0;
+// 非静默请求专用 token：spinner 只归「最新那一发非静默请求」管。
+// 与 reqToken 共用会让先返回的旧请求熄掉仍在飞的新请求的 spinner（快速连切周期时用户看到空图不转圈），
+// 完全不判又会在被抢占后永久转圈。
+let loadingToken = 0;
 // 实时轮询定时器（仅交易时段，刷新当前激活 tab：分时或各 K 线级别）
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 const POLL_MS = 10_000;
@@ -352,6 +356,8 @@ function stopPoll(): void {
 
 /** 静默刷新当前激活 tab（分时或 K 线级别） */
 function refreshCurrent(): void {
+  // 切到「资金面 / 筹码」时图表被 v-show 隐藏，继续每 10 秒打 fresh=1 回源纯属白烧上游配额
+  if (viewMode.value !== 'chart') return;
   if (tab.value === 'trend') void loadTrends(true);
   else void loadKline(true);
 }
@@ -518,6 +524,7 @@ const MINUTE_TABS: Tab[] = ['5m', '15m', '30m', '60m', '120m'];
 async function loadKline(silent = false) {
   if (!chart || !code.value) return;
   const token = ++reqToken;
+  const myLoading = silent ? 0 : ++loadingToken;
   if (!silent) {
     loading.value = true;
     error.value = '';
@@ -530,14 +537,33 @@ async function loadKline(silent = false) {
     // 首屏（silent=false）仍走缓存，保证打开即出图。
     const bars = await api.getKline(code.value, period, limit, secid.value || undefined, silent);
     if (token !== reqToken || !chart) return;
-    // applyNewData 会清空图上 overlay，数据落地后再重绘标注
-    chart.applyNewData(bars.map(toKLineData), false, renderOverlays);
+    const next = bars.map(toKLineData);
+    const cur = chart.getDataList();
+    // applyNewData 的语义是「覆盖全量并重置滚动位置」，还会清空全部 overlay：
+    // 盘中每 10 秒轮询走这条路，用户拖动/缩放看历史时会被反复弹回最新一根。
+    // 盘中真正在变的只有最后一根，同长同首根时间戳就只 updateData 它。
+    // 中位一根的 close 一并比对：除权除息后整段前复权价重算、数据源回补修正历史某根时，
+    // 长度与首根都不变，只更新末根的话弹窗开着期间永远看不到这类改写。
+    const mid = Math.floor(next.length / 2);
+    const sameSeries =
+      silent &&
+      next.length > 0 &&
+      next.length === cur.length &&
+      next[0]?.timestamp === cur[0]?.timestamp &&
+      next[mid]?.close === cur[mid]?.close;
+    if (sameSeries) {
+      chart.updateData(next[next.length - 1]!);
+    } else {
+      chart.applyNewData(next, false, renderOverlays);
+    }
     if (silent) error.value = '';
   } catch (e) {
     if (token !== reqToken || silent) return;
     error.value = e instanceof Error ? e.message : String(e);
   } finally {
-    if (token === reqToken && !silent) loading.value = false;
+    // 只有最新那一发非静默请求负责熄灭 spinner：被静默轮询抢走 reqToken 不影响（它不管 loading），
+    // 被更新的非静默请求接管时也不能抢先熄灭，否则新请求还在飞就已经不转圈了。
+    if (!silent && myLoading === loadingToken) loading.value = false;
   }
 }
 
@@ -609,20 +635,25 @@ function markTimestamp(time?: string | null): number | undefined {
   return ts;
 }
 
+/** 图层开关默认值。onClosed 要还原，故抽成函数而非字面量共用一个对象 */
+function defaultLayers() {
+  return {
+    currentPlan: true,
+    supportResistance: true,
+    fib: false,
+    pivot: false,
+    manual: true,
+    history: false,
+    // 走势推演默认关：它画在图右侧的留白里，会挤掉一块看盘面积，且是推演不是行情
+    projection: false,
+  };
+}
+
 /**
  * 图层开关（计划 10.4）：默认只开当前计划与支撑压力，避免图上信息过载。
  * fib/pivot 是确定性点位测算（S10），默认关——一次全开有 14 条线会糊满主图。
  */
-const layers = ref({
-  currentPlan: true,
-  supportResistance: true,
-  fib: false,
-  pivot: false,
-  manual: true,
-  history: false,
-  // 走势推演默认关：它画在图右侧的留白里，会挤掉一块看盘面积，且是推演不是行情
-  projection: false,
-});
+const layers = ref(defaultLayers());
 
 /** 点位线配色：黄金分割走金色系、枢轴走冷灰蓝，与计划线（红/绿/蓝/橙/紫）明显区分 */
 const FIB_COLOR = '#c9a227';
@@ -906,13 +937,15 @@ function isMarkVisible(m: SymbolMark): boolean {
   if (isPlan && (m.role === 'support' || m.role === 'resistance') && !layers.value.supportResistance) {
     return false;
   }
+  // 分时图比任何 K 线周期都细，三层的位子在盘中都是有效参考，价位线全画；
+  // 区间/趋势线等形态的坐标绑死在 K 线时间轴上，画到分时上是错的。
+  // 这个判断必须在「无 timeframe 一律可见」之前，否则手工标注会漏过去。
+  if (tab.value === 'trend') return m.kind === 'price_line';
   // 周期过滤。价位线按「本周期及更大周期都画、更小周期不画」：
   // 计划分周线/日线/60 分钟三层出位子后，若仍让价位线一律跨周期可见，
   // 周线图上会被一堆 60 分钟级触发线糊满；反过来 60 分钟图上仍需看到周线压力位这个边界。
   // 非价位线（区间、箭头等）语义绑死在所属周期，仍只在本周期画。
   if (!m.timeframe) return true;
-  // 分时图比任何 K 线周期都细，三层的位子在盘中都是有效参考，全画
-  if (tab.value === 'trend') return m.kind === 'price_line';
   return m.kind === 'price_line'
     ? isPlanLineVisible(tab.value, m.timeframe)
     : m.timeframe === tab.value;
@@ -967,18 +1000,22 @@ function assignLabelSlots(
 /**
  * 重绘图上全部 overlay：计划标注组 + 确定性点位组。
  * 两组必须同一个函数画，因为标签防重叠要跨组统一分槽——分开画各自算槽位，
- * 两组的标签就会互相压在一起。分时视图不叠加（点位坐标以 K 线为基准）。
+ * 两组的标签就会互相压在一起。
+ * 分时视图只叠加水平价位线：推演锥与确定性点位的坐标以 K 线时间轴为基准，
+ * 画到分时上是错的；而计划的三层位子在盘中恰恰最需要看见。早先这里对 trend
+ * 直接 early return，使 isMarkVisible 里为分时写的分支成了死代码——图上一条
+ * 计划线都没有，下方只读清单却照 isMarkVisible 列了出来。
  */
 function renderOverlays(): void {
   if (!chart) return;
   chart.removeOverlay({ groupId: MARK_GROUP });
   chart.removeOverlay({ groupId: DET_GROUP });
   chart.removeOverlay({ groupId: PROJ_GROUP });
-  if (tab.value === 'trend') return;
-  renderProjection();
+  const isTrend = tab.value === 'trend';
+  if (!isTrend) renderProjection();
   const visible = marks.value.filter(isMarkVisible);
   // 与计划线重合的点位不再单独画，其用途已缀到对应计划线的标签上（见 detPlanMatch）
-  const dets = detLines.value.filter((d) => !detPlanMatch.value.byDet.has(d.id));
+  const dets = isTrend ? [] : detLines.value.filter((d) => !detPlanMatch.value.byDet.has(d.id));
   // 只有水平线（价位线/价格带/点位线）会因价格接近而叠标签，其余按时间轴分散，无需错位
   // priority：计划线优先占左侧槽位，点位线是参考背景，被挤到右边可以接受
   const slots = assignLabelSlots(
@@ -1229,10 +1266,21 @@ function fitTrendFullDay(): void {
   chart.setOffsetRightDistance(Math.max(0, (SESSION_BARS - count) * space));
 }
 
+/**
+ * 分时数据所属交易日 YYYY-MM-DD。数据源不一定给得出 tradeDate，
+ * 用可选读取 + 格式校验兜底，字段缺失或格式异常时才退回东八区当天。
+ */
+function tradeDateOf(res: TrendsResult): string {
+  const d = (res as { tradeDate?: string | null }).tradeDate;
+  if (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
+}
+
 /** silent=true 用于轮询刷新：不显示 loading、失败不弹错、不清空已有图，避免抖动打断观看 */
 async function loadTrends(silent = false) {
   if (!chart || !code.value) return;
   const token = ++reqToken;
+  const myLoading = silent ? 0 : ++loadingToken;
   if (!silent) {
     loading.value = true;
     error.value = '';
@@ -1248,8 +1296,9 @@ async function loadTrends(silent = false) {
       }
       return;
     }
-    // 分时为当日数据，时间仅含 HH:MM，按东八区今日补全日期
-    const dateStr = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Shanghai' });
+    // 分时点的时间仅含 HH:MM，需补全日期。一律按「东八区今天」补会在周末/节假日
+    // 把上一交易日的分时标成今天，tooltip 日期是错的；优先用后端返回的交易日。
+    const dateStr = tradeDateOf(res);
     chart.applyNewData(res.points.map((p) => toTrendKLineData(p, res.prevClose, dateStr)), false, fitTrendFullDay);
     trend.value = res; // 驱动盘口数据条（含轮询实时更新）
     if (silent) error.value = '';
@@ -1257,7 +1306,8 @@ async function loadTrends(silent = false) {
     if (token !== reqToken || silent) return;
     error.value = e instanceof Error ? e.message : String(e);
   } finally {
-    if (token === reqToken && !silent) loading.value = false;
+    // 与 loadKline 同理：spinner 只归最新那一发非静默请求管
+    if (!silent && myLoading === loadingToken) loading.value = false;
   }
 }
 
@@ -1291,7 +1341,7 @@ function applyView() {
     // 分时锁定为全天框架：禁用缩放与拖动
     chart.setZoomEnabled(false);
     chart.setScrollEnabled(false);
-    renderOverlays(); // 分时不叠加标注，此处即清除上一个视图的 overlay
+    renderOverlays(); // 分时只叠加水平价位线，顺带清掉上一个视图的其余 overlay
     void loadTrends();
   } else {
     trend.value = null; // 离开分时清空盘口数据条
@@ -1365,10 +1415,20 @@ function onOpened() {
 function onClosed() {
   teardownChart();
   error.value = '';
+  // 关弹窗时可能正卡在一次未复位的加载里，不清就带着永久转圈重开
+  loading.value = false;
   trend.value = null;
   indicators.value = null;
   marks.value = [];
   levels.value = null;
+  // 推演属于上一个标的，重开前必清，并作废在飞请求
+  projectionToken += 1;
+  projection.value = null;
+  projectionPlan.value = null;
+  layers.value = defaultLayers();
+  // 停在「资金面/筹码」时关闭，重开后 setupChart 会在 display:none 的容器里初始化，
+  // subPaneHeight() 拿到 0 高度退化成最小值，副图挤成一条线
+  viewMode.value = 'chart';
   tab.value = 'day';
   // 不重置的话，只要打开过一次 Agent 页签，此后每次开弹窗都会立刻挂载对话栏、
   // 建 WS 并 find-or-create 会话，懒挂载从第二次起就失效了
@@ -1510,14 +1570,21 @@ watch([code, secid], () => {
   viewMode.value = 'chart'; // 切标的回到图表视图
   marks.value = [];
   levels.value = null;
+  // 推演也必须清：重取入口只有 watch(tab) 与图层开关，切标的时 tab 本就是 day
+  // 的话两个 watch 都不触发，renderProjection 会把旧标的的 basePrice 与情景折线
+  // 画到新标的的图上。清空之外还要作废在飞请求，否则旧标的的响应回来照样写进去。
+  projectionToken += 1;
+  projection.value = null;
+  projectionPlan.value = null;
   if (visible.value && chart) void loadMarks();
   if (tab.value !== 'day') {
-    tab.value = 'day'; // 触发 watch(tab) → applyView + loadLevels
+    tab.value = 'day'; // 触发 watch(tab) → applyView + loadLevels + loadProjection
     return;
   }
   if (visible.value && chart) {
     applyView();
     void loadLevels();
+    void loadProjection();
   }
 });
 </script>
@@ -1641,6 +1708,7 @@ watch([code, secid], () => {
             :key="planKey"
             :code="code"
             :name="name"
+            :secid="secid"
             @generate="onGeneratePlan"
           />
           <!--

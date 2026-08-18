@@ -4,6 +4,10 @@ import { apiFetch } from './bridge.js';
 import { renderKline, renderTrends, destroy as destroyChart } from './chart.js';
 
 const SELF_TAG = '我的自选';
+// 「未分组」伪分组的内部键。用不可能出现在真实 tag 里的哨兵值而非「未分组」字面量，
+// 免得用户真建了个同名分组时两者撞在一起。
+export const UNGROUPED = '\u0000ungrouped';
+const groupLabel = (g) => (g === UNGROUPED ? '未分组' : g);
 
 // ===== 后端接口包装 =====
 const listWatchlist = () => apiFetch('/api/watchlist');
@@ -55,20 +59,36 @@ let mode = 'list'; // 'list' | 'detail'
 let detail = { code: '', name: '', period: 'trend' };
 let refs = {};
 
-function groupsOf() {
+const tagsOf = (i) => (i.tags ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+
+/**
+ * 分组 Tab 列表；存在未分组标的时追加「未分组」伪分组。
+ *
+ * 未分组标的是能被创建出来的（批量添加时分组留空，后端落库 tags=null）。少了这个入口，
+ * 只要存在任意一个分组 activeGroup 就恒为非空，groupFilter() 会把 tags 为空的行全部滤掉——
+ * 于是这些标的在扩展里既看不到也删不掉。
+ */
+export function groupsOf(rows) {
   const set = new Set();
-  for (const i of items) {
-    for (const t of (i.tags ?? '').split(',').map((s) => s.trim()).filter(Boolean)) set.add(t);
+  let hasUngrouped = false;
+  for (const i of rows) {
+    const tags = tagsOf(i);
+    if (tags.length) for (const t of tags) set.add(t);
+    else hasUngrouped = true;
   }
-  return Array.from(set);
+  const gs = Array.from(set);
+  if (hasUngrouped) gs.push(UNGROUPED);
+  return gs;
 }
 
-function filtered() {
-  if (!activeGroup) return items;
-  return items.filter((i) =>
-    (i.tags ?? '').split(',').map((s) => s.trim()).includes(activeGroup),
-  );
+/** 按分组过滤；空分组名表示不过滤，UNGROUPED 表示只要没有任何 tag 的行 */
+export function groupFilter(rows, group) {
+  if (!group) return rows;
+  if (group === UNGROUPED) return rows.filter((i) => tagsOf(i).length === 0);
+  return rows.filter((i) => tagsOf(i).includes(group));
 }
+
+const filtered = () => groupFilter(items, activeGroup);
 
 function rowOf(code) {
   return items.find((i) => i.code === code) ?? null;
@@ -150,13 +170,13 @@ function renderGroups() {
   if (!refs.groups) return;
   const bar = refs.groups;
   bar.textContent = '';
-  const gs = groupsOf();
+  const gs = groupsOf(items);
   if (gs.length && !gs.includes(activeGroup)) activeGroup = gs[0];
 
   for (const g of gs) {
     const tab = el('button', {
       class: 'wl-tab' + (g === activeGroup ? ' active' : ''),
-      text: g,
+      text: groupLabel(g),
       onclick: () => {
         activeGroup = g;
         renderGroups();
@@ -165,8 +185,8 @@ function renderGroups() {
     });
     bar.appendChild(tab);
   }
-  // 编辑态：删除当前分组
-  if (editMode && activeGroup) {
+  // 编辑态：删除当前分组（「未分组」是伪分组，后端没有这个分组可删）
+  if (editMode && activeGroup && activeGroup !== UNGROUPED) {
     bar.appendChild(
       el('button', {
         class: 'wl-tab danger',
@@ -199,7 +219,9 @@ function renderTable() {
     wrap.appendChild(
       el('div', {
         class: 'wl-empty',
-        text: items.length ? `分组「${activeGroup}」下暂无标的` : '还没有自选股，点「编辑」搜索添加',
+        text: items.length
+          ? `分组「${groupLabel(activeGroup)}」下暂无标的`
+          : '还没有自选股，点「编辑」搜索添加',
       }),
     );
     return;
@@ -301,12 +323,13 @@ function onSearchInput() {
 }
 
 async function pickSuggest(code, name) {
-  const tag = activeGroup || SELF_TAG;
+  // 「未分组」不是真分组，落在它上面时按默认分组加入
+  const tag = activeGroup && activeGroup !== UNGROUPED ? activeGroup : SELF_TAG;
   refs.search.value = '';
   clearSuggest();
   try {
     await addWatch(code, tag);
-    if (!activeGroup) activeGroup = tag;
+    if (!activeGroup || activeGroup === UNGROUPED) activeGroup = tag;
     status(`已将 ${name}(${code}) 加入「${tag}」`, 'ok');
     await load();
   } catch (err) {

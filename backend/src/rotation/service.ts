@@ -72,11 +72,14 @@ async function weeklyMaTrend(code: string): Promise<boolean | null> {
   }
 }
 
-/** 5 态状态机（确定性规则，呼应评审：加过热/破位判断，避免「涨得好=还能涨」） */
-function classifyState(m: EtfMetrics, rs: number | null): EtfRotationState {
+/**
+ * 5 态状态机（确定性规则，呼应评审：加过热/破位判断，避免「涨得好=还能涨」）。
+ * 返回 null 表示**数据不足**：这与「破位」是两回事，破位会被 buildNote 配上
+ * 「跌破 MA60，规避/离场」的确定性文案，用它掩盖取数失败等于以确定口吻误导离场。
+ */
+function classifyState(m: EtfMetrics, rs: number | null): EtfRotationState | null {
   const { price, ma20, ma60, maDeviation, pricePercentile, ret20, ret60 } = m;
-  // 数据不足或跌破 MA60：破位/观望
-  if (price == null || ma60 == null) return '破位';
+  if (price == null || ma60 == null) return null;
   if (price < ma60) return '破位';
   // 趋势未破前提下，依次判定过热 → 加速 → 回踩 → 上升
   if ((pricePercentile ?? 0) >= 85 && (maDeviation ?? 0) >= 25 && (ret20 ?? 0) >= 10) {
@@ -91,7 +94,8 @@ function classifyState(m: EtfMetrics, rs: number | null): EtfRotationState {
   ) {
     return '加速';
   }
-  if (ma20 != null && price <= ma20 * 1.03 && price >= ma20 * 0.97 && (ret20 ?? 0) <= 2) {
+  // ret20 缺失时不判回踩：`?? 0` 会让「没取到近 20 日涨幅」满足 ≤2 的条件
+  if (ma20 != null && ret20 != null && price <= ma20 * 1.03 && price >= ma20 * 0.97 && ret20 <= 2) {
     return '回踩';
   }
   return '上升';
@@ -190,6 +194,8 @@ export async function buildRotationOverview(): Promise<EtfRotationOverview> {
       const weekMaTrend = await weeklyMaTrend(u.code);
       const flowNetIn = flowByCode.get(u.code) ?? null;
       const state = classifyState(m, rs);
+      // 缺现价/MA60 无法定状态：整只剔除榜单，不硬给一个结论
+      if (state === null) return null;
       const { score, breakdown } = scoreRotation(state, m, rs, flowNetIn);
       return {
         code: u.code,
@@ -216,11 +222,14 @@ export async function buildRotationOverview(): Promise<EtfRotationOverview> {
   const list = items
     .filter((it): it is EtfRotationItem => it != null)
     .sort((a, b) => b.score - a.score);
+  const dropped = universe.length - list.length;
 
   return {
     asOf: nowIso(),
     items: list,
-    note: 'ETF 行业轮动（中线赛道层，相对强弱+趋势+资金流确定性研判，仅供参考，不构成下单建议）',
+    note:
+      'ETF 行业轮动（中线赛道层，相对强弱+趋势+资金流确定性研判，仅供参考，不构成下单建议）' +
+      (dropped > 0 ? `；${dropped} 只因行情数据不足未纳入榜单（非破位）` : ''),
   };
 }
 
@@ -256,8 +265,14 @@ export async function runMidDrilldown(opts: MidDrilldownOptions = {}): Promise<M
 
   const strongEtfs: MidDrilldownEtf[] = [];
   const universe = new Set<string>();
+  const consFailed: string[] = [];
   for (const it of strong) {
-    const cons = await fetchEtfConstituents(it.code);
+    // 函数注释承诺 best-effort 不抛错，但这里原先裸调：任何一只 ETF 的成分股请求抛错
+    // 都会让整次下钻失败，进而让定时中线调仓拿不到目标。按同文件 safeMetrics 的方式包一层
+    const cons = await fetchEtfConstituents(it.code).catch(() => {
+      consFailed.push(it.code);
+      return [] as string[];
+    });
     for (const c of cons) universe.add(c);
     strongEtfs.push({
       code: it.code,
@@ -300,7 +315,9 @@ export async function runMidDrilldown(opts: MidDrilldownOptions = {}): Promise<M
     strongEtfs,
     universeSize: universe.size,
     run,
-    note: `在 ${strong.length} 个强赛道、${universe.size} 只成分股内下钻中线龙头。`,
+    note:
+      `在 ${strong.length} 个强赛道、${universe.size} 只成分股内下钻中线龙头。` +
+      (consFailed.length ? `（${consFailed.join('、')} 成分股取数失败，已降级跳过）` : ''),
   };
 }
 

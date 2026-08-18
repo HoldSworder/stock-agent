@@ -70,7 +70,27 @@ interface InternalOptions extends JsonRequestOptions {
   parse: 'json' | 'text';
 }
 
-const cache = new Map<string, { at: number; result: RunResult }>();
+/**
+ * 进程内响应缓存。缓存键是完整 URL（含 secid/lmt 等参数），长跑进程里键空间实际是无界的，
+ * 故必须有淘汰：写入时先清掉已过期项，仍超上限就按插入序（Map 天然保序）丢最老的。
+ * ponytail: 近似 FIFO 而非 LRU——命中不刷新次序，热键被挤掉只是多回源一次；
+ * 要真 LRU 就在命中时 delete + set 重新入队。
+ */
+const CACHE_MAX_ENTRIES = 500;
+
+const cache = new Map<string, { at: number; expireAt: number; result: RunResult }>();
+
+function cachePut(key: string, result: RunResult, ttlMs: number): void {
+  const now = Date.now();
+  if (cache.size >= CACHE_MAX_ENTRIES) {
+    for (const [k, v] of cache) if (v.expireAt <= now) cache.delete(k);
+    for (const k of cache.keys()) {
+      if (cache.size < CACHE_MAX_ENTRIES) break;
+      cache.delete(k);
+    }
+  }
+  cache.set(key, { at: now, expireAt: now + ttlMs, result });
+}
 
 async function run(opts: InternalOptions): Promise<RunResult> {
   const {
@@ -184,7 +204,7 @@ async function run(opts: InternalOptions): Promise<RunResult> {
 
     if (parse === 'text') {
       const result: RunResult = { status: res.status, text, location: res.headers.get('location') };
-      if (cacheTtlMs > 0) cache.set(key, { at: Date.now(), result });
+      if (cacheTtlMs > 0) cachePut(key, result, cacheTtlMs);
       record(sourceId, { ok: true, latencyMs: Date.now() - startedAt });
       return result;
     }
@@ -211,7 +231,8 @@ async function run(opts: InternalOptions): Promise<RunResult> {
       break;
     }
     const result: RunResult = { status: res.status, text, json };
-    if (cacheTtlMs > 0) cache.set(key, { at: Date.now(), result });
+    // 只缓存解析后的 json：requestJson 不读 text，留着等于把同一份响应存两遍
+    if (cacheTtlMs > 0) cachePut(key, { status: res.status, text: '', json }, cacheTtlMs);
     record(sourceId, { ok: true, latencyMs: Date.now() - startedAt });
     return result;
   }

@@ -3,12 +3,17 @@ import { PHASE_LABEL } from './phase';
 import { VOLUME_STATE_LABEL } from './volumePrice';
 
 // 给 LLM 的文本序列化（计划 7.1 的字符预算）。
-// 硬约束：技术上下文常态 ≤3000 字符、硬上限 6000；候选目录常态 ≤4000、硬上限 6000。
+// 硬约束：技术上下文常态 ≤3000 字符、硬上限 6000；候选目录常态 ≤5600、硬上限 6000。
 // 都低于 tools.ts 里 preview() 的 8000 字符静默截断线，避免中段被吃掉。
 // 一律不输出原始 K 线数组。
 
 const CONTEXT_SOFT_LIMIT = 3000;
-const CATALOG_SOFT_LIMIT = 4000;
+/**
+ * 候选目录软上限。曾是 4000，满配额（21 价位 / 40 条件）叠上几条 warnings 就会溢出，
+ * 而裁尾裁掉的 candidateId LLM 根本看不见、引用了又被 validateProposal 打回 → 无限重试。
+ * 上调到 5600 留出 warnings 的余量，同时仍低于 preview() 的截断线。
+ */
+const CATALOG_SOFT_LIMIT = 5600;
 
 /** 超软上限时按行裁尾并显式说明裁掉多少，不做头尾截断 */
 function capLines(lines: string[], softLimit: number, what: string): string {
@@ -191,7 +196,8 @@ export function formatCandidates(catalog: CandidateCatalog, which: 'levels' | 'c
         `- ${c.candidateId}｜${c.purpose}｜适用 ${c.suitableFor.join('/') || '（无）'}｜${c.timeframe}` +
           `${c.capability === 'live_only' ? '｜实时专用(不可回测)' : ''}` +
           // 不写这句的话，模型只看到「适用」里少了 invalidation，会以为目录漏了东西继续硬填
-          `${c.alreadySatisfied ? '｜当前已成立，不可作失效条件' : ''}｜${c.description}` +
+          `${c.alreadySatisfied ? '｜当前已成立，不可作失效条件' : ''}` +
+          `${c.directionMissed ? '｜现价已在该价位另一侧，穿越方向已错过，任何角色都不可用' : ''}｜${c.description}` +
           `${c.fromLevelCandidateId ? `｜源 ${c.fromLevelCandidateId}` : ''}`,
       );
     }

@@ -518,55 +518,97 @@ function assertPlatformEnabled(platform: KolPlatform): void {
   }
 }
 
+/** 全量轮覆盖的平台 */
+const ALL_PLATFORMS: KolPlatform[] = ['weibo', 'xiaohongshu'];
+
+/** 平台 → 启停设置键 */
+const enabledKey = (p: KolPlatform) => (p === 'weibo' ? 'weiboEnabled' : 'xhsEnabled');
+
 /**
- * 进行中的抓取（按平台维度，undefined 记在 'all' 桶）。
+ * 进行中的抓取（按平台维度）。
  *
  * 定时任务的 job 锁管不到手动入口 POST /api/kol/refresh，两者并行时小红书详情预算各算各的、
  * 请求量直接翻倍——而密集请求实测会让 web_session 失效。这里在 service 层做进程内互斥：
  * 同平台重入直接复用在跑的那一轮，不再新开请求。
  */
-const inflightRefresh = new Map<string, Promise<KolRefreshResult>>();
+const inflightRefresh = new Map<KolPlatform, Promise<KolRefreshResult>>();
+
+/** 单平台一轮抓取；该平台已有一轮在跑则复用它 */
+function refreshPlatform(
+  signal: AbortSignal | undefined,
+  platform: KolPlatform,
+): Promise<KolRefreshResult> {
+  const running = inflightRefresh.get(platform);
+  if (running) {
+    console.log(`[kol] 已有抓取在进行中（${platform}），复用本轮结果`);
+    return running;
+  }
+  const task = runRefresh(signal, platform).finally(() => inflightRefresh.delete(platform));
+  inflightRefresh.set(platform, task);
+  return task;
+}
+
+/**
+ * 全量轮（手动「抓取最新」）：逐平台各自取锁，再合并计数。
+ *
+ * 原先全量轮与两个单平台轮共用一把锁，撞上任一单平台定时轮（微博 10 分钟一轮、小红书
+ * 1 小时一轮，很容易命中）就直接复用那一轮的 Promise——返回的只是单平台结果，另一平台
+ * 本轮压根没抓，接口却把它当成一次成功的全量抓取回给用户。分平台取锁后，撞上的那个平台
+ * 复用在跑的轮次，没撞上的平台照常新起一轮，两边计数合并后才是如实的全量结果。
+ */
+async function refreshEveryPlatform(signal?: AbortSignal): Promise<KolRefreshResult> {
+  const settled = await Promise.all(
+    ALL_PLATFORMS.map(async (p) => {
+      // 禁用的平台整体跳过（与原先「逐账号跳过被禁用平台」等效）
+      if (getValue(enabledKey(p)) !== 'true') return null;
+      try {
+        return await refreshPlatform(signal, p);
+      } catch (e) {
+        const error = e instanceof Error ? e.message : String(e);
+        console.warn(`[kol] ${p} 本轮整体失败: ${error}`);
+        return { platform: p, error };
+      }
+    }),
+  );
+
+  const ok = settled.filter((r): r is KolRefreshResult => r != null && !('error' in r));
+  const bad = settled.filter(
+    (r): r is { platform: KolPlatform; error: string } => r != null && 'error' in r,
+  );
+  if (!ok.length) {
+    if (bad.length) throw new WeiboError(bad.map((b) => `${b.platform}：${b.error}`).join('；'));
+    throw new WeiboError('微博与小红书数据源均已在数据源页禁用');
+  }
+  return {
+    accounts: ok.reduce((s, r) => s + r.accounts, 0),
+    inserted: ok.reduce((s, r) => s + r.inserted, 0),
+    // 整体失败的平台也要如实进 failed，否则前端会把「一个平台全挂」显示成全量成功
+    failed: [...ok.flatMap((r) => r.failed), ...bad.map((b) => `${b.platform}(整体失败)`)],
+  };
+}
 
 /**
  * 抓取启用的大V最新发帖并入库，可按平台过滤（两套定时分别调用）。
  * 串行 + 间隔避免限流；单个大V失败只记 warn 并计入 failed，不阻断整轮。
- * 同一平台（及不带平台的全量轮）同时只允许一轮在跑，重入复用在跑的 Promise。
+ * 同一平台同时只允许一轮在跑，重入复用在跑的 Promise；不带 platform 的全量轮逐平台分别取锁。
  */
 export function refreshAll(
   signal?: AbortSignal,
   platform?: KolPlatform,
 ): Promise<KolRefreshResult> {
-  // 不带 platform 的全量轮会覆盖两个平台，与任一单平台轮都冲突，故与它们共用同一把锁
-  const keys = platform ? [platform, 'all'] : ['all', 'weibo', 'xiaohongshu'];
-  const running = keys.map((k) => inflightRefresh.get(k)).find(Boolean);
-  if (running) {
-    console.log(`[kol] 已有抓取在进行中（${platform ?? '全部平台'}），复用本轮结果`);
-    return running;
-  }
-  const key = platform ?? 'all';
-  const task = runRefresh(signal, platform).finally(() => inflightRefresh.delete(key));
-  inflightRefresh.set(key, task);
-  return task;
+  return platform ? refreshPlatform(signal, platform) : refreshEveryPlatform(signal);
 }
 
 async function runRefresh(
-  signal?: AbortSignal,
-  platform?: KolPlatform,
+  signal: AbortSignal | undefined,
+  platform: KolPlatform,
 ): Promise<KolRefreshResult> {
-  if (platform) {
-    assertPlatformEnabled(platform);
-  } else if (getValue('weiboEnabled') !== 'true' && getValue('xhsEnabled') !== 'true') {
-    throw new WeiboError('微博与小红书数据源均已在数据源页禁用');
-  }
+  assertPlatformEnabled(platform);
 
-  const conds = [
-    eq(schema.kolAccounts.enabled, 1),
-    ...(platform ? [eq(schema.kolAccounts.platform, platform)] : []),
-  ];
   const accounts = db
     .select()
     .from(schema.kolAccounts)
-    .where(and(...conds))
+    .where(and(eq(schema.kolAccounts.enabled, 1), eq(schema.kolAccounts.platform, platform)))
     .orderBy(schema.kolAccounts.sortOrder)
     .all();
 
@@ -578,8 +620,6 @@ async function runRefresh(
   for (const [i, a] of accounts.entries()) {
     if (signal?.aborted) break;
     const p = toPlatform(a.platform);
-    // 不带 platform 参数时（手动「抓取最新」）逐个账号跳过被禁用的平台
-    if (!platform && getValue(p === 'weibo' ? 'weiboEnabled' : 'xhsEnabled') !== 'true') continue;
     scanned += 1;
     try {
       inserted +=

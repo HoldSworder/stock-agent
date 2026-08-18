@@ -1,12 +1,16 @@
 # a-stock-data sidecar 依赖。
-# mootdx 不锁版本：按上游 README V3.2.4，靠 tdx_client() helper 规避 0.11.x BESTIP
+# 一律补上限：只写下限的话构建不可复现——同一份 Dockerfile 今天装 pandas 2.x、
+# 明天装到 3.x（read_html / to_dict 行为已变），mootdx 也会装到本仓 astock_functions.py
+# 顶部注释点名有 BESTIP 崩溃 bug 的 0.11.x。上限按「下一个大版本」卡，允许补丁与小版本升级。
+#
+# mootdx 不锁死具体版本：按上游 README V3.2.4，靠 tdx_client() helper 规避 0.11.x BESTIP
 # 空串崩溃，锁 0.10.12 反而在部分 Python 下 import 崩。
-mootdx>=0.10
-requests>=2.31
+mootdx>=0.10,<0.12
+requests>=2.31,<3
 certifi>=2024.0
-pandas>=2.0
-lxml>=5.0
-stockstats>=0.6
-hmmlearn>=0.3
-fastapi>=0.110
-uvicorn[standard]>=0.29
+pandas>=2.0,<3
+lxml>=5.0,<7
+stockstats>=0.6,<1
+hmmlearn>=0.3,<1
+fastapi>=0.110,<1
+uvicorn[standard]>=0.29,<1

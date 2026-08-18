@@ -1,4 +1,4 @@
-import { BollingerBands, EMA, MACD, RSI, StochasticOscillator } from 'trading-signals';
+import { BollingerBands, EMA, MACD, RSI } from 'trading-signals';
 import {
   PLAYBOOK_RULE_CAPABILITY,
   type KlineBar,
@@ -57,13 +57,52 @@ function smaSeries(values: number[], period: number): Array<number | null> {
   return out;
 }
 
-/** 指数移动平均序列（复用 trading-signals 的 EMA，逐根喂入取当根值） */
+/**
+ * 指数移动平均序列（复用 trading-signals 的 EMA，逐根喂入取当根值）。
+ * trading-signals@7 的 EMA 自播种，第 1 根输入就返回数值（只有 getResultOrThrow 才查预热），
+ * 于是 ema60 在第 1 根等于当根收盘价，`close above ema60` 会在整个预热期用垃圾值开仓。
+ * 这里显式在前 period-1 根返回 null，与同文件 smaSeries 以及文件头「不足样本一律 null」的约定对齐。
+ */
 function emaSeries(values: number[], period: number): Array<number | null> {
   const ema = new EMA(period);
-  return values.map((v) => {
+  return values.map((v, i) => {
     const r = ema.add(v) as number | null;
-    return r == null ? null : Number(r);
+    if (i < period - 1 || r == null) return null;
+    return Number(r);
   });
+}
+
+/** MACD(12,26,9) 认信号的最早下标：慢线 26 根 + DEA 的 EMA(9) 也要吃满 */
+const MACD_STABLE_BARS = 26 + 9;
+
+/** KDJ 参数（通达信默认 9,3,3） */
+const KDJ_N = 9;
+
+/**
+ * 国内口径 KDJ(9,3,3)：RSV 的 K/D 用 1/3 权重递推（SMMA），初值 50。
+ * 不能用 trading-signals 的 StochasticOscillator——它是国际口径，内部对 fastK 做 SMA 平滑，
+ * 只有 j=3k-2d 这一步和国内一致；用户按通达信读数写的 `kAbove: 80` 会命中完全不同的点位。
+ * 同文件 MACD 已明确标注 CN 口径，这里对齐。
+ */
+function kdjSeriesCn(bars: KlineBar[]): Series['kdj'] {
+  const out: Series['kdj'] = [];
+  let k = 50;
+  let d = 50;
+  for (let i = 0; i < bars.length; i++) {
+    if (i < KDJ_N - 1) {
+      out.push(null);
+      continue;
+    }
+    const win = bars.slice(i - KDJ_N + 1, i + 1);
+    const hh = Math.max(...win.map((b) => b.high));
+    const ll = Math.min(...win.map((b) => b.low));
+    // 窗口内无振幅（连续一字板）时 RSV 无定义，沿用上一根 K/D，不用 0 或 100 顶替
+    const rsv = hh > ll ? ((bars[i].close - ll) / (hh - ll)) * 100 : k;
+    k = (2 / 3) * k + (1 / 3) * rsv;
+    d = (2 / 3) * d + (1 / 3) * k;
+    out.push({ k, d, j: 3 * k - 2 * d });
+  }
+  return out;
 }
 
 /** 遍历规则收集需要预计算的均线，避免为未用到的周期做无谓计算 */
@@ -118,33 +157,22 @@ export function buildSeries(code: string, bars: KlineBar[], groups: PlaybookRule
   const macd: Series['macd'] = [];
   if (needs(rules, 'macd')) {
     const ind = new MACD(new EMA(12), new EMA(26), new EMA(9));
-    for (const c of closes) {
+    closes.forEach((c, i) => {
       const r = ind.add(c) as { macd: number; signal: number } | null;
+      // MACD.update 从第 26 根就产出结果，但那时内部的 EMA(9) 只吃过 1 个 DIF，
+      // dea 近似等于 dif，金叉/死叉判在一条无意义的信号线上。等 DEA 也吃满 9 个样本再认。
+      if (!r || i < MACD_STABLE_BARS) {
+        macd.push(null);
+        return;
+      }
       // CN 口径：DIF=快慢线差、DEA=DIF 的 9 日 EMA、柱=2×(DIF-DEA)
-      macd.push(r ? { dif: r.macd, dea: r.signal, bar: 2 * (r.macd - r.signal) } : null);
-    }
+      macd.push({ dif: r.macd, dea: r.signal, bar: 2 * (r.macd - r.signal) });
+    });
   } else {
     macd.push(...bars.map(() => null));
   }
 
-  const kdj: Series['kdj'] = [];
-  if (needs(rules, 'kdj')) {
-    const ind = new StochasticOscillator(9, 3, 3);
-    for (const b of bars) {
-      const r = ind.add({ high: b.high, low: b.low, close: b.close }) as
-        | { stochK: number; stochD: number }
-        | null;
-      if (!r) {
-        kdj.push(null);
-        continue;
-      }
-      const k = Number(r.stochK);
-      const d = Number(r.stochD);
-      kdj.push({ k, d, j: 3 * k - 2 * d });
-    }
-  } else {
-    kdj.push(...bars.map(() => null));
-  }
+  const kdj: Series['kdj'] = needs(rules, 'kdj') ? kdjSeriesCn(bars) : bars.map(() => null);
 
   const boll: Series['boll'] = [];
   if (needs(rules, 'boll')) {

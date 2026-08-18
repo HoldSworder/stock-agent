@@ -23,8 +23,15 @@ export type BuyAction = '建仓' | '观察' | '放弃';
 export interface ConfidenceResult {
   /** 0-100 混合置信度 */
   confidence: number;
-  /** agent 动作裁决（无 agent 时按置信门给确定性默认） */
+  /**
+   * 最终动作裁决：以护栏改写后的 instruction.action 为准，而非 agent 原话。
+   * 上层只看 action 决定推不推、建不建层，若这里回传 agent 的「建仓」，
+   * 被追高保护/仓位上限拦下的买点仍会按建仓推送并写进持久化层状态，
+   * 之后硬止损、移动止盈、heldPct 全部基于这个从未开过的幻影仓位计算。
+   */
   action: BuyAction;
+  /** agent 原始动作裁决（区分「AI 说观察」与「AI 说建仓但被护栏拦下」，仅用于文案） */
+  agentAction: BuyAction;
   /** 一句话研判（agent 增信结论；无 agent 为空） */
   advice: string;
   /** 资金/量价确认读数（确定性证据） */
@@ -265,6 +272,16 @@ function buildInstruction(
   });
 }
 
+/**
+ * 护栏后的最终动作：只有指令仍是建/加仓才算真「建仓」。
+ * applyBuyGuardrails 会把追高、超总仓上限的指令改写成「观望」「持有」，
+ * 这类被拦下的买点绝不能再以建仓身份出去。
+ */
+function finalActionOf(ins: EtfExecInstruction, agentAction: BuyAction): BuyAction {
+  if (ins.action === '建仓' || ins.action === '加仓') return '建仓';
+  return agentAction === '放弃' ? '放弃' : '观察';
+}
+
 /** 对一条买点信号给出混合置信度 + 确认读数 + 执行指令（agentConfirmBuy 关闭时仅确定性） */
 export async function confirmBuy(
   s: EtfWatchSignal,
@@ -280,9 +297,17 @@ export async function confirmBuy(
 
   if (!cfg.agentConfirmBuy) {
     const pass = !(cfg.minConfidence > 0 && det < cfg.minConfidence);
-    const action: BuyAction = pass ? '建仓' : '观察';
+    const agentAction: BuyAction = pass ? '建仓' : '观察';
     const instruction = buildInstruction(s, cfg, heldPct, pass, {}, `${TF_LABEL[s.timeframe]}金叉确定性建层`);
-    return { confidence: det, action, advice: '', confirm, instruction, runId: null };
+    return {
+      confidence: det,
+      action: finalActionOf(instruction, agentAction),
+      agentAction,
+      advice: '',
+      confirm,
+      instruction,
+      runId: null,
+    };
   }
 
   let context = '';
@@ -322,11 +347,12 @@ export async function confirmBuy(
 
   if (res.status !== 'success' || !res.outputText.trim()) {
     const pass = !(cfg.minConfidence > 0 && det < cfg.minConfidence);
-    const action: BuyAction = pass ? '建仓' : '观察';
+    const agentAction: BuyAction = pass ? '建仓' : '观察';
     const instruction = buildInstruction(s, cfg, heldPct, pass, {}, '（agent 研判失败，按确定性子分）');
     return {
       confidence: det,
-      action,
+      action: finalActionOf(instruction, agentAction),
+      agentAction,
       advice: '（agent 研判失败，按确定性子分）',
       confirm,
       instruction,
@@ -348,5 +374,13 @@ export async function confirmBuy(
     agent.advice || `${TF_LABEL[s.timeframe]}金叉`,
   );
 
-  return { confidence, action: agent.action, advice: agent.advice, confirm, instruction, runId: res.runId };
+  return {
+    confidence,
+    action: finalActionOf(instruction, agent.action),
+    agentAction: agent.action,
+    advice: agent.advice,
+    confirm,
+    instruction,
+    runId: res.runId,
+  };
 }

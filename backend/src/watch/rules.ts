@@ -373,10 +373,27 @@ export function evalScanSignals(
   return out;
 }
 
-/** 按板块近似推算涨停价（主板 10% / 创业板 300·301 为 20%；688/8·4 北交所不参与） */
-export function approxLimitUp(code: string, prevClose: number): number | undefined {
+/**
+ * 板块涨跌停幅度（%）：北交所 4/8 开头为 30，创业板 300/301 与科创板 688/689 为 20，
+ * 主板 ST 为 5，其余主板 10。创业板/科创板/北交所的 ST 仍按各自板块幅度，故先判板块再判 ST。
+ * ST 用「名称含 ST」判定——代码本身看不出来，只能靠行情返回的名称。
+ * 北交所这条不能漏：坏价过滤（2×幅度）与涨停判定（0.98×幅度）都直接吃这个返回值，
+ * 按 10% 算会把北交所一只涨 25% 的票判成坏数据整轮跳过、涨 10% 又误记成「新晋涨停」。
+ */
+export function limitRatioPct(code: string, name?: string): number {
+  if (/^[48]/.test(code)) return 30;
+  if (/^(300|301|688|689)/.test(code)) return 20;
+  if (name && /ST/i.test(name)) return 5;
+  return 10;
+}
+
+/**
+ * 按板块近似推算涨停价。
+ * 北交所（4/8 开头）为 30% 且首日等规则另计，宁可返回 undefined 让相关信号不触发，
+ * 也不要按 10% 推出一个假涨停价，再据此误报炸板 / 临近涨停。
+ */
+export function approxLimitUp(code: string, prevClose: number, name?: string): number | undefined {
   if (prevClose <= 0) return undefined;
-  let ratio = 0.1;
-  if (/^(300|301)/.test(code)) ratio = 0.2;
-  return Math.round(prevClose * (1 + ratio) * 100) / 100;
+  if (/^[48]/.test(code)) return undefined;
+  return Math.round(prevClose * (1 + limitRatioPct(code, name) / 100) * 100) / 100;
 }

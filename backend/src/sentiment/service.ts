@@ -7,6 +7,7 @@ import type {
   StrengthBreakdown,
 } from '@stock-agent/shared';
 import { nowIso, shanghaiToday } from '../util';
+import { isTradingDay } from '../market/calendar';
 import { fetchSentimentComponents } from './data';
 import { getPrevIndex, upsertSnapshot } from './repo';
 
@@ -110,9 +111,13 @@ function buildAdvice(phase: SentimentPhase): string {
 
 /**
  * 组装市场情绪周期总览（确定性只读 + 落库当日快照供方向判定与历史趋势）。
- * @param persist 是否写入当日快照（GET 与收盘定时均写，按日 upsert 幂等）
+ *
+ * @param persist 是否写入当日快照。默认 false：落库只由收盘任务负责。
+ *   随机时点的页面访问一旦落库，prevIndex 取到的就是「上一次有人打开页面」的时刻值，
+ *   delta 变成两个随机时点之差，依赖它的 classifyPhase 恢复/退潮判定随之失真；
+ *   周末/节假日更会写出非交易日行，污染历史序列。传 true 时仍会过一道交易日闸门。
  */
-export async function buildSentimentOverview(persist = true): Promise<SentimentOverview> {
+export async function buildSentimentOverview(persist = false): Promise<SentimentOverview> {
   const { components, stale } = await fetchSentimentComponents();
   const subs = computeSubScores(components);
   const { index, breakdown } = synthesize(subs);
@@ -125,7 +130,7 @@ export async function buildSentimentOverview(persist = true): Promise<SentimentO
   const phase = classifyPhase(index, delta);
   const advice = buildAdvice(phase);
 
-  if (persist) {
+  if (persist && isTradingDay()) {
     upsertSnapshot({
       tradeDate,
       index,

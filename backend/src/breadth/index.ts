@@ -10,12 +10,13 @@ import { cached } from '../lib/ttlCache';
 // 收盘后定时落一条当日各板块快照（按交易日 upsert），供持续性/退潮判定与历史趋势。
 
 export function registerBreadthModule(app: FastifyInstance): void {
-  // 板块新高宽度总览（实时合成，并按日 upsert 快照）。计算较重（逐板块取成分），响应级缓存 30min。
+  // 板块新高宽度总览（实时合成，只读不落库）。计算较重（逐板块取成分），响应级缓存 30min。
+  // 快照落库只由收盘任务负责：GET 可能发生在盘中或周末，落下去就是半天计数 / 非交易日行。
   app.get('/api/breadth/overview', async (_req, reply) => {
     try {
       return {
         ok: true,
-        data: await cached('breadth:overview', 30 * 60_000, () => buildBreadthOverview()),
+        data: await cached('breadth:overview', 30 * 60_000, () => buildBreadthOverview(false)),
       };
     } catch (e) {
       return reply.code(502).send({ ok: false, error: e instanceof Error ? e.message : String(e) });

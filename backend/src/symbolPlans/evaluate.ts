@@ -13,9 +13,9 @@ import { getKline } from '../market/eastmoney';
 import { buildSeries, evalRule, type Series } from '../playbook/rules';
 import * as repo from './repo';
 import { invalidatePlanMarks } from './markSync';
-import { isBarUnclosed } from './sessionClock';
+import { isBarUnclosed, nextTradingClose } from './sessionClock';
 import { sqlite } from '../db/client';
-import { nowIso } from '../util';
+import { nowIso, shanghaiClock } from '../util';
 
 // 条件求值（计划 Phase 5 的 R19 分频要求）。
 // 纪律：
@@ -304,13 +304,18 @@ export function evaluatePlan(input: EvaluateInput): SymbolPlanEvaluation {
   // 「周线金叉 + 日线站上压力位」这种组合只要不落在同一根 bar 上就永远凑不齐。
   const latched = repo.listLatchedConditionIds(plan.id);
 
-  // 按「情景:条件」索引，供后面精确定位状态
+  // 按「情景:用途:条件」索引，供后面精确定位状态。
+  // 键里必须带用途：条件双用途之后，同一条件合法地同时出现在某情景的触发与失效数组里
+  // （「收盘跌破支撑」既是风险情景的减仓触发，也是它自己的失效条件），
+  // 不带用途的键会让后写的那条覆盖前一条，两个数组读到同一个状态。
   const byScenario = new Map<string, PlanConditionState>();
+  const stateKey = (scenarioId: string, isInvalid: boolean, conditionId: string): string =>
+    `${scenarioId}:${isInvalid ? 'inval' : 'trig'}:${conditionId}`;
 
   for (const scenario of plan.scenarios) {
-    const push = (st: PlanConditionState): void => {
+    const push = (st: PlanConditionState, isInvalid: boolean): void => {
       states.push(st);
-      byScenario.set(`${scenario.id}:${st.conditionId}`, st);
+      byScenario.set(stateKey(scenario.id, isInvalid, st.conditionId), st);
     };
     const mark = (cond: PlanCondition, isInvalid: boolean): void => {
       const cadence = cadenceOf(cond);
@@ -331,7 +336,7 @@ export function evaluatePlan(input: EvaluateInput): SymbolPlanEvaluation {
             ? `${isInvalid ? '失效' : '触发'}条件（tick，已锁存）：${cond.description}`
             : `${isInvalid ? '失效' : '触发'}条件（tick）：${cond.description}`,
           evaluatedAt: at,
-        });
+        }, isInvalid);
         return;
       }
       const allBars = input.barsByPeriod.get(cond.timeframe);
@@ -355,7 +360,7 @@ export function evaluatePlan(input: EvaluateInput): SymbolPlanEvaluation {
             ? `${cond.timeframe} 仅有未收完的当根 K 线，条件按未满足处理`
             : `${cond.timeframe} K 线缺失，条件按未满足处理`,
           evaluatedAt: at,
-        });
+        }, isInvalid);
         return;
       }
       const barTime = bars[bars.length - 1].time;
@@ -382,27 +387,57 @@ export function evaluatePlan(input: EvaluateInput): SymbolPlanEvaluation {
           ? `${isInvalid ? '失效' : '触发'}条件（${cond.timeframe}，已锁存）：${cond.description}`
           : `${isInvalid ? '失效' : '触发'}条件（${cond.timeframe} bar ${barTime}）：${cond.description}`,
         evaluatedAt: at,
-      });
+      }, isInvalid);
     };
     for (const c of scenario.conditions) mark(c, false);
     for (const c of scenario.invalidConditions) mark(c, true);
   }
 
-  // 条件 id 可能被多个情景引用，按「情景+条件」定位，避免 find 只取到首条
-  const stateOf = (scenarioId: string, id: string): PlanConditionState | undefined =>
-    byScenario.get(`${scenarioId}:${id}`);
+  // 条件 id 可能被多个情景引用，也可能在同一情景里兼任两种用途，
+  // 按「情景+用途+条件」定位，避免 find 只取到首条
+  const stateOf = (
+    scenarioId: string,
+    isInvalid: boolean,
+    id: string,
+  ): PlanConditionState | undefined => byScenario.get(stateKey(scenarioId, isInvalid, id));
 
-  // 任一情景的必选触发条件全满足 → 触发；任一失效条件满足 → 失效
+  // 任一情景的必选触发条件全满足 → 触发；任一失效条件满足 → 失效。
+  //
+  // 风险情景的失效条件是例外：那条件本就是「跌下来了，该减仓」这件事本身。
+  // 把它算成整份计划失效，结果是价格真的跌下来时用户看到的是一份灰掉全部价位线的作废计划，
+  // 而不是「触发风险路径，动作 reduce」——恰恰在最该给出减仓指令的时刻什么都不给。
+  // 故风险情景的失效条件命中走 triggered，并记下 scenarioId 供前端显示是哪条路径。
   let triggered = false;
   let invalidated = false;
+  const triggeredScenarios: SymbolPlanEvaluation['triggeredScenarios'] = [];
+  // 一个情景最多进一次。双用途之后同一条件可以同时是风险情景的触发与失效条件，
+  // 它成立时两个分支都会命中，不去重前端会把同一条风险路径渲染两遍
+  const recorded = new Set<string>();
   for (const sc of plan.scenarios) {
     // 必须对过滤后的数组判空：若某情景条件全是 required=false，
     // every 对空数组恒真会直接误报触发
     const required = sc.conditions.filter((c) => c.required);
-    if (required.length > 0 && required.every((c) => stateOf(sc.id, c.id)?.satisfied)) {
+    if (required.length > 0 && required.every((c) => stateOf(sc.id, false, c.id)?.satisfied)) {
       triggered = true;
+      triggeredScenarios.push({ scenarioId: sc.id, rank: sc.rank, action: sc.action, via: 'trigger' });
+      recorded.add(sc.id);
     }
-    if (sc.invalidConditions.some((c) => stateOf(sc.id, c.id)?.satisfied)) invalidated = true;
+    if (sc.invalidConditions.some((c) => stateOf(sc.id, true, c.id)?.satisfied)) {
+      if (sc.rank === 'risk') {
+        triggered = true;
+        if (!recorded.has(sc.id)) {
+          triggeredScenarios.push({
+            scenarioId: sc.id,
+            rank: sc.rank,
+            action: sc.action,
+            via: 'invalidation',
+          });
+          recorded.add(sc.id);
+        }
+      } else {
+        invalidated = true;
+      }
+    }
   }
 
   const expired = plan.expiresAt != null && plan.expiresAt < at;
@@ -420,9 +455,12 @@ export function evaluatePlan(input: EvaluateInput): SymbolPlanEvaluation {
     conditions: states,
     triggered,
     invalidated,
+    triggeredScenarios,
     expired,
-    // 失效或过期后需要新版本；仅触发不需要
-    needsNewVersion: invalidated || expired,
+    // 失效或过期后需要新版本；主路径触发不需要。
+    // 风险路径已启动是例外：那份计划的多头情景已经被行情否掉了，状态却停在 triggered（live），
+    // 既进不了 listStalePlans 也不会因失效而重建，不特判就会在盘中引擎里继续求值到 28 天到期。
+    needsNewVersion: invalidated || expired || triggeredScenarios.some((s) => s.rank === 'risk'),
     summary,
     evaluatedAt: at,
   };
@@ -446,6 +484,24 @@ export function applyEvaluation(plan: SymbolTradePlan, ev: SymbolPlanEvaluation)
     PENDING_SEEN.delete(ev);
   };
 
+  // 风险路径一启动就把有效期收紧到本场收盘，让计划当晚进入重算队列。
+  // 必须排在下面的提前返回之前：风险情景可能由状态型条件命中，此时既没有状态迁移也没有
+  // justHit（已锁存或同一根 bar 内重复求值），提前返回会让收紧永远轮不到执行。
+  if (ev.triggeredScenarios.some((s) => s.rank === 'risk')) {
+    // 收盘后才判出风险路径是常态（日线级失效条件本就只在收完的那根上成立），
+    // 此时 nextTradingClose 已跳到下一交易日，照它设会白等一整天；直接置为当下到期，
+    // 本场 15:30 的重算就能认领。盘中判出的仍留到当日收盘，减仓指令要看得见。
+    const due = shanghaiClock() >= '15:00' ? nowIso() : nextTradingClose();
+    if (repo.shortenExpiry(plan.id, due)) {
+      repo.appendEvent({
+        planId: plan.id,
+        planVersion: plan.version,
+        kind: 'reviewed',
+        note: `风险路径已启动，有效期收紧至 ${due}，本场收盘后重新生成计划`,
+      });
+    }
+  }
+
   if (ev.status === plan.status && !ev.conditions.some((c) => c.justHit)) {
     commitSeen();
     PENDING_LATCH.delete(ev);
@@ -454,8 +510,14 @@ export function applyEvaluation(plan: SymbolTradePlan, ev: SymbolPlanEvaluation)
   const latchByCondition = new Map(
     (PENDING_LATCH.get(ev) ?? []).map((l) => [l.conditionId, l.barTime]),
   );
+  // 同一 conditionId 只写一条事件。双用途之后同一条件会在 conditions 里出现两次
+  // （某情景的触发副本 + 失效副本），两条都 justHit；状态型规则没有锁存兜底，
+  // 不去重就会给同一次命中写两条 condition_hit。
+  const hitOnce = new Map<string, PlanConditionState>();
+  for (const c of ev.conditions) if (c.justHit && !hitOnce.has(c.conditionId)) hitOnce.set(c.conditionId, c);
+
   const tx = sqlite.transaction(() => {
-    for (const c of ev.conditions.filter((x) => x.justHit)) {
+    for (const c of hitOnce.values()) {
       // 事件类条件：锁存与事件写入必须同一事务且由唯一约束定胜负。
       // 插入失败说明另一个求值已抢先锁存，这条 condition_hit 就是重复的，不写。
       if (latchByCondition.has(c.conditionId)) {
@@ -566,11 +628,18 @@ export function periodsOf(plan: SymbolTradePlan): KlinePeriod[] {
   return Array.from(new Set(allConditions(plan).map((c) => c.timeframe)));
 }
 
-/** 按周期取 K 线。默认走东财；自检注入 fixture 以便驱动真实调用链而不联网 */
-export type BarLoader = (code: string, period: KlinePeriod) => Promise<KlineBar[]>;
+/**
+ * 按周期取 K 线。默认走东财；自检注入 fixture 以便驱动真实调用链而不联网。
+ * secid 必须透传：指数与个股撞码，单凭 code 会拿另一只标的的 OHLC 判触及与失效。
+ */
+export type BarLoader = (
+  code: string,
+  period: KlinePeriod,
+  secid?: string | null,
+) => Promise<KlineBar[]>;
 
-const defaultBarLoader: BarLoader = (code, period) =>
-  getKline(code, period, period === 'day' ? 120 : 320);
+const defaultBarLoader: BarLoader = (code, period, secid) =>
+  getKline(code, period, period === 'day' ? 120 : 320, secid ?? undefined);
 
 /**
  * 便捷入口：自行按需取 K 线后求值。
@@ -588,7 +657,7 @@ export async function evaluatePlanById(
   const failed: KlinePeriod[] = [];
   await Promise.all(
     periodsOf(plan).map(async (p) => {
-      const bars = await load(plan.code, p).catch((e: unknown) => {
+      const bars = await load(plan.code, p, plan.secid).catch((e: unknown) => {
         // 取数失败与「确实没触发」必须可区分，否则排查时看不出是哪种
         failed.push(p);
         console.warn(
@@ -633,7 +702,10 @@ export async function primeEvaluatorFromMarket(
   /** 本轮真正取到数的 code|period。取数失败的不算预热过，下一轮继续重试 */
   const fetched = new Set<string>();
   const wanted = new Set<string>();
+  /** 同一 code 的 secid 各计划一致，按 code 记一份即可 */
+  const secidOf = new Map<string, string | null>();
   for (const p of plans) {
+    secidOf.set(p.code, p.secid ?? secidOf.get(p.code) ?? null);
     for (const period of periodsOf(p)) {
       if (!PRIMED_PLANS.has(primedKey(p, period))) wanted.add(`${p.code}|${period}`);
     }
@@ -643,7 +715,7 @@ export async function primeEvaluatorFromMarket(
     Array.from(wanted).map(async (key) => {
       const [code, period] = key.split('|') as [string, KlinePeriod];
       try {
-        const bars = await loadBars(code, period);
+        const bars = await loadBars(code, period, secidOf.get(code) ?? null);
         const usable = isBarUnclosed(period, bars[bars.length - 1]?.time)
           ? bars.slice(0, -1)
           : bars;

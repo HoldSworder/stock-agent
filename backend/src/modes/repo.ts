@@ -3,9 +3,11 @@ import type {
   ModeBacktestMetrics,
   ModeCostRow,
   ModeHolding,
+  ModeProtocolMark,
   ModeSegmentRow,
   ModeSignalAction,
   ModeSpec,
+  ModeUniversePolicy,
   ResearchMode,
   ResearchModeBacktestInput,
   ResearchModeBacktestListItem,
@@ -70,7 +72,25 @@ function backtestToApi(row: BacktestRow): ResearchModeBacktestListItem {
     concentrationMd: row.concentrationMd,
     isRecommended: row.isRecommended,
     protocol: row.protocol,
+    engineVersion: row.engineVersion,
     createdAt: row.createdAt,
+  };
+}
+
+/**
+ * 协议列 → ModeProtocolMark。protocolVersion 为空即视为「加列之前的历史行」，
+ * 返回 null 让消费方按 v1-legacy 处理，而不是拼出一条半截的假口径。
+ */
+function protocolOf(row: DailyRow): ModeProtocolMark | null {
+  if (!row.protocolVersion) return null;
+  return {
+    protocolVersion: row.protocolVersion,
+    engineVersion: row.engineVersion ?? '',
+    universePolicy: (row.universePolicy ?? 'custom') as ModeUniversePolicy,
+    universeHash: row.universeHash ?? '',
+    poolSize: row.poolSize ?? 0,
+    costBps: { buyBps: row.costBuyBps ?? 0, sellBps: row.costSellBps ?? 0 },
+    sameAsResearchPool: row.sameAsResearchPool ?? null,
   };
 }
 
@@ -84,6 +104,7 @@ function dailyToApi(row: DailyRow): ResearchModeDaily {
     cumReturn: row.cumReturn,
     drawdown: row.drawdown,
     source: row.source as TrackingMode,
+    protocol: protocolOf(row),
     createdAt: row.createdAt,
   };
 }
@@ -256,6 +277,7 @@ export function addBacktest(modeId: string, input: ResearchModeBacktestInput): R
       tradesMd: input.tradesMd ?? null,
       isRecommended: input.isRecommended ?? false,
       protocol: input.protocol ?? '',
+      engineVersion: input.engineVersion ?? null,
       createdAt: nowIso(),
     })
     .run();
@@ -302,6 +324,9 @@ export function upsertDaily(
     .from(schema.researchModeDaily)
     .where(and(eq(schema.researchModeDaily.modeId, modeId), eq(schema.researchModeDaily.date, input.date)))
     .get();
+  // 协议列随 upsert 一并更新：同日重跑若只刷收益不刷协议，这行会挂着上一版引擎的口径，
+  // 晋级门按协议分段时就会把新引擎的样本算进旧区段
+  const p = input.protocol;
   const values = {
     id: existing?.id ?? newId(),
     modeId,
@@ -312,6 +337,14 @@ export function upsertDaily(
     cumReturn: input.cumReturn ?? null,
     drawdown: input.drawdown ?? null,
     source,
+    protocolVersion: p?.protocolVersion ?? null,
+    engineVersion: p?.engineVersion ?? null,
+    universePolicy: p?.universePolicy ?? null,
+    universeHash: p?.universeHash ?? null,
+    poolSize: p?.poolSize ?? null,
+    costBuyBps: p?.costBps.buyBps ?? null,
+    costSellBps: p?.costBps.sellBps ?? null,
+    sameAsResearchPool: p?.sameAsResearchPool ?? null,
     createdAt: nowIso(),
   };
   db.insert(schema.researchModeDaily)

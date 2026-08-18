@@ -6,7 +6,6 @@ import { syncMiaoxiangStrategy } from '../strategy/miaoxiangSync';
 import { SHADOW_NAME, backfillShadow } from '../strategy/shadowReplay';
 import { setInitialSkills } from '../strategy/skill';
 import { listTasks, updateTask } from '../tasks';
-import { getValue, setValue } from '../settings';
 import { nowIso } from '../util';
 import { MIAOXIANG_SHADOW_TASK_NAMES, MIAOXIANG_TASK_NAMES, WEIPAN_TASK_NAME } from './cronTasks';
 
@@ -26,9 +25,6 @@ const SEED_SCREEN_STRATEGY: Record<string, string> = {
   [LOCAL_NAME]: 'weipan_momentum',
   [MIAOXIANG_NAME]: 'miaoxiang_quant',
 };
-
-// 妙想 MX_APIKEY（取自 openclaw，使镜像同步开箱可用；用户可在设置页覆盖）
-const SEED_MX_APIKEY = 'mkt_54_Wc6-5-Pw4uDFTCKu5TZEsIiGfyEFdHIlwSEe8Q5Y';
 
 /** 两个种子战法的「总计介绍」（卡片名下展示，提炼自各自三维度打法要点） */
 const SEED_DESCRIPTIONS: Record<string, string> = {
@@ -246,12 +242,7 @@ export async function seedStrategiesAndBind(): Promise<void> {
   setInitialSkills(local.id, SKILL_BASELINE[LOCAL_NAME]);
   setInitialSkills(miaoxiang.id, SKILL_BASELINE[MIAOXIANG_NAME]);
 
-  // 2. 配置 MX_APIKEY（仅当未配置时写入，避免覆盖用户自定义）
-  if (!getValue('mxApiKey')) {
-    setValue('mxApiKey', SEED_MX_APIKEY);
-  }
-
-  // 3. 按任务名绑定 strategyId（妙想 4 任务 → 镜像战法；尾盘 → 本地战法）
+  // 2. 按任务名绑定 strategyId（妙想 4 任务 → 镜像战法；尾盘 → 本地战法）
   const tasks = listTasks();
   for (const t of tasks) {
     if (MIAOXIANG_TASK_NAMES.includes(t.name) && t.strategyId !== miaoxiang.id) {
@@ -261,7 +252,7 @@ export async function seedStrategiesAndBind(): Promise<void> {
     }
   }
 
-  // 4. 首次同步妙想镜像账户（best-effort，失败不阻断启动）
+  // 3. 首次同步妙想镜像账户（best-effort，失败不阻断启动）
   try {
     await syncMiaoxiangStrategy(miaoxiang.id);
     console.log('[seed] 妙想镜像账户首次同步成功');
@@ -269,7 +260,7 @@ export async function seedStrategiesAndBind(): Promise<void> {
     console.warn(`[seed] 妙想镜像账户首次同步失败（可稍后在战法页手动同步）: ${e instanceof Error ? e.message : e}`);
   }
 
-  // 5. 全新安装：镜像此时才就绪，回填首板择时影子战法（幂等，上方自愈调用因无镜像已跳过）
+  // 4. 全新安装：镜像此时才就绪，回填首板择时影子战法（幂等，上方自愈调用因无镜像已跳过）
   try {
     ensureShadowStrategy();
     await backfillShadow();

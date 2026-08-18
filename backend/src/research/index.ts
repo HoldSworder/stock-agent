@@ -201,7 +201,9 @@ export function registerResearchModule(app: FastifyInstance): void {
       try {
         const days = req.query?.days ? Number(req.query.days) : undefined;
         const limit = req.query?.limit ? Number(req.query.limit) : undefined;
-        return { ok: true, data: await svc.listMaterialAnnouncements(days, limit) };
+        // partial：翻页部分失败，data 只是当日公告的一部分（首页失败会直接抛错走 502）
+        const { items, partial } = await svc.listMaterialAnnouncements(days, limit);
+        return { ok: true, data: items, partial };
       } catch (e) {
         return fail(reply, e);
       }

@@ -9,13 +9,13 @@ import { cached } from '../lib/ttlCache';
 // 收盘后定时落一条当日定值快照（按交易日 upsert），供「恢复 vs 退潮」方向判定与历史趋势图。
 
 export function registerSentimentModule(app: FastifyInstance): void {
-  // 情绪周期总览（实时合成，并按日 upsert 快照）
+  // 情绪周期总览（实时合成，只读不落库）
   app.get('/api/sentiment/overview', async (_req, reply) => {
     try {
       // 响应级 120s 缓存：情绪指数慢变，重进瞬显（收盘定值快照由 15:10 定时落库，不依赖此 GET）
       return {
         ok: true,
-        data: await cached('sentiment:overview', 120_000, () => buildSentimentOverview()),
+        data: await cached('sentiment:overview', 120_000, () => buildSentimentOverview(false)),
       };
     } catch (e) {
       return reply.code(502).send({ ok: false, error: e instanceof Error ? e.message : String(e) });

@@ -3,6 +3,7 @@ import { computed, ref, watch, type WatchStopHandle } from 'vue';
 import { ElNotification } from 'element-plus';
 import type { RunStatus, RunTrigger, TaskRun, WatchEvent } from '@stock-agent/shared';
 import { openWs } from '@/api';
+import { createWsRetry } from '@/composables/wsRetry';
 import type { useAgentsStore } from '@/stores/agents';
 
 // 全局消息中心：聚合「Agent/后台任务完成」（复用 agents store 已加载的 runs）与
@@ -74,7 +75,7 @@ export const useNotificationsStore = defineStore('notifications', () => {
   let runSeeded = false;
   let stopRunWatch: WatchStopHandle | null = null;
   let ws: WebSocket | null = null;
-  let reconnectTimer: number | null = null;
+  const retry = createWsRetry('消息中心');
   let inited = false;
 
   function persist(): void {
@@ -149,9 +150,17 @@ export const useNotificationsStore = defineStore('notifications', () => {
     }
   }
 
-  function openWatchSocket(): void {
+  /**
+   * @param fromRetry 是否由退避重连触发。init 只跑一次，但用户手动重连算新的连接意图，
+   *   必须重置退避计数，否则打满上限后再也不会重连。
+   */
+  function openWatchSocket(fromRetry = false): void {
+    if (!fromRetry) retry.reset();
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
     ws = openWs('/ws/watch');
+    ws.onopen = () => {
+      retry.reset();
+    };
     ws.onmessage = (ev) => {
       try {
         handleWatch(JSON.parse(ev.data) as WatchEvent);
@@ -160,12 +169,7 @@ export const useNotificationsStore = defineStore('notifications', () => {
       }
     };
     ws.onclose = () => {
-      if (reconnectTimer == null) {
-        reconnectTimer = window.setTimeout(() => {
-          reconnectTimer = null;
-          openWatchSocket();
-        }, 5000);
-      }
+      retry.schedule(() => openWatchSocket(true));
     };
     ws.onerror = () => ws?.close();
   }
@@ -229,10 +233,7 @@ export const useNotificationsStore = defineStore('notifications', () => {
       stopRunWatch();
       stopRunWatch = null;
     }
-    if (reconnectTimer != null) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
+    retry.cancel();
     if (ws) {
       ws.onclose = null;
       ws.onerror = null;

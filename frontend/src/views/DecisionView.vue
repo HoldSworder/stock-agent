@@ -89,7 +89,15 @@ function start() {
 
   ws = openWs('/ws/decision');
   ws.onmessage = (ev) => {
-    const e: StreamEvent = JSON.parse(ev.data);
+    // 非 JSON 帧（心跳/代理注入）不能让异常从事件回调抛出：
+    // 那样后面的归约全被跳过，busy 也不会结束，界面永久卡在「运行中」。
+    let e: StreamEvent;
+    try {
+      e = JSON.parse(ev.data) as StreamEvent;
+    } catch {
+      console.warn('[decision] 收到非 JSON 帧，已忽略');
+      return;
+    }
     if (e.type === 'run_finished') {
       runFinished = true;
       busy.value = false;
@@ -103,6 +111,8 @@ function start() {
       ElMessage.error(e.message);
       runFinished = true;
       busy.value = false;
+      // 不收尾会留下一条孤儿 WS，它的事件仍会 applyStepEvent 进下一轮轨迹
+      teardownWs();
     } else {
       applyStepEvent(steps.value, e);
     }

@@ -69,6 +69,8 @@ watch(dailyGroups, (groups) => {
 const money = (v: number) =>
   v.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const signed = (v: number) => (v >= 0 ? '+' : '') + money(v);
+/** 取不到值渲染「—」：0 会被读成「不赚不亏」，与「没拿到数据」是两回事 */
+const signedText = (v: number | null | undefined) => (v == null ? '—' : signed(v));
 const pct = (v: number) => (v >= 0 ? '+' : '') + (v * 100).toFixed(2) + '%';
 // A股 红涨绿跌：盈利为正 -> up(红)，亏损 -> down(绿)
 const dir = (v: number) => (v > 0 ? 'up' : v < 0 ? 'down' : '');
@@ -102,11 +104,21 @@ async function loadSnap() {
   }
 }
 
+// 这两个不能抛：它们与其它 loader 一起进 Promise.all，一票否决会让 select() 抛出
+// 未处理拒绝，紧随其后的 loadSkills() 被整个跳过，Skill 页签停留在上一个战法的数据。
 async function loadTasks() {
-  tasks.value = await api.listTasks();
+  try {
+    tasks.value = await api.listTasks();
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : String(e));
+  }
 }
 async function loadRuns() {
-  runs.value = await api.listRuns();
+  try {
+    runs.value = await api.listRuns();
+  } catch (e) {
+    ElMessage.error(e instanceof Error ? e.message : String(e));
+  }
 }
 async function loadDaily() {
   if (!selectedId.value) return;
@@ -719,7 +731,15 @@ onMounted(() => {
   void loadVsSim();
   ws = openWs('/ws/runs');
   ws.onmessage = async (ev) => {
-    const e: StreamEvent = JSON.parse(ev.data);
+    // 非 JSON 帧（心跳/代理注入）不能让异常从事件回调抛出：这个回调是 async，
+    // 异常会变成未处理的 promise 拒绝，后面的刷新全被跳过。
+    let e: StreamEvent;
+    try {
+      e = JSON.parse(ev.data) as StreamEvent;
+    } catch {
+      console.warn('[strategy] 收到非 JSON 帧，已忽略');
+      return;
+    }
     if (e.type === 'run_started') {
       await loadRuns();
       if (autoOpenRun.value) {
@@ -824,18 +844,23 @@ onUnmounted(() => ws?.close());
             </el-tag>
           </div>
           <div v-if="it.strategy.description" class="sc-desc">{{ it.strategy.description }}</div>
+          <el-tag v-if="it.snapshotError" type="danger" size="small" effect="plain" class="sc-err">
+            <el-tooltip :content="it.snapshotError" placement="top">
+              <span>快照取失败 · 数字不可信</span>
+            </el-tooltip>
+          </el-tag>
           <div class="sc-row">
             <span class="sc-label">总资产</span>
-            <span class="num">{{ money(it.totalAsset) }}</span>
+            <span class="num">{{ it.snapshotError ? `${money(it.totalAsset)}（仅现金）` : money(it.totalAsset) }}</span>
           </div>
           <div class="sc-row">
             <span class="sc-label">收益</span>
-            <span class="num" :class="dir(it.totalProfit)">
-              {{ signed(it.totalProfit) }} ({{ pct(it.totalProfitRate) }})
+            <span class="num" :class="dir(it.totalProfit ?? 0)">
+              {{ signedText(it.totalProfit) }} ({{ pctText(it.totalProfitRate) }})
             </span>
           </div>
           <div class="sc-foot">
-            <span class="num sub">{{ it.positionCount }} 持仓</span>
+            <span class="num sub">{{ it.positionCount == null ? '— 持仓' : `${it.positionCount} 持仓` }}</span>
             <el-button
               link
               type="info"
@@ -894,6 +919,15 @@ onUnmounted(() => ws?.close());
             </div>
           </div>
 
+          <el-alert
+            v-if="snap.priceStale"
+            type="warning"
+            show-icon
+            :closable="false"
+            class="stale-alert"
+            title="部分持仓取价失败，下列总资产 / 总收益 / 浮动盈亏不完整"
+            :description="`取价失败标的：${(snap.stalePriceCodes ?? []).join('、')}。这些持仓按成本价估值，盈亏未计入，本快照不可作为当日权益样本。`"
+          />
           <div class="cards">
             <div class="card">
               <div class="card-label">总资产</div>
@@ -1037,8 +1071,17 @@ onUnmounted(() => ws?.close());
               <template #default="{ row }"><span class="num">{{ row.code }}</span></template>
             </el-table-column>
             <el-table-column prop="name" label="名称" min-width="100" />
-            <el-table-column label="现价" min-width="84" align="right">
-              <template #default="{ row }"><span class="num">{{ row.price }}</span></template>
+            <el-table-column label="现价" min-width="110" align="right">
+              <template #default="{ row }">
+                <span class="num" :class="{ sub: row.priceStale }">{{ row.price }}</span>
+                <el-tooltip
+                  v-if="row.priceStale"
+                  content="取价失败：现价退回成本价，盈亏无从计算"
+                  placement="top"
+                >
+                  <el-tag type="danger" size="small" effect="plain" class="stale-tag">取价失败</el-tag>
+                </el-tooltip>
+              </template>
             </el-table-column>
             <el-table-column label="成本" min-width="84" align="right">
               <template #default="{ row }"><span class="num">{{ row.avgCost.toFixed(3) }}</span></template>
@@ -1054,8 +1097,14 @@ onUnmounted(() => ws?.close());
             </el-table-column>
             <el-table-column label="浮动盈亏" min-width="140" align="right">
               <template #default="{ row }">
-                <span class="num" :class="dir(row.holdProfit)">{{ signed(row.holdProfit) }}</span>
-                <span class="num sub" :class="dir(row.holdRate)"> {{ pct(row.holdRate) }}</span>
+                <!-- 取价失败时 holdProfit/holdRate 被置 0，渲染成 +0.00 (0.00%) 会被读成「今天没涨跌」 -->
+                <template v-if="row.priceStale">
+                  <span class="num sub">—</span>
+                </template>
+                <template v-else>
+                  <span class="num" :class="dir(row.holdProfit)">{{ signed(row.holdProfit) }}</span>
+                  <span class="num sub" :class="dir(row.holdRate)"> {{ pct(row.holdRate) }}</span>
+                </template>
               </template>
             </el-table-column>
             <el-table-column label="仓位" min-width="78" align="right">
@@ -1630,6 +1679,15 @@ onUnmounted(() => ws?.close());
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+.sc-err {
+  margin-bottom: 6px;
+}
+.stale-tag {
+  margin-left: 6px;
+}
+.stale-alert {
+  margin-bottom: 12px;
 }
 .sc-row {
   display: flex;

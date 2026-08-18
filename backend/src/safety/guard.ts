@@ -60,17 +60,31 @@ function rowToState(row: typeof schema.safetyControls.$inferSelect): SafetyState
   };
 }
 
-/** 更新安全状态（部分字段），返回最新状态 */
+/** killReason 落库长度上限（只是给人看的一句话，不设限会被任意长正文灌满） */
+const KILL_REASON_MAX = 200;
+
+/**
+ * 更新安全状态（部分字段），返回最新状态。
+ *
+ * 四个开关只认真正的布尔值：这是全系统唯一的交易总闸，PUT /api/safety/state 的 body 未经 schema 校验，
+ * 只判 `!== undefined` 的话 `{"killSwitch":""}` 或 `{"killSwitch":0}` 能静默把急停关掉、
+ * `{"autoLocalSimEnabled":1}` 能打开自动模拟下单。非布尔一律忽略（不改动现值）。
+ */
 export function updateSafetyState(patch: SafetyUpdate): SafetyState {
   getSafetyState(); // 确保行存在
+  const p = patch as Record<string, unknown>;
   const set: Record<string, unknown> = { updatedAt: nowIso() };
-  if (patch.killSwitch !== undefined) set.killSwitch = patch.killSwitch;
-  if (patch.killReason !== undefined) set.killReason = patch.killReason;
-  if (patch.autoLocalSimEnabled !== undefined) set.autoLocalSimEnabled = patch.autoLocalSimEnabled;
-  if (patch.autoExternalSimEnabled !== undefined)
-    set.autoExternalSimEnabled = patch.autoExternalSimEnabled;
-  if (patch.allowManualForceTrade !== undefined)
-    set.allowManualForceTrade = patch.allowManualForceTrade;
+  for (const field of [
+    'killSwitch',
+    'autoLocalSimEnabled',
+    'autoExternalSimEnabled',
+    'allowManualForceTrade',
+  ] as const) {
+    if (typeof p[field] === 'boolean') set[field] = p[field];
+  }
+  if (p.killReason !== undefined) {
+    set.killReason = typeof p.killReason === 'string' ? p.killReason.slice(0, KILL_REASON_MAX) : null;
+  }
   db.update(schema.safetyControls)
     .set(set)
     .where(eq(schema.safetyControls.id, GLOBAL_ID))

@@ -111,19 +111,27 @@ export interface ScoredRow {
  */
 export type ExtraFactorScores = Map<string, Partial<Record<ScreenFactorKey, number>>>;
 
+/**
+ * @param baselineRows 分位排名的基准行集（缺省即 rows 自身）。
+ *   二段增强会对截断后的候选子集重打分，若仍拿子集当基准，分位口径与初筛那次不一致——
+ *   原本全市场分位 95 的流动性会被压回 50 上下，screenScore 在两次调用间量纲漂移，
+ *   最终落库的分数和用于截断的分数就不是同一把尺。传初筛行集可把基准固定住。
+ */
 export function scoreCandidates(
   rows: SnapshotRow[],
   def: ScreenStrategyDef,
   theme: ThemeContext,
   extraScores?: ExtraFactorScores,
+  baselineRows?: SnapshotRow[],
 ): ScoredRow[] {
   const keys = activeFactors(def);
   const totalW = keys.reduce((s, k) => s + (def.factorWeights[k] ?? 0), 0) || 1;
 
-  const valueScore = buildValueScorer(rows);
-  const amountRanker = percentileRanker(rows.map((r) => r.amount), 'high');
-  const turnoverLiqRanker = percentileRanker(rows.map((r) => r.turnoverRate), 'high');
-  const sizeRanker = percentileRanker(rows.map((r) => r.marketCap), 'low'); // 偏好中小盘
+  const base = baselineRows && baselineRows.length > 0 ? baselineRows : rows;
+  const valueScore = buildValueScorer(base);
+  const amountRanker = percentileRanker(base.map((r) => r.amount), 'high');
+  const turnoverLiqRanker = percentileRanker(base.map((r) => r.turnoverRate), 'high');
+  const sizeRanker = percentileRanker(base.map((r) => r.marketCap), 'low'); // 偏好中小盘
 
   const factorScore = (key: ScreenFactorKey, r: SnapshotRow): number => {
     switch (key) {

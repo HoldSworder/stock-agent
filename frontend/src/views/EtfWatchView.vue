@@ -144,6 +144,12 @@ const probeSelectedId = ref<string | null>(null);
 let probeWs: WebSocket | null = null;
 let probeRunFinished = true;
 let probeClosingByUser = false;
+/**
+ * 检测世代号。旧连接的迟到事件必须失效：只收到 run_finished、尚未收到 probe_done 的
+ * 窗口里 probeBusy 已是 false，此时点「重新检测」拦不住，旧连接的 onmessage 仍绑在
+ * 同一批 ref 上，会把上一轮的读数混进新一轮报告。
+ */
+let probeGen = 0;
 
 // 头部/读数表数据源：实时态优先用最终 probe，未到则用确定性 base
 const probeView = computed<EtfWatchProbe | EtfWatchProbeBase | null>(
@@ -152,8 +158,19 @@ const probeView = computed<EtfWatchProbe | EtfWatchProbeBase | null>(
 
 function teardownProbeWs() {
   probeClosingByUser = true;
-  probeWs?.close();
-  probeWs = null;
+  if (probeWs) {
+    const stale = probeWs;
+    // 先摘处理器再 close：否则旧连接的 onclose 会把新一轮的 probeBusy 提前置 false
+    stale.onmessage = null;
+    stale.onclose = null;
+    stale.onerror = null;
+    try {
+      stale.close();
+    } catch {
+      /* 已关闭时忽略 */
+    }
+    probeWs = null;
+  }
 }
 
 async function loadProbeHistory(code: string) {
@@ -169,6 +186,10 @@ async function loadProbeHistory(code: string) {
 
 function startProbe(code: string) {
   if (probeBusy.value) return;
+  // 无条件收尾上一条：probeBusy 拦不住「已 run_finished 但未 probe_done」的窗口，
+  // 直接覆盖 probeWs 会留下一条前端够不到、处理器还绑着的孤儿连接
+  teardownProbeWs();
+  const gen = ++probeGen;
   probe.value = null;
   probeBase.value = null;
   probeSteps.value = [];
@@ -180,7 +201,16 @@ function startProbe(code: string) {
 
   probeWs = openWs('/ws/etf-watch/probe');
   probeWs.onmessage = (ev) => {
-    const e: EtfWatchProbeStreamEvent = JSON.parse(ev.data);
+    if (gen !== probeGen) return; // 上一轮的迟到事件，不能写进这一轮的报告
+    // 非 JSON 帧（心跳/代理注入）不能让异常从事件回调抛出：
+    // 那样后面的归约全被跳过，probeBusy 也不会结束，界面永远卡在「检测中」。
+    let e: EtfWatchProbeStreamEvent;
+    try {
+      e = JSON.parse(ev.data) as EtfWatchProbeStreamEvent;
+    } catch {
+      console.warn('[etf-watch] 收到非 JSON 帧，已忽略');
+      return;
+    }
     if (e.type === 'probe_base') {
       probeBase.value = e.base;
     } else if (e.type === 'probe_done') {
@@ -202,6 +232,7 @@ function startProbe(code: string) {
     }
   };
   probeWs.onclose = () => {
+    if (gen !== probeGen) return;
     if (!probeClosingByUser && probeBusy.value && !probeRunFinished) {
       probeError.value = probeError.value || '连接中断，检测未完成';
     }
@@ -430,7 +461,11 @@ onMounted(async () => {
   } catch {
     /* WS 会补状态 */
   }
-  nowTimer = window.setInterval(() => (now.value = Date.now()), 1000);
+  // 标签页切到后台时没人在看这块倒计时，停一停；重新可见后下一拍自动续上
+  nowTimer = window.setInterval(() => {
+    if (document.visibilityState !== 'visible') return;
+    now.value = Date.now();
+  }, 1000);
 });
 onUnmounted(() => {
   if (nowTimer != null) clearInterval(nowTimer);

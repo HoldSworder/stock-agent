@@ -166,6 +166,58 @@ function asTrigger(v: unknown): PlanTrigger | null {
   return { type, value, note: typeof o.note === 'string' ? o.note : undefined };
 }
 
+/**
+ * 把 LLM 传入的大盘研判归一为共享 MarketStance；只有 bias 非法才返回 null。
+ *
+ * positionPct 不能当「缺了就整份作废」的必填项：marketStance 在工具 schema 里不是
+ * required，模型漏填、或给成 "30%"（Number("30%") = NaN）都会让整个对象归零，
+ * 而 stance 为 null 时 resolveTimingLevel 返回 undefined、下游 lv 兜底成 'balanced'，
+ * 于是 bias='bear' 本该触发的防守档「禁新开多」硬纪律被静默关掉。
+ * 丢一个仓位数字，远好过丢掉整份研判连同它的防守闸门。
+ */
+function asMarketStance(v: unknown): MarketStance | null {
+  if (!v || typeof v !== 'object') return null;
+  const o = v as Record<string, unknown>;
+  if (o.bias !== 'bull' && o.bias !== 'bear' && o.bias !== 'neutral') return null;
+  const rawPct = typeof o.positionPct === 'number' ? o.positionPct : Number(o.positionPct);
+  const timingLevel =
+    o.timingLevel === 'attack' ||
+    o.timingLevel === 'balanced' ||
+    o.timingLevel === 'defense'
+      ? o.timingLevel
+      : undefined;
+  // 取不到仓位时按 bias/timingLevel 给一个保守上限，不能让它变成「无约束」
+  const fallbackPct =
+    o.bias === 'bear' || timingLevel === 'defense' ? 0 : o.bias === 'bull' ? 50 : 30;
+  const positionPct = Number.isFinite(rawPct) ? rawPct : fallbackPct;
+  return {
+    bias: o.bias,
+    ...(timingLevel ? { timingLevel } : {}),
+    positionPct: Math.min(Math.max(positionPct, 0), 100),
+    support: asString(o.support),
+    resistance: asString(o.resistance),
+    summary: asString(o.summary),
+  };
+}
+
+/** 把重点板块列表归一为共享 PlanFocusSector，丢弃缺少必填名称的脏项 */
+function asFocusSectors(v: unknown): PlanFocusSector[] {
+  if (!Array.isArray(v)) return [];
+  return v.flatMap((item) => {
+    if (!item || typeof item !== 'object') return [];
+    const o = item as Record<string, unknown>;
+    const name = asString(o.name).trim();
+    if (!name) return [];
+    return [
+      {
+        name,
+        strength: asString(o.strength),
+        reason: asString(o.reason),
+      },
+    ];
+  });
+}
+
 /** save_today_plan 中复用的触发条件 JSON schema */
 const TRIGGER_SCHEMA = {
   type: 'object',
@@ -781,14 +833,18 @@ export const tools: ToolDef[] = [
       const type = (asString(args.type, 'stock') as ResearchReportType) || 'stock';
       if (action === 'discover') {
         const days = args.days != null ? Number(args.days) : undefined;
-        const [agg, candidates] = await Promise.all([
+        const [agg, ann] = await Promise.all([
           research.aggregateDailyReports(days),
-          research.aggregateAnnouncementCandidates(days),
+          research.collectAnnouncementCandidates(days),
         ]);
         const digest = research.formatDiscoverDigest(agg);
         const history = research.formatRecentOpportunityHistory();
-        const annTitles = research.formatAnnouncementTitles(candidates);
-        const parts = [digest, history, annTitles].filter(Boolean);
+        const annTitles = research.formatAnnouncementTitles(ann.candidates);
+        // 候选集不完整必须如实告知模型：否则它会把「翻页失败少拉了几百条」当成「今日就这些公告」
+        const annNote = ann.partial
+          ? '⚠️ 公告翻页部分失败，候选集不完整，勿据此断言「无重大公告」。'
+          : '';
+        const parts = [digest, history, annTitles, annNote].filter(Boolean);
         return preview(parts.join('\n\n'), 20000);
       }
       if (action === 'ann_content') {
@@ -1452,8 +1508,8 @@ export const tools: ToolDef[] = [
         : null;
       const detail = plan.savePlan(
         {
-          marketStance: (args.marketStance as MarketStance | undefined) ?? null,
-          focusSectors: (args.focusSectors as PlanFocusSector[] | undefined) ?? [],
+          marketStance: asMarketStance(args.marketStance),
+          focusSectors: asFocusSectors(args.focusSectors),
           externalContext: asString(args.externalContext),
           narrative: asString(args.narrative),
           keyRisks: asStringArray(args.keyRisks),
@@ -2086,7 +2142,13 @@ export const tools: ToolDef[] = [
                   name: { type: 'string' },
                   conditionCandidateIds: { type: 'array', items: { type: 'string' } },
                   invalidConditionCandidateIds: { type: 'array', items: { type: 'string' } },
-                  targetCandidateLevelIds: { type: 'array', items: { type: 'string' } },
+                  targetCandidateLevelIds: {
+                    type: 'array',
+                    items: { type: 'string' },
+                    description:
+                      '目标价位 id，按优先级排列，**首项即第一目标**（事后核对兑现只看首项）。' +
+                      '每个 id 都必须同时出现在 levelSelections 里，否则计划里根本没有这个价位，会被打回。',
+                  },
                   subjectiveProbabilityPct: {
                     type: 'number',
                     description:

@@ -13,10 +13,10 @@ import type {
   SymbolTechnicalContext,
 } from '@stock-agent/shared';
 import { PLAN_PERIODS } from '@stock-agent/shared';
-import { getKline } from '../market/eastmoney';
+import { getKline, getQuotes } from '../market/eastmoney';
 import { getPriceLevels } from '../market/levels';
 import { computeDowStructure, computeChanStructure } from './structure';
-import { computeVolumePrice } from './volumePrice';
+import { computeVolumePrice, isVolumeComparable } from './volumePrice';
 import { computePhase, PHASE_MODEL_VERSION, type PhaseCarryOver } from './phase';
 import { buildCandidateCatalog, CANDIDATE_MODEL_VERSION } from './candidateCatalog';
 import { adapterFor, inferAssetType } from './adapters';
@@ -184,6 +184,21 @@ export interface BuiltContext {
   dayBars: KlineBar[];
 }
 
+/**
+ * 名称回源。调用方没给 name 时用一次实时行情补齐——名称直接决定 ST 判定，
+ * 而 ST 判定决定涨跌幅上限（5% vs 10%），错了就会给出一个不存在的涨停价。
+ * 取不到返回 null，由调用方按最保守口径处理，不拿代码冒充名称。
+ */
+async function lookupName(code: string): Promise<string | null> {
+  try {
+    const [q] = await getQuotes([code]);
+    const name = q?.name?.trim();
+    return name && name !== code ? name : null;
+  } catch {
+    return null;
+  }
+}
+
 /** contextId：绑定标的 + 数据时点，跨快照混用时能被检出 */
 function makeContextId(code: string, asOf: string): string {
   const h = createHash('sha1').update(`${code}|${asOf}|${EVIDENCE_VERSION}`).digest('hex');
@@ -223,7 +238,17 @@ export async function buildTechnicalContext(input: BuildContextInput): Promise<B
     throw new Error(`核心证据缺失：${code} 日线不可用，无法生成计划`);
   }
   const dayBars = dayData.bars;
-  const identity = { code, name: input.name ?? code, secid };
+  // name 缺省时回源取一次：identity.name 回落成 6 位代码会让 ST 正则永不命中，
+  // 涨停价按 10% 算出一个不存在的价位喂给 LLM，硬阻断也按 10% 判——
+  // ST 股封在 ±5% 时「涨停买入不可成交」这条阻断整个失效。
+  const resolvedName = input.name?.trim() || (await lookupName(code));
+  if (!resolvedName) {
+    warnings.push(
+      '取不到标的名称，无法判定是否 ST：涨跌幅上限按代码段上限处理，不产出涨停价候选，' +
+        '若该股实为 ST（±5%），「涨停买入不可成交」这条硬阻断会漏报',
+    );
+  }
+  const identity = { code, name: resolvedName ?? code, secid, nameUnknown: !resolvedName };
 
   // 2. 点位测算复用 levels.ts（含 ATR/枢轴/斐波/均线），不重算。
   //    三层各算一份：候选目录要分周期出位子，用日线的枢轴/斐波去冒充周线级别的位子是错的。
@@ -271,8 +296,14 @@ export async function buildTechnicalContext(input: BuildContextInput): Promise<B
     period: 'day',
     bars: dayBars,
     completeBar: dayData.meta.completeBar,
-    volumeComparable: true,
+    // 必须实测而不是硬编码 true：本源不给成交额时 pickBasis 会回退成交量口径
+    // （腾讯 fqkline 日线正是这种源），10 送 10 或 ETF 1:2 折算后成交量翻倍，
+    // 会得出「极端放量 / 突破获量能确认」的假结论并一路影响 computePhase。
+    volumeComparable: isVolumeComparable(dayBars),
   });
+  // computeVolumePrice 自己会把「成交量不可比」写进 volumePrice.warnings，
+  // 但那串只跟着量价读数走；这里再登记一条，让它进入计划级 warnings 与 dataStatus 计数
+  warnings.push(...volumePrice.warnings.filter((w) => w.includes('不可比')));
 
   // 4. 阶段（带滞回）
   const phase = computePhase({
@@ -323,9 +354,17 @@ export async function buildTechnicalContext(input: BuildContextInput): Promise<B
   // 7. 候选目录
   const adapterLevels: Array<{ price: number; label: string; evidenceId: string }> = [];
   const meta = await adapter.loadAssetMetadata(identity).catch(() => null);
-  const prevBar = dayBars[dayBars.length - 2];
-  if (meta && meta.limitPct > 0 && prevBar) {
-    const up = prevBar.close * (1 + meta.limitPct / 100);
+  // 涨停价基准根按当根是否收完选：盘中最后一根还在动，基准是倒数第二根（昨收）；
+  // 而 closeRegenerate 在 15:30 跑时最后一根已是今天收完的 bar，此时基准就是它——
+  // 仍取倒数第二根算出的是**今天**的涨停价而非下一交易日的，偏差可达一个完整涨跌幅，
+  // 而这个价位是以 entry_trigger / stop 角色进候选目录的。
+  const limitBaseBar = dayData.meta.completeBar
+    ? dayBars[dayBars.length - 1]
+    : dayBars[dayBars.length - 2];
+  // 上限不可信（主板个股但名称未知，5% 与 10% 分不清）时不产出这条候选：
+  // 它以 entry_trigger / stop 角色进目录，猜错就是给 LLM 一个不存在的价位当触发线
+  if (meta && meta.limitPct > 0 && !meta.limitPctUncertain && limitBaseBar) {
+    const up = limitBaseBar.close * (1 + meta.limitPct / 100);
     adapterLevels.push({
       price: Math.round(up * 1000) / 1000,
       label: `涨停价 ${up.toFixed(3)}`,
@@ -387,8 +426,9 @@ export async function buildTechnicalContext(input: BuildContextInput): Promise<B
     candidateModelVersion: CANDIDATE_MODEL_VERSION,
     evidenceVersion: EVIDENCE_VERSION,
     code,
-    name: input.name ?? code,
+    name: resolvedName ?? code,
     assetType,
+    secid: secid ?? null,
     asOf,
     dataStatus,
     periods: periodReadings,

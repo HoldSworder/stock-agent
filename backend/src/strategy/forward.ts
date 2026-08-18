@@ -35,6 +35,13 @@ export function isAutoSimAllowed(strategyId: string): boolean {
 async function sampleStrategy(strategyId: string, date: string): Promise<void> {
   try {
     const snap = await getStrategySnapshot(strategyId, { skipSync: true });
+    // 取价失败的当日样本直接跳过：那份 totalAsset 是按成本价估的，落库会污染前向曲线与 Alpha
+    if (snap.priceStale) {
+      console.warn(
+        `[strategy] ${strategyId} ${date} 取价失败（${snap.stalePriceCodes?.join('、')}），跳过当日样本`,
+      );
+      return;
+    }
     const existing = db
       .select({ id: schema.strategySamples.id })
       .from(schema.strategySamples)

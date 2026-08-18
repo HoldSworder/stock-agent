@@ -22,12 +22,21 @@ import {
   planSpanOf,
   rescaleSharesToEntry,
 } from '@stock-agent/shared';
+import { pickLevelByRolePriority, splitBatchShares } from '@/composables/planMath';
 
 /**
  * 标的交易计划面板。首屏只给「一个阶段 + 一个主动作 + 三条关键线」，
  * 专业证据放折叠区，避免同时出现互相冲突的建议（计划 10.2 / 10.3）。
  */
-const props = defineProps<{ code: string; name?: string }>();
+const props = defineProps<{
+  code: string;
+  name?: string;
+  /**
+   * 东方财富证券 id。指数/ETF 的日线只能按 secid 取，不透传取不到 K 线，
+   * 推演接口会 500，整块「情景可能性」会无故消失。
+   */
+  secid?: string;
+}>();
 /** 空状态一键生成：由父组件切到 Agent 页签并触发计划生成 */
 const emit = defineEmits<{ generate: [] }>();
 
@@ -201,6 +210,38 @@ function localTime(iso: string): string {
 }
 
 /**
+ * 风险路径触发提示。
+ *
+ * 后端已把 invalidated 的语义收窄到「非风险情景失效」——风险情景条件命中走 triggered，
+ * 因为「价格真的跌下来」正是风险情景兑现，不是整份计划作废。但计划因此仍是生效状态，
+ * 若界面不专门说一句，用户就拿不到那条减仓/清仓指令。
+ */
+const riskTriggered = computed<{ action: string; reasons: string[] } | null>(() => {
+  const hits = (evaluation.value?.triggeredScenarios ?? []).filter((s) => s.rank === 'risk');
+  if (hits.length === 0) return null;
+  const p = plan.value;
+  const byId = new Map((p?.scenarios ?? []).map((s) => [s.id, s]));
+  const satisfied = new Set(
+    (evaluation.value?.conditions ?? []).filter((c) => c.satisfied).map((c) => c.conditionId),
+  );
+  const reasons = [
+    ...new Set(
+      hits.flatMap((h) => {
+        const sc = byId.get(h.scenarioId);
+        if (!sc) return [];
+        // 触发与失效两边都要列：条件可双用途，同一条件既是该情景的减仓触发也是它的失效条件，
+        // 后端对同一情景只回一条命中记录（带哪个 via 取决于哪边先判出），
+        // 按 via 二选一会漏掉另一边真正满足的条件
+        return [...sc.conditions, ...sc.invalidConditions]
+          .filter((c) => satisfied.has(c.id))
+          .map((c) => c.description);
+      }),
+    ),
+  ];
+  return { action: ACTION_LABEL[hits[0].action] ?? hits[0].action, reasons };
+});
+
+/**
  * 失效横幅。计划一旦不再生效，正文照常展开供复盘，但顶部必须写清「什么时候、因为哪一条」。
  *
  * 原因优先取本次复核里真正命中的失效条件——那是实时算出来的，与状态迁移同源。
@@ -273,8 +314,9 @@ function rawPriceOf(l?: TradeLevel): number | null {
  * 可能是一条周线压力位，读起来像明天的事，实际是几个月的事。
  */
 function buildKeyLines(levels: TradeLevel[], exitPlan: SymbolTradePlan['exitPlan']) {
+  // roles 表达的是优先级顺序，取值必须按它来（见 pickLevelByRolePriority）
   const pick = (roles: string[]): TradeLevel | undefined =>
-    levels.find((l) => roles.includes(l.role));
+    pickLevelByRolePriority(levels, roles);
   const trigger = pick(['entry_trigger', 'add_trigger', 'resistance']);
   const invalid = pick(['invalidation', 'stop', 'support']);
   const target =
@@ -322,20 +364,9 @@ function fmtAmount(v: number): string {
   return v >= 10000 ? `${(v / 10000).toFixed(1)} 万` : `${Math.round(v)} 元`;
 }
 
-/**
- * 分批股数：前几批按比例取整到手，余数并进最后一批。
- * 各批独立向下取整会让合计少于总股数（700 股按 0.5/0.5 分成 300+300），
- * 用户照着挂完单会莫名剩一笔零股。
- */
+/** 分批股数文案，边界语义见 splitBatchShares */
 function splitBatches(shares: number, fractions: number[]): string[] {
-  const out: number[] = [];
-  let left = shares;
-  fractions.forEach((f, i) => {
-    const n = i === fractions.length - 1 ? left : Math.min(left, Math.floor((shares * f) / 100) * 100);
-    out.push(n);
-    left -= n;
-  });
-  return out.filter((n) => n > 0).map((n) => `${n} 股`);
+  return splitBatchShares(shares, fractions).map((n) => `${n} 股`);
 }
 
 /**
@@ -395,6 +426,15 @@ const orderInstruction = computed<{ text: string; note: string } | null>(() => {
   const entry = trigger ?? basis;
   if (entry == null || stop == null || basis == null) {
     return { text: `风险预算允许 ${r.allowedShares} 股`, note: '缺触发价或止损价，未做挂单价换算' };
+  }
+  // 买入类动作必须满足 entry > stop：否则 shares×(entry−stop) 会算成负数，
+  // 界面上就出现「单笔最大亏损约 -3000 元」。这种计划本身自相矛盾，
+  // 不能给股数与金额去引导下单，只能明确说清哪里对不上。
+  if (entry <= stop) {
+    return {
+      text: '该计划的触发价不高于止损价，无法换算股数，请先让 Agent 重新出计划。',
+      note: `触发价 ${entry.toFixed(3)} ≤ 止损价 ${stop.toFixed(3)}，买入方向不成立`,
+    };
   }
   const shares = rescaleSharesToEntry(r.allowedShares, basis, entry, stop) ?? 0;
   if (shares <= 0) {
@@ -499,7 +539,11 @@ const CONE_STEPS_SHORT = 5;
 
 async function loadProjection(token: number): Promise<void> {
   try {
-    const p = await api.symbolPlans.projection(props.code, CONE_STEPS_SHORT);
+    const p = await api.symbolPlans.projection(
+      props.code,
+      CONE_STEPS_SHORT,
+      props.secid || undefined,
+    );
     if (token !== loadToken) return;
     projection.value = p;
   } catch {
@@ -569,6 +613,17 @@ watch(() => props.code, () => void load(), { immediate: true });
             </el-button>
           </div>
           <div class="tp__stale-reason">{{ staleBanner.reason }}</div>
+        </div>
+
+        <!-- 风险路径已触发：计划仍生效，但这条指令必须顶到最上面，否则用户看不到该减仓了 -->
+        <div v-if="riskTriggered" class="tp__risk-hit">
+          <div class="tp__risk-head">
+            <span class="tp__risk-tag">风险路径已触发</span>
+            <span class="tp__risk-action">建议动作：{{ riskTriggered.action }}</span>
+          </div>
+          <div v-if="riskTriggered.reasons.length" class="tp__risk-reason">
+            命中：{{ riskTriggered.reasons.join('、') }}
+          </div>
         </div>
 
         <!-- 阶段与唯一主动作 -->
@@ -841,6 +896,34 @@ watch(() => props.code, () => void load(), { immediate: true });
   margin-left: auto;
 }
 .tp__stale-reason {
+  margin-top: 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text-2);
+}
+/* 风险路径触发：用「跌」的绿色，与 A 股红涨绿跌一致，避免和黄色失效横幅混淆 */
+.tp__risk-hit {
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(18, 184, 134, 0.35);
+  background: rgba(18, 184, 134, 0.08);
+}
+.tp__risk-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.tp__risk-tag {
+  font-size: 13px;
+  font-weight: 700;
+  color: #2fd8a4;
+}
+.tp__risk-action {
+  font-size: 13px;
+  font-weight: 700;
+}
+.tp__risk-reason {
   margin-top: 4px;
   font-size: 12px;
   line-height: 1.5;

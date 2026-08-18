@@ -295,10 +295,15 @@ export async function prepareContext(input: PrepareInput): Promise<CachedContext
       );
     }
   }
-  // 数据降级时不给可执行动作
+  // 数据降级时不给可执行动作。
+  // 标的动作也要一起收紧：情景动作是从 marketAction 派生的，只收 primaryAction 会产出
+  // 一份顶部写「等待」、情景里却仍写「触发后 add/probe」的自相矛盾计划。
+  // degraded 是证据质量问题（与账户维度无关），两边同源同因，必须同口径。
+  let marketAction = gated.action;
   if (built.context.dataStatus === 'degraded') {
+    marketAction = tighten(marketAction, 'wait');
     primaryAction = tighten(primaryAction, 'wait');
-    reasons.push('关键数据降级，收紧为等待');
+    reasons.push('关键数据降级，标的动作与情景动作一并收紧为等待');
   }
 
   const assetSpecificRisks = [
@@ -310,7 +315,7 @@ export async function prepareContext(input: PrepareInput): Promise<CachedContext
     ...built,
     risk,
     execution,
-    marketAction: gated.action,
+    marketAction,
     primaryAction,
     actionReasons: reasons,
     assetSpecificRisks,
@@ -368,6 +373,9 @@ export function fallbackDraft(
 ): SymbolTradePlan | null {
   const snap = getCachedContext(contextId);
   if (!snap) return null;
+  // 指数不落任何计划，观察计划也不例外：降级路径若放行，validateProposal 的拒绝就形同虚设
+  // （被拒两次后照样在计划表里留下一份按 code 定位的指数计划）
+  if (snap.context.assetType === 'index') return null;
   return saveDraftObservationPlan({
     context: snap.context,
     risk: snap.risk,

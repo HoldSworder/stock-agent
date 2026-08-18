@@ -9,6 +9,7 @@ import type {
   WatchTradeEvent,
 } from '@stock-agent/shared';
 import { api, openWs } from '@/api';
+import { createWsRetry } from '@/composables/wsRetry';
 
 /** 信号流折叠行：按 code:type 聚合，记录触发次数与首次时间 */
 export interface WatchSignalRow extends WatchSignal {
@@ -30,7 +31,7 @@ export const useWatchStore = defineStore('watch', () => {
   const connected = ref(false);
 
   let ws: WebSocket | null = null;
-  let reconnectTimer: number | null = null;
+  const retry = createWsRetry('实时盯盘');
 
   function handle(e: WatchEvent) {
     if (e.type === 'status') status.value = e.status;
@@ -56,11 +57,18 @@ export const useWatchStore = defineStore('watch', () => {
     }
   }
 
-  function connect() {
+  /**
+   * @param fromRetry 是否由退避重连触发。store 是单例，退避计数跨页面存活，
+   *   用户主动进页面（fromRetry=false）算一次新的连接意图，必须重置计数，
+   *   否则上次打满上限后再进来永远不会重连。
+   */
+  function connect(fromRetry = false) {
+    if (!fromRetry) retry.reset();
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
     ws = openWs('/ws/watch');
     ws.onopen = () => {
       connected.value = true;
+      retry.reset();
     };
     ws.onmessage = (ev) => {
       try {
@@ -71,24 +79,15 @@ export const useWatchStore = defineStore('watch', () => {
     };
     ws.onclose = () => {
       connected.value = false;
-      // 断线 5s 重连
-      if (reconnectTimer == null) {
-        reconnectTimer = window.setTimeout(() => {
-          reconnectTimer = null;
-          connect();
-        }, 5000);
-      }
+      retry.schedule(() => connect(true));
     };
     ws.onerror = () => ws?.close();
   }
 
   function disconnect() {
-    if (reconnectTimer != null) {
-      clearTimeout(reconnectTimer);
-      reconnectTimer = null;
-    }
+    retry.cancel();
     if (ws) {
-      // 主动断开：先摘除处理器，避免 onclose 重新调度 5s 重连导致离页后仍僵尸重连
+      // 主动断开：先摘除处理器，避免 onclose 重新调度重连导致离页后仍僵尸重连
       ws.onclose = null;
       ws.onerror = null;
       ws.close();

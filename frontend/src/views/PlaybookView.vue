@@ -205,6 +205,22 @@ const selectedBt = ref<PlaybookBacktest | null>(null);
 const btLoading = ref(false);
 const running = ref(false);
 
+/** 覆盖度不足时的警示文案；覆盖度缺失（外部导入的旧记录）或接近全覆盖时不提示 */
+const COVERAGE_WARN_RATIO = 0.9;
+const coverageWarn = computed<{ title: string; detail: string } | null>(() => {
+  const c = selectedBt.value?.metrics.coverage;
+  if (!c || c.requested <= 0 || c.ratio >= COVERAGE_WARN_RATIO) return null;
+  const parts: string[] = [];
+  if (c.failed.length) parts.push(`取数失败或样本不足 ${c.failed.length} 只：${c.failed.slice(0, 8).join('、')}`);
+  if (c.skipped.length) parts.push(`超出取数预算未纳入 ${c.skipped.length} 只：${c.skipped.slice(0, 8).join('、')}`);
+  return {
+    title: `标的覆盖度偏低：仅纳入 ${c.included}/${c.requested}（${Math.round(c.ratio * 100)}%）`,
+    detail:
+      `${parts.join('；')}。被剔除的标的多为退市、长期停牌或流动性差的品种，` +
+      `剔除方向偏乐观，下面这组指标不代表整个池子的真实表现。`,
+  };
+});
+
 // 只监听 selectedId：selected 是由 items 派生的 computed，loadAll() 整体替换 items 后
 // 即使选中的还是同一条，对象引用也变了，监听 selected 会把用户未保存的规则编辑静默重置掉。
 watch(selectedId, (id) => {
@@ -772,10 +788,29 @@ const equityOption = computed<EChartsCoreOption>(() => {
                     </div>
                   </div>
 
+                  <!-- 覆盖度警示：取数失败/超预算的标的被剔除后仍会出组合指标，而这类失败集中在
+                       退市、长期停牌、流动性差的标的上，剔除方向系统性偏乐观。低覆盖必须说出来，
+                       否则用户会把一份只跑了半个池子的曲线当成完整回测结果。 -->
+                  <el-alert
+                    v-if="coverageWarn"
+                    type="warning"
+                    show-icon
+                    :closable="false"
+                    class="bt-coverage"
+                    :title="coverageWarn.title"
+                    :description="coverageWarn.detail"
+                  />
+
                   <div class="bt-bar">
                     <span class="mut">
                       {{ selectedBt.source === 'system' ? '站内引擎' : '外部导入' }} ·
                       {{ selectedBt.poolSize ?? 0 }} 只标的 ·
+                      <template v-if="selectedBt.metrics.coverage">
+                        实际纳入 {{ selectedBt.metrics.coverage.included }}/{{
+                          selectedBt.metrics.coverage.requested
+                        }}
+                        ·
+                      </template>
                       {{ selectedBt.createdAt.slice(0, 16).replace('T', ' ') }}
                     </span>
                     <el-button size="small" text type="danger" @click="removeBacktest(selectedBt.id)">
@@ -1191,6 +1226,9 @@ const equityOption = computed<EChartsCoreOption>(() => {
 .pos { color: var(--up); }
 .neg { color: var(--down); }
 
+.bt-coverage {
+  margin-top: 12px;
+}
 .bt-bar {
   display: flex;
   align-items: center;

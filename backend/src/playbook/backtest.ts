@@ -2,6 +2,7 @@ import type {
   BacktestCosts,
   KlineBar,
   PlaybookBacktestMetrics,
+  PlaybookCoverage,
   PlaybookEquityPoint,
   PlaybookSpec,
   PlaybookTrade,
@@ -12,6 +13,7 @@ import { listUniverse } from '../modes/universeRepo';
 import { listWatch } from '../watchlist';
 import { resolveCosts } from '../backtest/costs';
 import { buildSeries, evalGroup, describeRule, isBacktestableRule, type Series } from './rules';
+import { validatePlaybookSpec } from './validate';
 import { PLAYBOOK_RULE_CAPABILITY } from '@stock-agent/shared';
 
 // 战法回测引擎：逐 bar 严格按战法自身规则执行，不用预设近似。
@@ -40,6 +42,9 @@ const FETCH_BUDGET_MS = 45_000;
 const BARS_PER_YEAR_DAY = 244;
 const BARS_PER_YEAR_WEEK = 50;
 
+/** 覆盖率低于此值即在 notes 里显式警告：缺的那部分很可能正是最差的一批标的 */
+const COVERAGE_WARN_RATIO = 0.8;
+
 export interface PlaybookBacktestResult {
   range: string;
   poolSize: number;
@@ -47,6 +52,7 @@ export interface PlaybookBacktestResult {
   trades: PlaybookTrade[];
   equity: PlaybookEquityPoint[];
   notes: string[];
+  coverage: PlaybookCoverage;
 }
 
 /** 解析标的池：codes 直接用，其余取站内已有列表 */
@@ -77,6 +83,8 @@ export function mergeNames(
 /** 校验 spec 可执行，不可执行直接抛错（宁可报错也不静默降级成近似回测） */
 export function assertRunnableSpec(spec: PlaybookSpec | null | undefined): asserts spec is PlaybookSpec {
   if (!spec) throw new PlaybookBacktestError('该战法尚未配置回测规则');
+  // 已落库的老 spec 也要过一遍值域：非法参数不是「条件不满足」，是会产出假曲线的脏数据
+  validatePlaybookSpec(spec);
   if (!spec.entry?.rules?.length) throw new PlaybookBacktestError('缺少买入规则');
   const hasExit =
     (spec.exit?.rules?.length ?? 0) > 0 ||
@@ -138,7 +146,7 @@ function fillPrice(bar: KlineBar, fill: PlaybookSpec['fill']): number {
   return fill === 'nextClose' ? bar.close : bar.open;
 }
 
-interface SymbolRun {
+export interface SymbolRun {
   code: string;
   trades: PlaybookTrade[];
   /** 日期 → 该标的当日权益（初始 1） */
@@ -304,18 +312,36 @@ function summarize(
   };
 }
 
-/** 组合权益：各标的等权，缺该日数据的标的按上一可得值延续（不做插值） */
-function combineEquity(runs: SymbolRun[]): PlaybookEquityPoint[] {
+/**
+ * 组合权益：按**当日各标的收益率的等权平均**逐日累乘，而不是直接对各标的权益取平均。
+ *
+ * 为什么不能直接平均权益：每只标的的 equityByDate 都从它自己第一根 bar 起算、初值 1。
+ * 若分母按 runs.length 摊，尚无数据的标的等于以「权益 1」计入，把早期涨跌与回撤稀释掉；
+ * 若分母改成「当日有数据的标的数」，则每有一只标的首次出现数据，平均值就被这个 1 拉一次，
+ * 组合权益凭空跳变（A 已涨到 2.0、B 当天入池 → 均值从 2.0 掉到 1.5，造出 −25% 假回撤），
+ * 而 summarize 的 maxDrawdownPct 正是从这条曲线取的。
+ * 用收益率平均则新标的入池当天不贡献收益（无前值），曲线连续，也不被未上市标的稀释。
+ * 缺该日数据的标的按上一可得值延续（不做插值），跨缺口那天记一次跨缺口涨跌。
+ */
+export function combineEquity(runs: SymbolRun[]): PlaybookEquityPoint[] {
   const dates = [...new Set(runs.flatMap((r) => [...r.equityByDate.keys()]))].sort();
-  const lastSeen = runs.map(() => 1);
+  const prevVal: Array<number | null> = runs.map(() => null);
+  let equity = 1;
   return dates.map((date) => {
     let sum = 0;
+    let n = 0;
     runs.forEach((r, k) => {
       const v = r.equityByDate.get(date);
-      if (v != null) lastSeen[k] = v;
-      sum += lastSeen[k];
+      if (v == null) return;
+      const p = prevVal[k];
+      if (p != null && p > 0) {
+        sum += v / p - 1;
+        n += 1;
+      }
+      prevVal[k] = v;
     });
-    return { date, equity: Math.round((sum / Math.max(runs.length, 1)) * 10000) / 10000 };
+    if (n) equity *= 1 + sum / n;
+    return { date, equity: Math.round(equity * 10000) / 10000 };
   });
 }
 
@@ -406,10 +432,24 @@ export async function runPlaybookBacktest(spec: PlaybookSpec): Promise<PlaybookB
     '组合口径：每只标的独立一份资金、同时最多一笔持仓，权益按标的等权合成',
     '权益曲线含持仓期浮动盈亏（按收盘市值计，浮盈尚未扣卖出侧成本）；逐笔收益为已实现、已扣双边成本',
   ];
+  const coverage: PlaybookCoverage = {
+    requested: universe.length,
+    included: runs.length,
+    ratio: universe.length ? Math.round((runs.length / universe.length) * 1000) / 1000 : 0,
+    failed,
+    skipped,
+  };
+  notes.push(`标的覆盖度：实际纳入 ${coverage.included}/${coverage.requested}`);
   if (failed.length) notes.push(`以下标的取数失败或样本不足，已跳过：${failed.join('、')}`);
   if (skipped.length) {
     notes.push(
       `取数超出整轮 ${FETCH_BUDGET_MS / 1000} 秒预算，以下标的未纳入本次回测（结果为部分标的口径）：${skipped.join('、')}`,
+    );
+  }
+  if (coverage.ratio < COVERAGE_WARN_RATIO) {
+    notes.push(
+      `⚠️ 覆盖度不足 ${Math.round(COVERAGE_WARN_RATIO * 100)}%：被剔除的标的集中在退市/长期停牌/流动性差的一端，` +
+        '本次指标存在幸存者偏差，方向上系统性偏乐观，不可与全覆盖的回测横向比较。',
     );
   }
   const bad = runs.filter((r) => r.badEntryPrice).map((r) => r.code);
@@ -420,9 +460,12 @@ export async function runPlaybookBacktest(spec: PlaybookSpec): Promise<PlaybookB
   return {
     range: firstDate && lastDate ? `${firstDate} ~ ${lastDate}` : '',
     poolSize: runs.length,
-    metrics: summarize(equity, trades, barsPerYear),
+    // coverage 挂进 metrics 一并落库：它是这组指标的限定语，分开存就会出现「指标还在、
+    // 覆盖度丢了」的半截证据
+    metrics: { ...summarize(equity, trades, barsPerYear), coverage },
     trades,
     equity,
     notes,
+    coverage,
   };
 }

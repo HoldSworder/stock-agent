@@ -229,10 +229,15 @@ onMounted(async () => {
   } catch {
     /* 首次拉取失败不阻断，WS 会补状态 */
   }
-  nowTimer = window.setInterval(() => (now.value = Date.now()), 1000);
+  // 标签页切到后台时没人在看，秒表与两个 30s 接口都停下；重新可见后下一拍自动续上
+  nowTimer = window.setInterval(() => {
+    if (document.visibilityState !== 'visible') return;
+    now.value = Date.now();
+  }, 1000);
   void loadStats();
   void loadStrategyViews();
   statsTimer = window.setInterval(() => {
+    if (document.visibilityState !== 'visible') return;
     void loadStats();
     void loadStrategyViews();
   }, 30_000);

@@ -8,6 +8,7 @@ import type {
   PivotLevels,
   MaStructure,
 } from '@stock-agent/shared';
+import { isBarUnclosed } from '../symbolPlans/sessionClock';
 
 // S10 点位测算库：从 K 线用确定性算法衍生「专业点位」——主导波段（摆动高低点）、
 // 斐波那契回撤/扩展、ATR(14)、经典枢轴点、多周期均线结构。喂「多周期走势研判」agent，
@@ -96,11 +97,19 @@ function calcAtr(bars: KlineBar[]): number | null {
   return res == null ? null : Number(res);
 }
 
-/** 经典枢轴点（据上一根 H/L/C） */
-function calcPivot(bars: KlineBar[]): PivotLevels | null {
-  const last = bars[bars.length - 1];
-  if (!last) return null;
-  const { high: h, low: l, close: c } = last;
+/**
+ * 经典枢轴点（据最新一根**已收盘**的 H/L/C）。
+ *
+ * 参考根不能无脑取末根：末根盘中还在动，枢轴会自我指涉——PP 恒落在当根 [low, high] 内，
+ * 每次刷新都跟着漂，「价格站上/跌破 PP」这类判断因此失去意义。
+ * 收没收完复用 sessionClock.isBarUnclosed（求值层与证据层共用的唯一判据），
+ * 未收完就退一根，已收完就用末根。
+ */
+function calcPivot(bars: KlineBar[], period: KlinePeriod, now = new Date()): PivotLevels | null {
+  const lastIdx = bars.length - 1;
+  const ref = isBarUnclosed(period, bars[lastIdx]?.time, now) ? bars[lastIdx - 1] : bars[lastIdx];
+  if (!ref) return null;
+  const { high: h, low: l, close: c } = ref;
   const pp = (h + l + c) / 3;
   return {
     pp: r2(pp),
@@ -149,11 +158,15 @@ function calcMaStructure(closes: number[], close: number): MaStructure | null {
   };
 }
 
-/** 从 K 线 bars 计算全套点位（数据不足返回 null 段，never throw） */
+/**
+ * 从 K 线 bars 计算全套点位（数据不足返回 null 段，never throw）。
+ * @param now 判定末根是否已收盘的基准时刻（枢轴点参考根靠它挑），自检可注入
+ */
 export function computeLevels(
   code: string,
   bars: KlineBar[],
   period: KlinePeriod = 'day',
+  now: Date = new Date(),
 ): PriceLevels {
   const last = bars[bars.length - 1];
   const closes = bars.map((b) => b.close);
@@ -170,7 +183,7 @@ export function computeLevels(
     fibExtensions: swing ? calcFibExtensions(swing) : [],
     atr: atr == null ? null : r3(atr),
     atrPct: atr == null || close <= 0 ? null : r2((atr / close) * 100),
-    pivot: calcPivot(bars),
+    pivot: calcPivot(bars, period, now),
     ma: calcMaStructure(closes, close),
     note: bars.length < MIN_ATR_BARS ? 'K 线数据不足，部分点位不可用' : '确定性点位测算（斐波那契/枢轴/均线/ATR）',
   };
@@ -307,9 +320,32 @@ if (process.argv[1] && /levels\.ts$/.test(process.argv[1])) {
     assert(f.price < down.swing!.low, `下行扩展位应低于波段低点：${f.ratio} → ${f.price}`);
   }
 
+  // 枢轴点必须据「最新一根已收盘 bar」算：拿盘中还在动的末根算 PP，
+  // PP 恒落在末根 [low, high] 内、每次刷新都在漂，站上/跌破 PP 的判断随之失效。
+  {
+    const closed = { time: '2026-08-03', open: 10, high: 12, low: 8, close: 11, volume: 1000, amount: 10000 };
+    const running = { time: '2026-08-04', open: 20, high: 21, low: 19, close: 20.5, volume: 1000, amount: 20000 };
+    const expectPp = (b: KlineBar): number => Math.round(((b.high + b.low + b.close) / 3) * 100) / 100;
+    const intraday = computeLevels('TEST', [closed, running], 'day', new Date('2026-08-04T10:30:00+08:00'));
+    assert(
+      intraday.pivot?.pp === expectPp(closed),
+      `盘中应据上一根已收盘 bar 算枢轴（期望 ${expectPp(closed)}，实际 ${intraday.pivot?.pp}）`,
+    );
+    const afterClose = computeLevels('TEST', [closed, running], 'day', new Date('2026-08-04T15:30:00+08:00'));
+    assert(
+      afterClose.pivot?.pp === expectPp(running),
+      `收盘后末根已定格，应据末根算枢轴（期望 ${expectPp(running)}，实际 ${afterClose.pivot?.pp}）`,
+    );
+    // 只有一根且未收盘时无参考根可用，返回 null 好过给一个自我指涉的枢轴
+    assert(
+      computeLevels('TEST', [running], 'day', new Date('2026-08-04T10:30:00+08:00')).pivot === null,
+      '无已收盘参考根时枢轴应为 null',
+    );
+  }
+
   // eslint-disable-next-line no-console
   console.log(
-    'levels.ts 自检通过（61.8% 回撤 · ATR 数量级 · 波段窗口只看最近 60 根 · 回撤/扩展方向）：',
+    'levels.ts 自检通过（61.8% 回撤 · ATR 数量级 · 波段窗口只看最近 60 根 · 回撤/扩展方向 · 枢轴参考根已收盘）：',
     JSON.stringify({ swing: lv.swing, fib618, atr: lv.atr }),
   );
 }

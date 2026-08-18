@@ -22,6 +22,7 @@ import { getTrendsTencent, getIndicesTencent } from './tencent';
 import { requestJson } from '../datasource/httpClient';
 import { num, numOrNull, toSecid, PUSH2_QT } from '../datasource/codes';
 import { getQuotes as scheduleQuotes, getKline as scheduleKline } from '../datasource/scheduler';
+import { isTradingDay, prevTradingDay, shanghaiDateStr } from './calendar';
 
 // 东方财富公开行情接口（push2）薄封装。无需鉴权，仅自用看盘/复盘。
 // 统一 fltt=2 直接拿小数值；diff 在 full=1 时为对象，兼容对象/数组。
@@ -576,11 +577,14 @@ export async function getTrendsEastmoney(code: string, secid?: string): Promise<
       volume: num(cols[5]),
     };
   });
+  // 交易日取自数据点本身的日期前缀：休市日拿到的是上一交易日的分时，不能由消费方按「今天」补
+  const rawDate = (trends[0] ?? '').slice(0, 10);
   return {
     code,
     name: String(data.name ?? ''),
     prevClose: num(data.preClose),
     points,
+    ...(/^\d{4}-\d{2}-\d{2}$/.test(rawDate) ? { tradeDate: rawDate } : {}),
   };
 }
 
@@ -790,18 +794,6 @@ export async function getTurnoverTotal(): Promise<TurnoverTotal> {
 
 // ===== push2ex：涨停/跌停/炸板池（情绪与梯队）=====
 
-/** 当日 Asia/Shanghai 日期 YYYYMMDD */
-function shanghaiDateNum(): string {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Shanghai',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  })
-    .format(new Date())
-    .replace(/-/g, '');
-}
-
 interface ZtPoolItem {
   c: string; // code
   n: string; // name
@@ -815,38 +807,86 @@ interface ZtPoolItem {
   amount?: number; // 成交额（元）
 }
 
-async function fetchPool(
-  endpoint: 'getTopicZTPool' | 'getTopicDTPool' | 'getTopicZBPool',
-  pagesize = 1,
-): Promise<{ tc: number; pool: ZtPoolItem[] }> {
-  const date = shanghaiDateNum();
-  const url = `${PUSH2EX}/${endpoint}?ut=${PUSH2EX_UT}&dpt=wz.ztzt&Pageindex=0&pagesize=${pagesize}&sort=fbt:asc&date=${date}`;
+type PoolEndpoint = 'getTopicZTPool' | 'getTopicDTPool' | 'getTopicZBPool';
+
+/** 取某一天的池子；接口异常返回 null（与「当天确实 0 家」区分开） */
+async function fetchPoolOn(
+  endpoint: PoolEndpoint,
+  pagesize: number,
+  ymd: string,
+): Promise<{ tc: number; pool: ZtPoolItem[] } | null> {
+  const url = `${PUSH2EX}/${endpoint}?ut=${PUSH2EX_UT}&dpt=wz.ztzt&Pageindex=0&pagesize=${pagesize}&sort=fbt:asc&date=${ymd.replace(/-/g, '')}`;
   try {
     const json = await getJson(url);
     const data = json.data as { tc?: number; pool?: ZtPoolItem[] } | null;
-    if (!data) return { tc: 0, pool: [] };
+    if (!data) return null;
     return { tc: num(data.tc), pool: data.pool ?? [] };
   } catch {
-    return { tc: 0, pool: [] };
+    return null;
   }
 }
 
-/** 市场情绪温度：涨停/跌停/炸板/最高连板/炸板率 */
-export async function getEmotion(): Promise<MarketEmotion> {
+/** 池子应取的交易日：交易日取今天，否则取上一交易日 */
+function poolTargetDate(): string {
+  const today = shanghaiDateStr();
+  return isTradingDay() ? today : prevTradingDay(today);
+}
+
+/**
+ * 涨停/跌停/炸板池，附带实际取数日期。
+ *
+ * 固定取「今天」的老实现在休市日一律返回 0：下游 getEmotion 据此给出
+ * 「涨停 0 家、赚钱效应冰点」并原样进 agent prompt，而事实是当天根本没开市。
+ * 故非交易日直接取上一交易日，并把实际日期透出，
+ * 让调用方能区分「0 涨停」与「非交易日/暂无数据」（date=null）。
+ *
+ * 只在**接口异常**（fetchPoolOn 返回 null）时才回退前一天。不能拿「空池」当回退依据：
+ * A 股很多交易日跌停就是 0 家，那是真实读数，回退会把昨天的跌停数冒充成今天的。
+ *
+ * @param date 显式指定取数日期，供多个池子对齐到同一天（缺省自行决策）
+ */
+async function fetchPool(
+  endpoint: PoolEndpoint,
+  pagesize = 1,
+  date = poolTargetDate(),
+): Promise<{ tc: number; pool: ZtPoolItem[]; date: string | null }> {
+  for (const d of [date, prevTradingDay(date)]) {
+    const r = await fetchPoolOn(endpoint, pagesize, d);
+    if (r) return { ...r, date: d };
+  }
+  return { tc: 0, pool: [], date: null };
+}
+
+/**
+ * 市场情绪温度 + 实际取数日期。date=null 表示三个池子都没取到数据，
+ * 此时各计数为 0 是「无数据」而非「真的一家涨停都没有」，调用方不要当冰点解读。
+ */
+export async function getEmotionWithDate(): Promise<{ emotion: MarketEmotion; date: string | null }> {
+  // 三个池子必须对齐到同一天：各自决策会出现 limitUp 来自今天、limitDown 来自昨天，
+  // 而 brokenRate = zb/(zt+zb) 跨两天混算，调用方从单一 date 字段无从察觉。
+  const target = poolTargetDate();
   const [zt, dt, zb] = await Promise.all([
-    fetchPool('getTopicZTPool', 400),
-    fetchPool('getTopicDTPool', 1),
-    fetchPool('getTopicZBPool', 1),
+    fetchPool('getTopicZTPool', 400, target),
+    fetchPool('getTopicDTPool', 1, target),
+    fetchPool('getTopicZBPool', 1, target),
   ]);
   const maxStreak = zt.pool.reduce((m, p) => Math.max(m, p.lbc ?? 0), 0);
   const denom = zt.tc + zb.tc;
   return {
-    limitUp: zt.tc,
-    limitDown: dt.tc,
-    brokenBoard: zb.tc,
-    brokenRate: denom > 0 ? (zb.tc / denom) * 100 : 0,
-    maxStreak,
+    emotion: {
+      limitUp: zt.tc,
+      limitDown: dt.tc,
+      brokenBoard: zb.tc,
+      brokenRate: denom > 0 ? (zb.tc / denom) * 100 : 0,
+      maxStreak,
+    },
+    date: zt.date ?? dt.date ?? zb.date,
   };
+}
+
+/** 市场情绪温度：涨停/跌停/炸板/最高连板/炸板率（要区分「无数据」用 getEmotionWithDate） */
+export async function getEmotion(): Promise<MarketEmotion> {
+  return (await getEmotionWithDate()).emotion;
 }
 
 /** 涨停板梯队：按连板天数分组（高板→首板），每梯队最多 20 只 */

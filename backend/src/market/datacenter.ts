@@ -40,6 +40,14 @@ function toSecucode(code: string): string {
   return `${code}.${/^(6|5|9)/.test(code) ? 'SH' : 'SZ'}`;
 }
 
+/**
+ * 校验 6 位代码。本文件把 code 直接拼进 datacenter 的 filter 表达式，
+ * 不校验的话带引号的入参可以闭合字符串改写过滤条件（兄弟模块 eastmoney.ts 各入口都做了这道校验）。
+ */
+function assertCode(code: string): void {
+  if (!/^\d{6}$/.test(code)) throw new Error(`非法股票代码：${code}`);
+}
+
 /** 拉取一张 datacenter 报表，返回 result.data 行数组（空/失败返回 []） */
 async function fetchRows(base: string, params: Record<string, string>, sourceId: string): Promise<Record<string, unknown>[]> {
   const qs = new URLSearchParams(params).toString();
@@ -72,6 +80,7 @@ export async function getDragonTigerEntries(
   code: string,
   limit = 5,
 ): Promise<{ name: string; entries: DragonTigerEntry[] }> {
+  assertCode(code);
   const rows = await fetchRows(
     WEB_BASE,
     {
@@ -120,6 +129,7 @@ export async function getDragonTiger(code: string, limit = 5): Promise<string> {
  * 解禁监控师的供给冲击证据（A 股特有）。
  */
 export async function getLockupAndHolders(code: string): Promise<string> {
+  assertCode(code);
   const today = shanghaiYmd().ymd;
   const [lifts, holders, pledges] = await Promise.all([
     fetchRows(
@@ -206,6 +216,7 @@ export async function getLockupAndHolders(code: string): Promise<string> {
  * 基本面分析师的结构化盈利与成长性证据，替代妙想自然语言近似。
  */
 export async function getFinancialStatements(code: string): Promise<string> {
+  assertCode(code);
   const rows = await fetchRows(
     F10_BASE,
     {
@@ -247,6 +258,7 @@ export async function getFinancialStatements(code: string): Promise<string> {
  * 注意：东财该报表仅给「当前值」，不含历史分位；历史分位与同业中位数对比由上层用妙想增补。
  */
 export async function getStockValuation(code: string): Promise<string> {
+  assertCode(code);
   const rows = await fetchRows(
     WEB_BASE,
     {

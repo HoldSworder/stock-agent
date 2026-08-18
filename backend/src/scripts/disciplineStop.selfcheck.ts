@@ -10,7 +10,7 @@ process.env.DATABASE_PATH = join(tmpDir, 'test.sqlite');
 
 const { ensureSchema } = await import('../db/migrate');
 const { db, schema } = await import('../db/client');
-const { getPendingStopMap } = await import('../positions/discipline');
+const { getPendingStopMap, isEtfPosition } = await import('../positions/discipline');
 
 ensureSchema();
 
@@ -59,5 +59,14 @@ assert.equal(map.has('600003'), false, '非持仓标的不应出现');
 const longHold = getPendingStopMap([{ code: '600000', holdDays: 200 }]);
 assert.equal(longHold.get('600000'), dayAgo(90), '长期持仓时窗口内的事件应报出');
 
+// ETF 口径只认 15xxxx 与 5xxxxx：放宽成 1xxxxx 会把可转债（沪 110/113、深 123/127）
+// 划进 ETF，套上 12% 止损与 40% 单票上限，而可转债日内波动远大于 ETF，等于放松风控
+assert.equal(isEtfPosition('512880', '证券ETF'), true, '沪市六位 ETF 必须命中');
+assert.equal(isEtfPosition('588000', '科创50'), true, '名称不带 ETF 的沪市基金同样按代码命中');
+assert.equal(isEtfPosition('159915', '创业板'), true, '深市 15 开头 ETF 必须命中');
+assert.equal(isEtfPosition('113050', '南银转债'), false, '沪市可转债不得按 ETF 放宽风控');
+assert.equal(isEtfPosition('123123', '某某转债'), false, '深市可转债不得按 ETF 放宽风控');
+assert.equal(isEtfPosition('110059', '浦发转债'), false, '110 开头可转债同样不得命中');
+
 rmSync(tmpDir, { recursive: true, force: true });
-console.log('✅ 止损未执行窗口自检通过：建仓日下界 / 本轮最早一次 / 当日不计');
+console.log('✅ 止损未执行窗口自检通过：建仓日下界 / 本轮最早一次 / 当日不计 / ETF 口径不含可转债');

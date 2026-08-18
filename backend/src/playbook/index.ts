@@ -6,6 +6,7 @@ import type {
 } from '@stock-agent/shared';
 import * as repo from './repo';
 import { PlaybookBacktestError, runPlaybookBacktest } from './backtest';
+import { PlaybookSpecError, validatePlaybookSpec } from './validate';
 
 // 战法库模块：手工收录外部收集的战法（来源 / 适用环境 / 选股·买点·卖点·风控），
 // 并按战法自身规则严格回测（站内引擎）或导入外部回测结果。
@@ -45,7 +46,16 @@ export function registerPlaybookModule(app: FastifyInstance): void {
   app.put<{ Params: { id: string }; Body: { spec: PlaybookSpec | null } }>(
     '/api/playbooks/:id/spec',
     (req, reply) => {
-      const item = repo.setSpec(req.params.id, req.body?.spec ?? null);
+      // 存库前必须校验：spec 直接来自 body，`days: 0` 这类值会让回测每根 bar 都判「创新高」
+      const raw = req.body?.spec ?? null;
+      let spec: PlaybookSpec | null = null;
+      try {
+        spec = raw === null ? null : validatePlaybookSpec(raw);
+      } catch (e) {
+        if (e instanceof PlaybookSpecError) return reply.code(400).send({ ok: false, error: e.message });
+        throw e;
+      }
+      const item = repo.setSpec(req.params.id, spec);
       if (!item) return reply.code(404).send({ ok: false, error: '战法不存在' });
       return { ok: true, data: item };
     },
@@ -102,7 +112,8 @@ export function registerPlaybookModule(app: FastifyInstance): void {
       } catch (e) {
         // 规则不完整/标的池为空属参数问题，取数失败属上游问题，分开给码
         const msg = e instanceof Error ? e.message : String(e);
-        return reply.code(e instanceof PlaybookBacktestError ? 400 : 502).send({ ok: false, error: msg });
+        const badRequest = e instanceof PlaybookBacktestError || e instanceof PlaybookSpecError;
+        return reply.code(badRequest ? 400 : 502).send({ ok: false, error: msg });
       }
     },
   );

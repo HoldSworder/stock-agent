@@ -100,6 +100,7 @@ CREATE TABLE IF NOT EXISTS symbol_trade_plans (
   code TEXT NOT NULL,
   name TEXT NOT NULL,
   asset_type TEXT NOT NULL,
+  secid TEXT,
   version INTEGER NOT NULL,
   horizon TEXT NOT NULL,
   status TEXT NOT NULL,
@@ -161,6 +162,7 @@ CREATE TABLE IF NOT EXISTS symbol_plan_forecasts (
   plan_id TEXT NOT NULL,
   plan_version INTEGER NOT NULL,
   code TEXT NOT NULL,
+  secid TEXT,
   scenario_id TEXT NOT NULL,
   scenario_rank TEXT NOT NULL,
   probability_pct REAL NOT NULL,
@@ -171,6 +173,7 @@ CREATE TABLE IF NOT EXISTS symbol_plan_forecasts (
   due_date TEXT NOT NULL,
   outcome TEXT,
   settled_at TEXT,
+  settle_note TEXT,
   created_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_plan_forecast_plan_scenario ON symbol_plan_forecasts(plan_id, scenario_id);
@@ -827,6 +830,7 @@ CREATE TABLE IF NOT EXISTS research_mode_backtests (
   concentration_md TEXT,
   trades_md TEXT,
   is_recommended INTEGER NOT NULL DEFAULT 0,
+  engine_version TEXT,
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_mode_bt_mode ON research_mode_backtests(mode_id);
@@ -841,6 +845,14 @@ CREATE TABLE IF NOT EXISTS research_mode_daily (
   cum_return REAL,
   drawdown REAL,
   source TEXT NOT NULL DEFAULT 'system',
+  protocol_version TEXT,
+  engine_version TEXT,
+  universe_policy TEXT,
+  universe_hash TEXT,
+  pool_size INTEGER,
+  cost_buy_bps REAL,
+  cost_sell_bps REAL,
+  same_as_research_pool INTEGER,
   created_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_mode_daily_key ON research_mode_daily(mode_id, date);
@@ -1010,6 +1022,17 @@ export function ensureSchema(): void {
     'ALTER TABLE screen_runs ADD COLUMN diagnostics TEXT',
     'ALTER TABLE research_modes ADD COLUMN variant_count INTEGER NOT NULL DEFAULT 0',
     "ALTER TABLE research_mode_backtests ADD COLUMN protocol TEXT NOT NULL DEFAULT ''",
+    // 模式引擎协议标记：区分「这条证据出自哪一版引擎 / 哪个标的池 / 哪档成本」。
+    // 全部可空，老行保持 NULL 并在下方统一回填 v1-legacy，不覆盖任何已有值。
+    'ALTER TABLE research_mode_backtests ADD COLUMN engine_version TEXT',
+    'ALTER TABLE research_mode_daily ADD COLUMN protocol_version TEXT',
+    'ALTER TABLE research_mode_daily ADD COLUMN engine_version TEXT',
+    'ALTER TABLE research_mode_daily ADD COLUMN universe_policy TEXT',
+    'ALTER TABLE research_mode_daily ADD COLUMN universe_hash TEXT',
+    'ALTER TABLE research_mode_daily ADD COLUMN pool_size INTEGER',
+    'ALTER TABLE research_mode_daily ADD COLUMN cost_buy_bps REAL',
+    'ALTER TABLE research_mode_daily ADD COLUMN cost_sell_bps REAL',
+    'ALTER TABLE research_mode_daily ADD COLUMN same_as_research_pool INTEGER',
     'ALTER TABLE chat_sessions ADD COLUMN ref_code TEXT',
     'ALTER TABLE chat_sessions ADD COLUMN ref_name TEXT',
     'ALTER TABLE symbol_marks ADD COLUMN semantic_key TEXT',
@@ -1042,6 +1065,11 @@ export function ensureSchema(): void {
     'ALTER TABLE symbol_trade_plans ADD COLUMN evidence_snapshot TEXT',
     'ALTER TABLE symbol_trade_plans ADD COLUMN session_id TEXT',
     'ALTER TABLE symbol_trade_plans ADD COLUMN run_id TEXT',
+    // secid：指数与个股撞码（000300 会被解析成深市个股），不落库求值就会拿另一只标的的 K 线判触及。
+    // 旧行保持 NULL，结算侧按 asset_type 判断能否单凭 code 取数，绝不猜市场。
+    'ALTER TABLE symbol_trade_plans ADD COLUMN secid TEXT',
+    'ALTER TABLE symbol_plan_forecasts ADD COLUMN secid TEXT',
+    'ALTER TABLE symbol_plan_forecasts ADD COLUMN settle_note TEXT',
     'ALTER TABLE symbol_trade_plan_events ADD COLUMN plan_version INTEGER NOT NULL DEFAULT 0',
     'ALTER TABLE symbol_trade_plan_events ADD COLUMN condition_id TEXT',
     "ALTER TABLE symbol_trade_plan_events ADD COLUMN note TEXT NOT NULL DEFAULT ''",
@@ -1062,6 +1090,8 @@ export function ensureSchema(): void {
     }
   }
 
+  backfillLegacyModeEngineVersion();
+
   // 依赖后补列的索引：必须等 addColumns 跑完才能建，否则老库在 DDL 阶段就报 no such column
   const lateIndexes = [
     'CREATE INDEX IF NOT EXISTS idx_symbol_marks_plan ON symbol_marks(plan_id, plan_version)',
@@ -1078,6 +1108,30 @@ export function ensureSchema(): void {
   }
 
   warnOnSchemaDrift();
+}
+
+/** 加协议列之前产出的模式跟踪/回测记录统一按这个版本看待 */
+const LEGACY_MODE_ENGINE_VERSION = 'v1-legacy';
+
+/**
+ * 把加列之前的模式跟踪行与回测记录标成 v1 语义。
+ * v1 = supertrend 离场恒不触发（判据代入后等价于 0 < -(mult+1)·atr）+ 回放零成本，
+ * 那批曲线系统性偏乐观，与新版引擎的收益不可横向比较，也不能与新样本混进同一个晋级门。
+ * 只填 NULL 行：已经带版本的行是引擎自己写的真实口径，覆盖它等于伪造证据来源。
+ */
+function backfillLegacyModeEngineVersion(): void {
+  for (const table of ['research_mode_daily', 'research_mode_backtests']) {
+    try {
+      const r = sqlite
+        .prepare(`UPDATE ${table} SET engine_version = ? WHERE engine_version IS NULL`)
+        .run(LEGACY_MODE_ENGINE_VERSION);
+      if (r.changes > 0) {
+        console.log(`[migrate] ${table}: ${r.changes} 行历史记录标记为 ${LEGACY_MODE_ENGINE_VERSION}`);
+      }
+    } catch (e) {
+      console.warn(`[migrate] 回填 ${table}.engine_version 失败:`, e instanceof Error ? e.message : e);
+    }
+  }
 }
 
 /**
@@ -1099,7 +1153,17 @@ function warnOnSchemaDrift(): void {
     board_newhigh_snapshots: ['core_codes'],
     kline_daily: ['secid', 'adj_base', 'provisional'],
     research_modes: ['variant_count'],
-    research_mode_backtests: ['protocol'],
+    research_mode_backtests: ['protocol', 'engine_version'],
+    research_mode_daily: [
+      'protocol_version',
+      'engine_version',
+      'universe_policy',
+      'universe_hash',
+      'pool_size',
+      'cost_buy_bps',
+      'cost_sell_bps',
+      'same_as_research_pool',
+    ],
     chat_sessions: ['ref_code', 'ref_name'],
     symbol_marks: ['semantic_key', 'timeframe', 'role', 'plan_id', 'plan_version', 'status'],
     symbol_trade_plans: [
@@ -1120,7 +1184,9 @@ function warnOnSchemaDrift(): void {
       'asset_specific_risks',
       'evidence_version',
       'phase_model_version',
+      'secid',
     ],
+    symbol_plan_forecasts: ['secid', 'settle_note'],
     symbol_trade_plan_events: ['plan_version', 'condition_id', 'note'],
     playbook_backtests: ['source', 'metrics', 'trades', 'equity', 'notes', 'spec'],
   };

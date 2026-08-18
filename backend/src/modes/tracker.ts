@@ -10,10 +10,19 @@ import type {
 } from '@stock-agent/shared';
 import { listPool } from '../etf/repo';
 import { mapLimit } from '../datasource/klineCache';
+import { sideCostBps } from '../backtest/costs';
 import type { Bar } from './factors';
 import { computeRows, fetchBars } from './factors';
 import { annotateThemes, replayThemeFirst, shortName, type UniverseSeries } from './themeFirst';
 import { addEvents, clearEventsOn, getMode, orderedDaily, upsertDaily } from './repo';
+import { protocolKeyOf } from './gate';
+import { isSupertrendDown, supertrendDirection } from './supertrend';
+import {
+  logModeProtocol,
+  modeProtocolOf,
+  type ModeProtocol,
+  type ModeUniversePolicy,
+} from './protocol';
 
 // 站内声明式跟踪引擎（trackingMode=system）：纯 TS、纯只读取数，不下单、不调 python。
 // 两种 spec：
@@ -24,13 +33,21 @@ import { addEvents, clearEventsOn, getMode, orderedDaily, upsertDaily } from './
 
 const BENCH_CODE = '510300';
 
-interface Series {
+/** 回测轴前段跳过的交易日数（保证因子可算）。跟踪侧也用它对齐调仓相位 */
+const WARMUP_DAYS = 120;
+
+/** 导出仅为让自检能直接构造序列断言 realizedReturn 的缺数据语义，生产路径不从外部构造 */
+export interface Series {
   code: string;
   name: string;
   theme: string;
   dates: string[];
+  /** 已复权的完整 OHLCV。退出规则要真实高低价，单独维护 H/L/C 三个数组容易错位 */
+  bars: Bar[];
   closes: number[];
   idx: Map<string, number>;
+  /** supertrend 方向序列缓存，key = `${period}:${mult}`。回测逐日调用，不缓存会退化成 O(n²) */
+  stCache: Map<string, number[]>;
 }
 
 interface PoolBars {
@@ -41,9 +58,21 @@ interface PoolBars {
   bars: Bar[];
 }
 
-/** 取 ETF 跟踪池 + 基准 510300 的 mootdx 日线，并对齐到基准交易日轴（python 同款口径） */
-async function loadPoolBars(): Promise<{
+/** 标的池条目（数据库跟踪池与研究基准池的公共形状） */
+interface PoolItem {
+  code: string;
+  name: string;
+  tags?: string | null;
+}
+
+/**
+ * 取标的池 + 基准 510300 的 mootdx 日线，并对齐到基准交易日轴（python 同款口径）。
+ * items 省略时用数据库 ETF 跟踪池（生产默认）；自检需要研究基准池时显式传入。
+ */
+async function loadPoolBars(items?: ReadonlyArray<PoolItem>): Promise<{
   pool: PoolBars[];
+  /** 申报池全量条目（含今天取数失败的）：协议口径键必须建在它上面，不能建在 pool 上 */
+  declared: ReadonlyArray<PoolItem>;
   benchClose: Map<string, number>;
   dates: string[];
 }> {
@@ -54,28 +83,28 @@ async function loadPoolBars(): Promise<{
 
   // 并发 4：池子几十只、每只一趟 sidecar 拿 800 根，串行往返太慢；
   // 并发再高会撞 sidecar 上游限流，得不偿失
-  const items = listPool();
-  const barsByIdx: Bar[][] = items.map(() => []);
+  const poolItems: ReadonlyArray<PoolItem> = items ?? listPool();
+  const barsByIdx: Bar[][] = poolItems.map(() => []);
   await mapLimit(
-    items.map((_, i) => i),
+    poolItems.map((_, i) => i),
     4,
     async (i) => {
       try {
-        barsByIdx[i] = (await fetchBars(items[i].code)).filter((b) => benchClose.has(b.d));
+        barsByIdx[i] = (await fetchBars(poolItems[i].code)).filter((b) => benchClose.has(b.d));
       } catch {
         /* 单只取数失败按无数据处理，不打断整池 */
       }
     },
   );
   const pool: PoolBars[] = [];
-  for (const [i, item] of items.entries()) {
+  for (const [i, item] of poolItems.entries()) {
     const bars = barsByIdx[i];
     if (bars.length < 130) continue;
     const name = shortName(item.name);
     pool.push({ code: item.code, name, theme: (item.tags ?? '').split(',')[0] || name, bars });
   }
   if (!pool.length) throw new Error('ETF 跟踪池行情全部取数失败');
-  return { pool, benchClose, dates };
+  return { pool, declared: poolItems, benchClose, dates };
 }
 
 function mean(a: number[]): number {
@@ -136,23 +165,22 @@ function exitTriggered(exits: ModeExit[] | undefined, s: Series, i: number): boo
       const hi = Math.max(...lookback);
       if (c[i] < ma && hi > 0 && c[i] / hi - 1 <= -ex.drawdownPct / 100) return true;
     } else if (ex.type === 'supertrend') {
-      if (supertrendDown(s, i, ex.period, ex.mult)) return true;
+      if (isSupertrendDown(supertrendOf(s, ex.period, ex.mult), i, ex.period)) return true;
     }
     // rankDrop 由每日重选 TopN 隐式实现，无需单独处理
   }
   return false;
 }
 
-/** 极简 supertrend：用收盘近似 hl2，判定当前是否处于下行段 */
-function supertrendDown(s: Series, i: number, period: number, mult: number): boolean {
-  const c = s.closes;
-  if (i < period + 2) return false;
-  // ATR 用收盘绝对差近似
-  const diffs: number[] = [];
-  for (let k = i - period + 1; k <= i; k++) diffs.push(Math.abs(c[k] - c[k - 1]));
-  const atr = mean(diffs);
-  const upper = c[i] - mult * atr; // 简化下轨
-  return c[i] < upper - atr; // 收盘明显跌破下轨视为下行
+/** 按 period:mult 缓存整条方向序列，逐日查询降到 O(1)（回测每天都要问一次） */
+function supertrendOf(s: Series, period: number, mult: number): number[] {
+  const key = `${period}:${mult}`;
+  let dir = s.stCache.get(key);
+  if (!dir) {
+    dir = supertrendDirection(s.bars, period, mult);
+    s.stCache.set(key, dir);
+  }
+  return dir;
 }
 
 /** 在某交易日计算应持仓（横截面加权 z-score 选 TopN，主题去重 + 退出过滤） */
@@ -208,6 +236,8 @@ type BenchOf = (date: string) => (n: number) => number | null;
 
 interface TrackContext {
   all: Series[];
+  /** 申报池全量条目（协议口径键的输入） */
+  declared: ReadonlyArray<PoolItem>;
   map: Map<string, Series>;
   benchOf: BenchOf;
   goodDates: string[];
@@ -215,7 +245,7 @@ interface TrackContext {
 
 /** 加载 ETF 跟踪池行情 + 基准 + 覆盖度足够的交易日轴（供每日跟踪与历史重跑共用） */
 async function loadContext(): Promise<TrackContext> {
-  const { pool, benchClose, dates: benchDates } = await loadPoolBars();
+  const { pool, declared, benchClose, dates: benchDates } = await loadPoolBars();
   const all: Series[] = [];
   const map = new Map<string, Series>();
   for (const p of pool) {
@@ -224,8 +254,10 @@ async function loadContext(): Promise<TrackContext> {
       name: p.name,
       theme: p.theme,
       dates: p.bars.map((b) => b.d),
+      bars: p.bars,
       closes: p.bars.map((b) => b.c),
       idx: new Map(p.bars.map((b, i) => [b.d, i])),
+      stCache: new Map(),
     };
     all.push(s);
     map.set(s.code, s);
@@ -245,16 +277,20 @@ async function loadContext(): Promise<TrackContext> {
   const minCover = Math.min(3, all.length);
   const goodDates = [...coverage.entries()].filter(([, c]) => c >= minCover).map(([d]) => d).sort();
   if (!goodDates.length) throw new Error('无足够覆盖的交易日');
-  return { all, map, benchOf, goodDates };
+  return { all, declared, map, benchOf, goodDates };
 }
 
-/** 一日实现收益：持有 prevHoldings 从 prevDate 到 date 的加权收益（按可得标的归一） */
-function realizedReturn(
+/**
+ * 一日实现收益：持有 prevHoldings 从 prevDate 到 date 的加权收益（按可得标的归一）。
+ * 全部持仓都取不到行情时返回 null 而非 0——0 会被 cumReturn 当成「当日持平」乘进累计收益，
+ * 与真实的「数据缺失」无法区分，缺一天数据就等于凭空断言了一天零涨跌。
+ */
+export function realizedReturn(
   prevHoldings: ModeHolding[],
   prevDate: string,
   date: string,
   map: Map<string, Series>,
-): number {
+): number | null {
   let acc = 0;
   let wsum = 0;
   for (const h of prevHoldings) {
@@ -266,7 +302,32 @@ function realizedReturn(
     acc += h.weight * (s.closes[i1] / s.closes[i0] - 1);
     wsum += h.weight;
   }
-  return wsum > 0 ? acc / wsum : 0;
+  return wsum > 0 ? acc / wsum : null;
+}
+
+/**
+ * 今天是不是调仓日。跟踪与回测共用同一相位：在 goodDates 上跳过 WARMUP_DAYS 根预热后，
+ * 每 rebalanceDays 换一次腿。跟踪侧不这样判就会每天重算 TopN，把名次抖动记成真实换手。
+ * @param axisIdx today 在 goodDates 里的下标；-1（找不到）按调仓日处理，宁可多算一次
+ */
+export function isRebalanceDay(axisIdx: number, rebalanceDays: number): boolean {
+  if (axisIdx < 0 || !(rebalanceDays >= 1)) return true;
+  return (axisIdx - WARMUP_DAYS) % rebalanceDays === 0;
+}
+
+/** 换手成本（小数）：卖掉 exited 权重、买进 entered 权重各扣一次单边费率 */
+export function turnoverCost(
+  prev: ModeHolding[],
+  next: ModeHolding[],
+  costs: { buyBps: number; sellBps: number },
+): number {
+  const prevW = new Map(prev.map((h) => [h.code, h.weight]));
+  const nextW = new Map(next.map((h) => [h.code, h.weight]));
+  let sold = 0;
+  let bought = 0;
+  for (const [code, w] of prevW) sold += Math.max(0, w - (nextW.get(code) ?? 0));
+  for (const [code, w] of nextW) bought += Math.max(0, w - (prevW.get(code) ?? 0));
+  return (sold * costs.sellBps + bought * costs.buyBps) / 10000;
 }
 
 /** 取 system 模式的 spec，非 system / 缺 spec 直接抛错 */
@@ -279,11 +340,16 @@ function requireSpec(modeId: string): ModeSpec {
   return mode.spec;
 }
 
-/** 加载 themeFirst 引擎所需的因子序列与交易日轴（自 anchorDate 起算，保证调仓相位可复现） */
+/**
+ * 加载 themeFirst 引擎所需的因子序列与交易日轴（自 anchorDate 起算，保证调仓相位可复现）。
+ * opts.pool 用于把标的池换成 mode/ 下研究脚本的内置池：自检要验证的是「因子链与回放逻辑
+ * 移植是否正确」，用会漂移的生产跟踪池会让池差异伪装成移植错误。生产路径不传，行为不变。
+ */
 export async function loadThemeFirstContext(
   spec: ThemeFirstSpec,
-): Promise<{ universe: UniverseSeries[]; dates: string[] }> {
-  const { pool, benchClose, dates: benchDates } = await loadPoolBars();
+  opts: { pool?: ReadonlyArray<PoolItem> } = {},
+): Promise<{ universe: UniverseSeries[]; declared: ReadonlyArray<PoolItem>; dates: string[] }> {
+  const { pool, declared, benchClose, dates: benchDates } = await loadPoolBars(opts.pool);
   const universe: UniverseSeries[] = pool.map((p) => ({
     code: p.code,
     name: p.name,
@@ -292,13 +358,32 @@ export async function loadThemeFirstContext(
   const dates = benchDates.filter((d) => d >= spec.anchorDate);
   if (dates.length < 2) throw new Error(`anchorDate ${spec.anchorDate} 之后无足够交易日`);
   annotateThemes(universe, dates);
-  return { universe, dates };
+  return { universe, declared, dates };
+}
+
+/**
+ * 由**申报池**算协议标记，打日志留痕并随当日快照落库。
+ * includedCount 传今天实际纳入的标的数，只当元数据；口径键必须只随申报池变化，
+ * 否则一只 ETF 瞬时取数失败就换 hash，晋级门样本会被截断到当天。
+ * 成本档不再写死 ETF 免税档，交给 modeProtocolOf 按池内品种判定（池里混进个股要计印花税）。
+ */
+function protocolFor(
+  modeId: string | undefined,
+  spec: ModeSpec,
+  declared: ReadonlyArray<{ code: string; name: string }>,
+  includedCount: number,
+  policy: ModeUniversePolicy,
+): ModeProtocol {
+  const p = modeProtocolOf(spec, declared, { modeId, policy, includedCount });
+  if (modeId) logModeProtocol(modeId, p);
+  return p;
 }
 
 /** themeFirst 的当日跟踪：从 anchorDate 全量回放，取末日切片作为今日快照 */
 async function trackThemeFirst(modeId: string, spec: ThemeFirstSpec): Promise<ModeTrackResult> {
-  const { universe, dates } = await loadThemeFirstContext(spec);
-  const r = replayThemeFirst(spec, universe, dates);
+  const { universe, declared, dates } = await loadThemeFirstContext(spec);
+  const protocol = protocolFor(modeId, spec, declared, universe.length, 'db-etf-pool');
+  const r = replayThemeFirst(spec, universe, dates, protocol.costBps);
   const last = r.days[r.days.length - 1];
   const prevEquity = r.days.length > 1 ? r.days[r.days.length - 2].equity : 1;
 
@@ -319,6 +404,7 @@ async function trackThemeFirst(modeId: string, spec: ThemeFirstSpec): Promise<Mo
     dayReturn: Math.round(dayReturn * 10000) / 10000,
     cumReturn: Math.round(cumReturn * 10000) / 10000,
     drawdown: Math.round(drawdown * 10000) / 10000,
+    protocol,
   });
   clearEventsOn(modeId, last.date);
   addEvents(modeId, last.date, events);
@@ -330,19 +416,41 @@ async function trackThemeFirst(modeId: string, spec: ThemeFirstSpec): Promise<Mo
 export async function runModeTracking(modeId: string): Promise<ModeTrackResult> {
   const spec = requireSpec(modeId);
   if (spec.kind === 'themeFirst') return trackThemeFirst(modeId, spec);
-  const { all, map, benchOf, goodDates } = await loadContext();
+  const { all, declared, map, benchOf, goodDates } = await loadContext();
+  const protocol = protocolFor(modeId, spec, declared, all.length, 'db-etf-pool');
   const today = goodDates[goodDates.length - 1];
-
-  const holdings = holdingsAt(spec, all, today, benchOf);
 
   // 前向累计：取早于 today 的最近一条快照
   const prior = orderedDaily(modeId).filter((d) => d.date < today);
   const prev = prior.length ? prior[prior.length - 1] : null;
-  const dayReturn = prev && prev.holdings.length ? realizedReturn(prev.holdings, prev.date, today, map) : 0;
-  const cumReturn = prev ? (1 + (prev.cumReturn ?? 0)) * (1 + dayReturn) - 1 : 0;
 
-  // 回撤：用历史 cumReturn + 今日 重建权益峰值
-  const equities = [...prior.map((d) => 1 + (d.cumReturn ?? 0)), 1 + cumReturn];
+  // 调仓相位必须与回测一致：回测在 goodDates.slice(WARMUP_DAYS) 上每 rebalanceDays 换一次腿，
+  // 跟踪侧若每天重算 TopN，名次抖动会天天记一笔换手成本（rebalanceDays=4 时成本拖累约 4 倍），
+  // 而两条曲线的 protocolVersion 相同，会被晋级门与列表页当成可横向比较的证据。
+  const rebalance =
+    isRebalanceDay(goodDates.indexOf(today), spec.rebalanceDays) || !prev?.holdings.length;
+  const holdings = rebalance ? holdingsAt(spec, all, today, benchOf) : prev!.holdings;
+
+  // 持仓行情缺失时 realizedReturn 返回 null：当日快照的 dayReturn 留空，cumReturn 沿用前值，
+  // 不用 0 冒充「持平」
+  const rawDayReturn =
+    prev && prev.holdings.length ? realizedReturn(prev.holdings, prev.date, today, map) : 0;
+  const dayReturn =
+    rawDayReturn === null
+      ? null
+      : rawDayReturn - (prev ? turnoverCost(prev.holdings, holdings, protocol.costBps) : 0);
+  const cumReturn = prev
+    ? (1 + (prev.cumReturn ?? 0)) * (1 + (dayReturn ?? 0)) - 1
+    : 0;
+
+  // 回撤：峰值只在**同协议区段**内取。换代当天 cumReturn 会把新旧口径接在一条曲线上
+  // （旧行是零成本口径、系统性偏高），拿旧峰值算今天的回撤会系统性偏大。
+  const key = protocolKeyOf(protocol);
+  const sameSeg: number[] = [];
+  for (let i = prior.length - 1; i >= 0 && protocolKeyOf(prior[i].protocol) === key; i--) {
+    sameSeg.push(1 + (prior[i].cumReturn ?? 0));
+  }
+  const equities = [...sameSeg, 1 + cumReturn];
   const peak = Math.max(...equities);
   const drawdown = peak > 0 ? (1 + cumReturn) / peak - 1 : 0;
 
@@ -363,20 +471,25 @@ export async function runModeTracking(modeId: string): Promise<ModeTrackResult> 
     date: today,
     holdings,
     signal,
-    dayReturn: Math.round(dayReturn * 10000) / 10000,
+    dayReturn: dayReturn === null ? undefined : Math.round(dayReturn * 10000) / 10000,
     cumReturn: Math.round(cumReturn * 10000) / 10000,
     drawdown: Math.round(drawdown * 10000) / 10000,
+    protocol,
   });
   clearEventsOn(modeId, today);
   addEvents(modeId, today, events);
 
-  return { date: today, holdings, events, dayReturn, cumReturn, drawdown };
+  return { date: today, holdings, events, dayReturn: dayReturn ?? 0, cumReturn, drawdown };
 }
 
 /** themeFirst 的历史重跑：与每日跟踪共用同一条回放路径，只是取全程指标 */
-async function backtestThemeFirst(spec: ThemeFirstSpec): Promise<ResearchModeBacktestInput> {
-  const { universe, dates } = await loadThemeFirstContext(spec);
-  const r = replayThemeFirst(spec, universe, dates);
+async function backtestThemeFirst(
+  modeId: string,
+  spec: ThemeFirstSpec,
+): Promise<ResearchModeBacktestInput> {
+  const { universe, declared, dates } = await loadThemeFirstContext(spec);
+  const protocol = protocolFor(modeId, spec, declared, universe.length, 'db-etf-pool');
+  const r = replayThemeFirst(spec, universe, dates, protocol.costBps);
   const pct = (v: number): number => Math.round(v * 1000) / 10;
   // 非复利（等权）累计收益：逐日收益等权求和，去掉复利的路径依赖偏差
   let flat = 0;
@@ -400,15 +513,18 @@ async function backtestThemeFirst(spec: ThemeFirstSpec): Promise<ResearchModeBac
       maxPositions: 1,
     },
     isRecommended: false,
+    protocol: protocol.protocolVersion,
+    engineVersion: protocol.engineVersion,
   };
 }
 
 /** 按 spec 历史重跑回测，返回可写库的指标摘要（纯 TS，不依赖 python）。收益以百分比表达，与 README 口径一致。 */
 export async function runModeBacktest(modeId: string): Promise<ResearchModeBacktestInput> {
   const spec = requireSpec(modeId);
-  if (spec.kind === 'themeFirst') return backtestThemeFirst(spec);
-  const { all, map, benchOf, goodDates } = await loadContext();
-  const axis = goodDates.slice(120); // 跳过前段，保证因子可算
+  if (spec.kind === 'themeFirst') return backtestThemeFirst(modeId, spec);
+  const { all, declared, map, benchOf, goodDates } = await loadContext();
+  const protocol = protocolFor(modeId, spec, declared, all.length, 'db-etf-pool');
+  const axis = goodDates.slice(WARMUP_DAYS); // 跳过前段，保证因子可算
   if (axis.length < 30) throw new Error('可回测交易日不足');
 
   let equity = 1;
@@ -420,9 +536,13 @@ export async function runModeBacktest(modeId: string): Promise<ResearchModeBackt
   for (let k = 0; k < axis.length; k++) {
     const date = axis[k];
     if (k > 0 && holdings.length) {
-      equity *= 1 + realizedReturn(holdings, axis[k - 1], date, map);
-      peak = Math.max(peak, equity);
-      maxDD = Math.min(maxDD, equity / peak - 1);
+      // 缺数据的一天不当作零涨跌乘进权益，直接跳过（曲线在该日持平但不伪造事实）
+      const day = realizedReturn(holdings, axis[k - 1], date, map);
+      if (day !== null) {
+        equity *= 1 + day;
+        peak = Math.max(peak, equity);
+        maxDD = Math.min(maxDD, equity / peak - 1);
+      }
     }
     if (k - lastRebal >= spec.rebalanceDays || holdings.length === 0) {
       const next = holdingsAt(spec, all, date, benchOf);
@@ -431,6 +551,11 @@ export async function runModeBacktest(modeId: string): Promise<ResearchModeBackt
         const nextCodes = new Set(next.map((h) => h.code));
         for (const h of next) if (!prevCodes.has(h.code)) trades++;
         for (const h of holdings) if (!nextCodes.has(h.code)) trades++;
+        // 换手要扣费：零成本重跑会让 rebalanceDays 小的 spec 系统性高估收益，
+        // 而这些指标又要落库、在列表页按收益横向排序
+        equity *= 1 - turnoverCost(holdings, next, protocol.costBps);
+        peak = Math.max(peak, equity);
+        maxDD = Math.min(maxDD, equity / peak - 1);
         holdings = next;
         lastRebal = k;
       }
@@ -442,7 +567,7 @@ export async function runModeBacktest(modeId: string): Promise<ResearchModeBackt
   return {
     label: `系统重跑 ${axis[axis.length - 1]}`,
     range: `${axis[0]} ~ ${axis[axis.length - 1]}`,
-    poolSize: all.length,
+    poolSize: protocol.poolSize,
     metrics: {
       return: pct(equity - 1),
       annualized: annualized === null ? undefined : pct(annualized),
@@ -452,5 +577,7 @@ export async function runModeBacktest(modeId: string): Promise<ResearchModeBackt
       maxPositions: spec.topN,
     },
     isRecommended: false,
+    protocol: protocol.protocolVersion,
+    engineVersion: protocol.engineVersion,
   };
 }

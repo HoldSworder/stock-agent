@@ -149,12 +149,23 @@ function scorePersistence(items: MarketRegimeIndexItem[], allCloses: number[][])
   return clamp(100 * (0.4 * consAboveMa60 + 0.3 * consSlopeUp + 0.3 * upRatioAvg));
 }
 
-/** D3 等权失真校正：全A等权是否同步走强（站上MA60 + 趋势向上 + 上涨占比高） */
+/**
+ * D3 等权失真校正：全A等权是否同步走强（站上MA60 + 趋势向上 + 上涨占比高）。
+ * source='breadth' 是「当日上涨家数占比」代理，与「站上 60 日均线」口径完全不同，
+ * 只配拿去当宽度用（见 scoreBreadth），不能冒充等权趋势，故本维度直接判缺失。
+ */
 function scoreEqualWeight(eqw: MarketRegimeEqualWeight | null, distortion: boolean): number | null {
-  if (!eqw) return null;
+  if (!eqw || eqw.source === 'breadth') return null;
   const trendScore = clamp(50 + eqw.trendPct20 * 3); // ±16% 趋势 → 0/100 附近
-  const upScore = eqw.upRatio != null ? eqw.upRatio : trendScore;
-  let s = 0.4 * (eqw.aboveMa60 ? 100 : 0) + 0.3 * trendScore + 0.3 * upScore;
+  // upRatio 缺失时按可用权重重归一，而不是拿 trendScore 顶上——那会让同一个 trendPct20
+  // 在这一维里占到 0.6 权重，趋势被重复计权，也与本文件 synthesize 的既定做法相悖
+  const parts: Array<{ v: number; w: number }> = [
+    { v: eqw.aboveMa60 ? 100 : 0, w: 0.4 },
+    { v: trendScore, w: 0.3 },
+  ];
+  if (eqw.upRatio != null) parts.push({ v: eqw.upRatio, w: 0.3 });
+  const wsum = parts.reduce((a, p) => a + p.w, 0);
+  let s = parts.reduce((a, p) => a + p.v * p.w, 0) / wsum;
   if (distortion) s = Math.min(s, 45); // 权重护盘、等权走弱：封顶压到反弹区
   return clamp(s);
 }
@@ -197,8 +208,9 @@ interface Aggregates {
   consBull: number;
   majorAboveMa20: number;
   consBelowMa20: number;
-  eqwAboveMa60: boolean;
-  eqwTrendUp: boolean;
+  /** 全A等权是否站上 MA60；null = 口径缺失（只有上涨家数占比代理，不可当等权趋势用） */
+  eqwAboveMa60: boolean | null;
+  eqwTrendUp: boolean | null;
   distortion: boolean;
   sentimentIndex: number | null;
   sentimentPhase: string | null;
@@ -210,11 +222,19 @@ function classifyPhase(a: Aggregates): MarketRegimePhase {
   const sentWeak = a.sentimentPhase === '退潮' || a.sentimentPhase === '冰点';
   const sentOk = a.sentimentIndex == null || a.sentimentIndex >= 45;
   // 主升：多指数中期共振向上 + 全A等权同步走强 + 无护盘失真 + 情绪不弱
-  if (a.consAboveMa60 >= 0.6 && a.consBull >= 0.5 && a.eqwAboveMa60 && a.eqwTrendUp && !a.distortion && sentOk) {
+  // 等权口径缺失（null）时两侧都不算数：主升不给放行，退潮也不拿缺失当「等权走弱」的证据
+  if (
+    a.consAboveMa60 >= 0.6 &&
+    a.consBull >= 0.5 &&
+    a.eqwAboveMa60 === true &&
+    a.eqwTrendUp === true &&
+    !a.distortion &&
+    sentOk
+  ) {
     return '主升';
   }
   // 退潮：多指数跌破短均线 / 情绪退潮冰点 / 中期普遍走弱且等权也弱
-  if (a.consBelowMa20 >= 0.6 || sentWeak || (a.consAboveMa60 <= 0.25 && !a.eqwAboveMa60)) {
+  if (a.consBelowMa20 >= 0.6 || sentWeak || (a.consAboveMa60 <= 0.25 && a.eqwAboveMa60 === false)) {
     return '退潮';
   }
   // 反弹：站上短均线但中期未确认，或权重护盘（等权走弱）拉起的结构性反抽
@@ -276,6 +296,19 @@ function volLabel(vr: number): string {
   return '异常放量';
 }
 
+/**
+ * 该 eqw 是否真·全A等权口径。
+ * source='breadth' 是「上涨家数占比」代理，它的 aboveMa60 真实含义只是「今天上涨家数过半」、
+ * trendPct20 硬编码为 0，不能拿去断言「站上/失守 MA60」或「20日 +0%」——分数已判 null 的维度，
+ * 文字结论也不许照旧断言。
+ */
+function isEqwUsable(eqw: MarketRegimeEqualWeight | null | undefined): boolean {
+  return !!eqw && eqw.source !== 'breadth';
+}
+
+/** 代理口径下统一的文字口径说明（读数与证据共用） */
+const EQW_PROXY_TEXT = '等权口径缺失（仅有上涨家数占比代理），未做失真校正';
+
 interface DimContext {
   items: MarketRegimeIndexItem[];
   closesList: number[][];
@@ -331,16 +364,18 @@ function buildDimensions(
       key: 'equalWeight',
       label: '全A等权失真校正',
       weight: 20,
-      reading: !eqw
-        ? '等权口径缺失，未做失真校正'
+      reading: !isEqwUsable(eqw)
+        ? EQW_PROXY_TEXT
         : ctx.distortion
           ? '权重股护盘、全A等权走弱，普涨成色不足'
-          : eqw.aboveMa60 && eqw.trendPct20 > 0
+          : eqw!.aboveMa60 && eqw!.trendPct20 > 0
             ? '全A等权同步走强，普涨成色好'
             : '全A等权偏弱，个股赚钱效应有限',
-      evidence: eqw
-        ? `${eqw.name}·${eqw.aboveMa60 ? '站上MA60' : '失守MA60'}·20日${eqw.trendPct20 >= 0 ? '+' : ''}${eqw.trendPct20}%${eqw.upRatio != null ? `·涨占比${eqw.upRatio}%` : ''}`
-        : '—',
+      evidence: !isEqwUsable(eqw)
+        ? eqw?.upRatio != null
+          ? `${eqw.name}·涨占比${eqw.upRatio}%（非等权口径，不作 MA60 与 20 日涨幅结论）`
+          : '—'
+        : `${eqw!.name}·${eqw!.aboveMa60 ? '站上MA60' : '失守MA60'}·20日${eqw!.trendPct20 >= 0 ? '+' : ''}${eqw!.trendPct20}%${eqw!.upRatio != null ? `·涨占比${eqw!.upRatio}%` : ''}`,
     },
     {
       key: 'breadth',
@@ -432,7 +467,7 @@ function buildDrivers(a: Aggregates, eqw: MarketRegimeEqualWeight | null, vr: nu
   const out: string[] = [];
   if (a.consAboveMa60 >= 0.6) out.push('多数指数站上 MA60');
   if (a.consBull >= 0.5) out.push('多指数多头排列');
-  if (eqw && eqw.aboveMa60 && eqw.trendPct20 > 0) out.push('全A等权同步走强（真普涨）');
+  if (isEqwUsable(eqw) && eqw!.aboveMa60 && eqw!.trendPct20 > 0) out.push('全A等权同步走强（真普涨）');
   if (a.sentimentIndex != null && a.sentimentIndex >= 60) out.push('市场情绪活跃');
   if (vr >= 0.9 && vr <= 1.5) out.push('量能温和放大');
   if (a.majorAboveMa20 >= 0.75 && a.consAboveMa60 < 0.6) out.push('普遍站上 MA20（短线修复）');
@@ -452,7 +487,9 @@ function buildRisks(
   if (a.sentimentPhase === '退潮' || a.sentimentPhase === '冰点') out.push(`情绪${a.sentimentPhase}`);
   if (a.volShrink) out.push('缩量、人气不足');
   if (vr > 2.2) out.push('异常放量，警惕分歧/高潮');
-  if (eqw && !eqw.aboveMa60) out.push('全A等权失守 MA60');
+  // 代理口径（上涨家数占比）的 aboveMa60 只是「上涨家数过半」，不能写成「全A等权失守 MA60」
+  if (isEqwUsable(eqw) && !eqw!.aboveMa60) out.push('全A等权失守 MA60');
+  else if (eqw && !isEqwUsable(eqw)) out.push(EQW_PROXY_TEXT);
   if (consecutiveDays === 1) out.push('阶段今日新切换，待确认');
   return out;
 }
@@ -545,18 +582,21 @@ export async function buildRegimeOverview(persist = true): Promise<MarketRegimeO
   // 5) 权重 vs 等权背离（护盘失真判定）
   const benchmark = items.find((i) => i.name === WEIGHTED_BENCHMARK) ?? items[0] ?? null;
   const distortion =
-    !!benchmark && !!eqw && eqw.source !== 'breadth' && benchmark.trendPct20 > 1 && eqw.trendPct20 < 0;
+    !!benchmark && isEqwUsable(eqw) && benchmark.trendPct20 > 1 && eqw!.trendPct20 < 0;
   const divergence: MarketRegimeDivergence = {
     active: distortion,
     note: distortion
       ? `${benchmark?.name}近20日+${benchmark?.trendPct20}% 但全A等权${eqw?.trendPct20}%，权重股护盘、多数个股走弱，普涨成色不足`
-      : eqw
+      : isEqwUsable(eqw)
         ? '权重与等权方向一致，未见明显护盘失真'
         : '等权口径暂缺，未做背离校正',
   };
 
   // 6) 维度打分 + 合成（保留每维原始分供面板逐维展示）
-  const eqwTrendUp = !!eqw && (eqw.aboveMa60 || eqw.trendPct20 > 0);
+  // 代理 eqw（上涨家数占比）不参与趋势判定：它的 aboveMa60 只是「过半上涨」，
+  // 用它点亮 eqwTrendUp 会让「某天上涨家数过半」直接把大盘判成主升并给出 60-90% 仓位建议
+  const eqwUsable = isEqwUsable(eqw);
+  const eqwTrendUp = eqwUsable ? eqw!.aboveMa60 || eqw!.trendPct20 > 0 : null;
   const raw: Record<string, number | null> = {
     trend: scoreTrend(items, closesList),
     persistence: scorePersistence(items, closesList),
@@ -582,7 +622,7 @@ export async function buildRegimeOverview(persist = true): Promise<MarketRegimeO
     consBull: items.filter((i) => i.alignment === '多头排列').length / n,
     majorAboveMa20: items.filter((i) => i.aboveMa20).length / n,
     consBelowMa20: items.filter((i) => !i.aboveMa20).length / n,
-    eqwAboveMa60: !!eqw && eqw.aboveMa60,
+    eqwAboveMa60: eqwUsable ? eqw!.aboveMa60 : null,
     eqwTrendUp,
     distortion,
     sentimentIndex,
@@ -702,9 +742,12 @@ export function formatForAgent(ov: MarketRegimeOverview): string {
   const idx = ov.indices
     .map((i) => `${i.name} ${i.alignment}${i.aboveMa60 ? '·站上MA60' : '·失守MA60'}(20日${i.trendPct20 >= 0 ? '+' : ''}${i.trendPct20}%)`)
     .join('；');
-  const eqw = ov.equalWeight
-    ? `${ov.equalWeight.name} ${ov.equalWeight.aboveMa60 ? '站上MA60' : '失守MA60'}，20日${ov.equalWeight.trendPct20 >= 0 ? '+' : ''}${ov.equalWeight.trendPct20}%${ov.equalWeight.upRatio != null ? `，上涨占比${ov.equalWeight.upRatio}%` : ''}`
-    : '等权口径暂缺';
+  // 代理口径不得进 prompt 冒充等权结论：LLM 会把「失守MA60·20日+0%」当成事实继续推理
+  const eqw = !ov.equalWeight
+    ? '等权口径暂缺'
+    : !isEqwUsable(ov.equalWeight)
+      ? `${EQW_PROXY_TEXT}${ov.equalWeight.upRatio != null ? `，上涨占比${ov.equalWeight.upRatio}%` : ''}`
+      : `${ov.equalWeight.name} ${ov.equalWeight.aboveMa60 ? '站上MA60' : '失守MA60'}，20日${ov.equalWeight.trendPct20 >= 0 ? '+' : ''}${ov.equalWeight.trendPct20}%${ov.equalWeight.upRatio != null ? `，上涨占比${ov.equalWeight.upRatio}%` : ''}`;
   const d = ov.delta == null ? '—' : `${ov.delta >= 0 ? '+' : ''}${ov.delta}`;
   const drivers = ov.drivers.length ? ov.drivers.join('、') : '—';
   const risks = ov.risks.length ? ov.risks.join('、') : '—';
@@ -771,6 +814,51 @@ if (process.argv[1] && /regime\/service\.ts$/.test(process.argv[1])) {
   assert(outlook.length > 0 && outlook.includes('主升'), '主升展望应非空且含阶段描述');
   assert(buildDrivers(bullAgg, null, 1.2).length > 0, '强多头应有正向驱动因素');
   assert(buildRisks(distAgg, null, 1.0, 1).some((r) => r.includes('护盘')), '护盘失真应列入风险');
+
+  // 代理 eqw（上涨家数占比）不得冒充等权口径下结论：它的 aboveMa60 只是「今天上涨家数过半」、
+  // trendPct20 硬编码 0。分数已判 null 的维度，文字结论（风险项 / 维度证据 / LLM prompt）
+  // 也一律不许断言「全A等权失守 MA60」「20日+0%」。
+  const proxyEqw: MarketRegimeEqualWeight = {
+    source: 'breadth',
+    name: '上涨家数占比代理',
+    aboveMa60: false,
+    trendPct20: 0,
+    upRatio: 42,
+  };
+  const realEqw: MarketRegimeEqualWeight = {
+    source: 'tdx880008',
+    name: '全A等权880008',
+    aboveMa60: false,
+    trendPct20: -3.2,
+    upRatio: 42,
+  };
+  const proxyRisks = buildRisks(bearAgg, proxyEqw, 1.0, 3);
+  assert(!proxyRisks.some((r) => r.includes('全A等权失守')), '代理口径不得断言「全A等权失守 MA60」');
+  assert(proxyRisks.some((r) => r.includes('等权口径缺失')), '代理口径必须明说等权口径缺失');
+  assert(
+    buildRisks(bearAgg, realEqw, 1.0, 3).some((r) => r.includes('全A等权失守')),
+    '真等权口径失守 MA60 仍必须列入风险',
+  );
+
+  const emptyBreakdown: StrengthBreakdown = { total: 0, parts: [] };
+  const dimCtx = {
+    items: [] as MarketRegimeIndexItem[],
+    closesList: [] as number[][],
+    sentimentIndex: null,
+    sentimentPhase: null,
+    vr: 1,
+    distortion: false,
+  };
+  const proxyDim = buildDimensions({ ...dimCtx, eqw: proxyEqw }, {}, emptyBreakdown).find(
+    (d) => d.key === 'equalWeight',
+  )!;
+  assert(!proxyDim.evidence.includes('失守MA60'), '代理口径的维度证据不得写「失守MA60」');
+  assert(!proxyDim.evidence.includes('20日'), '代理口径的维度证据不得写 20 日涨幅（硬编码 0）');
+  assert(proxyDim.reading.includes('等权口径缺失'), '代理口径的维度读数必须说明口径缺失');
+  const realDim = buildDimensions({ ...dimCtx, eqw: realEqw }, {}, emptyBreakdown).find(
+    (d) => d.key === 'equalWeight',
+  )!;
+  assert(realDim.evidence.includes('失守MA60'), '真等权口径的维度证据照旧给出 MA60 结论');
 
   // eslint-disable-next-line no-console
   console.log('regime/service.ts 自检通过：分类 + 展望/驱动/风险 文案生成均正确');

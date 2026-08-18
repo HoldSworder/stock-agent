@@ -8,6 +8,7 @@ import type {
 } from '@stock-agent/shared';
 import { getQuotes, getSectorMoneyFlow, getStockRanking, getKline } from '../market/eastmoney';
 import { getStockIndicators } from '../market/indicators';
+import { mapLimit } from '../datasource/klineCache';
 import type { StockIndicators } from '@stock-agent/shared';
 import { isTradingDay } from '../market/calendar';
 import { fetchRealPositions } from '../realPositions';
@@ -16,9 +17,16 @@ import { listStrategies, getStrategySnapshot } from '../strategy/sim';
 import { getWatchConfig } from './config';
 import { broadcastWatch } from './bus';
 import { countAlertsToday } from './store';
-import { approxLimitUp, buildEodSettle, buildWeeklyBreak, evalQuoteSignals, evalScanSignals } from './rules';
+import {
+  approxLimitUp,
+  buildEodSettle,
+  buildWeeklyBreak,
+  evalQuoteSignals,
+  evalScanSignals,
+  limitRatioPct,
+} from './rules';
 import { broadcastDisposition, dispatchSignals, retryUndelivered } from './dispatcher';
-import { gateSignals, resetGate } from './gate';
+import { gateSignals, releaseGate, resetGate } from './gate';
 import { getAtrPct } from './volatility';
 import { evaluateOutcomes } from './reflect';
 import { sendDailyDigest } from './digest';
@@ -40,11 +48,21 @@ let seenWeeklyBreak = new Set<string>();
 const weekBarCache = new Map<string, { day: string; closes: number[] }>();
 /** 日线技术指标当日缓存（S9 中线指标转弱扫描复用，避免每轮重算日线指标） */
 const indCache = new Map<string, { day: string; ind: StockIndicators | null }>();
+/**
+ * 当日高点已用日线兜底播种过的标的（按日重置）。
+ * dayHigh 只从本进程首个 tick 累计，盘中重启会把「今日高点」重置成当时现价，
+ * drawdown_from_high 与战法 intradayDrawdownPct 的基准随之归零。
+ */
+const seededDayHigh = new Set<string>();
 let lastMidScanAt = 0;
 let seenDay = '';
 
 let timer: NodeJS.Timeout | null = null;
 let running = false;
+/** 检测并发护栏：tick 进行中不再起第二次检测，避免 rollState 并发竞写 */
+let ticking = false;
+/** 引擎世代：每次启/停递增，使在途旧 loop 失效，避免 tick 进行中改配置起出两条并存的 loop */
+let epoch = 0;
 let lastPollAt: string | null = null;
 let lastSignalCount = 0;
 /** 最近一轮监控池行情快照（供前端进入/重连时即时展示，避免空等下一 tick） */
@@ -96,19 +114,57 @@ function resetIfNewDay(day: string): void {
     seenWeeklyBreak = new Set();
     weekBarCache.clear();
     indCache.clear();
+    seededDayHigh.clear();
     resetGate();
   }
 }
 
 /**
  * 坏价过滤：单 tick 相对上一价的跳变超过该板块「日内理论最大区间」(2×涨跌停幅度)，
- * 在连续竞价里物理不可能，判为东财坏数据。主板 10% / 创业板(300·301) 20%。
+ * 在连续竞价里物理不可能，判为东财坏数据。幅度口径与 rules.limitRatioPct 单一出处。
  */
-function isAbnormalJump(code: string, prev: number, cur: number): boolean {
+function isAbnormalJump(code: string, name: string, prev: number, cur: number): boolean {
   if (prev <= 0) return false;
-  const ratio = /^(300|301)/.test(code) ? 20 : 10;
   const delta = Math.abs((cur - prev) / prev) * 100;
-  return delta > ratio * 2;
+  return delta > limitRatioPct(code, name) * 2;
+}
+
+/**
+ * 当日高点兜底播种：getQuotes 不返回当日最高价，本进程首拍只好拿现价当高点。
+ * 用当日日线 bar 的 high 补一次，避免盘中重启后「早盘冲高 8% 再回撤」一条告警都没有。
+ * 每标的每日只尝试一次（失败也不重试，避免每轮都为取不到的标的多打一次 K 线）。
+ * ponytail: 若后续给 quote 补上东财 f15（当日最高），这段可直接删掉改读字段。
+ */
+async function seedDayHigh(code: string, day: string, price: number): Promise<number> {
+  if (seededDayHigh.has(code)) return price;
+  seededDayHigh.add(code);
+  try {
+    const bars = await getKline(code, 'day', 3);
+    const today = bars.find((b) => b.time.slice(0, 10) === day);
+    if (today && Number.isFinite(today.high) && today.high > 0) return Math.max(today.high, price);
+  } catch {
+    /* 取不到就退回现价，行为同修复前 */
+  }
+  return price;
+}
+
+/**
+ * 批量播种当日高点：只对本进程首见的标的取 K 线，并发受限。
+ * 串在报价循环里逐只 await 时，30 只 × 300ms 就给首个 tick 多加约 9 秒，
+ * 上百只的池子会直接超过 pollSec；跨日清空后每天早上还要再来一次。
+ */
+async function seedDayHighs(
+  quotes: Array<{ code: string; price: number }>,
+  day: string,
+): Promise<Map<string, number>> {
+  const pending = quotes.filter(
+    (q) => q.price > 0 && !rollState.has(q.code) && !seededDayHigh.has(q.code),
+  );
+  const seeded = new Map<string, number>();
+  await mapLimit(pending, 5, async (q) => {
+    seeded.set(q.code, await seedDayHigh(q.code, day, q.price));
+  });
+  return seeded;
 }
 
 interface PoolMeta {
@@ -225,10 +281,8 @@ async function scanSignals(cfg: WatchConfig): Promise<WatchSignal[]> {
     getSectorMoneyFlow('inflow', 10).catch(() => []),
   ]);
 
-  const isLimitUp = (r: StockRankItem): boolean => {
-    const cyb = /^(300|301)/.test(r.code);
-    return cyb ? r.pct >= 19.5 : r.pct >= 9.8;
-  };
+  // 涨停判定按板块实际幅度取 98% 阈值：科创板 688 按 10% 判会把普通大涨当「新晋涨停」
+  const isLimitUp = (r: StockRankItem): boolean => r.pct >= limitRatioPct(r.code, r.name) * 0.98;
   const newLimitUps: StockRankItem[] = [];
   for (const r of gainers) {
     if (!isLimitUp(r)) continue;
@@ -242,7 +296,11 @@ async function scanSignals(cfg: WatchConfig): Promise<WatchSignal[]> {
 
 const mean = (a: number[]): number => a.reduce((s, x) => s + x, 0) / a.length;
 
-/** 取某只标的当日缓存的周线收盘序列（best-effort，失败返回空） */
+/**
+ * 取某只标的当日缓存的周线收盘序列（best-effort，失败返回空）。
+ * 失败不写缓存：按当日缓存空值会让该标的的中线破位扫描整日失效，而扫描本就 30 分钟一轮，
+ * 重试代价可忽略。
+ */
 async function getWeekCloses(code: string, day: string): Promise<number[]> {
   const hit = weekBarCache.get(code);
   if (hit && hit.day === day) return hit.closes;
@@ -251,13 +309,14 @@ async function getWeekCloses(code: string, day: string): Promise<number[]> {
     const bars = await getKline(code, 'week', 120);
     closes = bars.map((b) => b.close).filter((c) => Number.isFinite(c) && c > 0);
   } catch {
-    closes = [];
+    return [];
   }
+  if (closes.length === 0) return closes;
   weekBarCache.set(code, { day, closes });
   return closes;
 }
 
-/** 取某只标的当日缓存的日线技术指标（S9，best-effort，失败返回 null） */
+/** 取某只标的当日缓存的日线技术指标（S9，best-effort；同上，失败不落当日缓存，允许下轮重试） */
 async function getDailyIndicators(code: string, day: string): Promise<StockIndicators | null> {
   const hit = indCache.get(code);
   if (hit && hit.day === day) return hit.ind;
@@ -265,15 +324,18 @@ async function getDailyIndicators(code: string, day: string): Promise<StockIndic
   try {
     ind = await getStockIndicators(code);
   } catch {
-    ind = null;
+    return null;
   }
+  if (!ind) return null;
   indCache.set(code, { day, ind });
   return ind;
 }
 
 /**
  * 中线趋势破坏扫描（低频，M3 中线盯盘档）：对中线战法持仓算周线均线/高点回撤，
- * 跌破 maBreakPeriod 周线或周线高点回撤超 trailingStop 即产 weekly_break。按日去重。
+ * 跌破 maBreakPeriod 周线或周线高点回撤超 trailingStop 即产 weekly_break。
+ * 按日去重位（seenWeeklyBreak）由 tick 在信号真正落库投递后才置位，
+ * 这里只读不写——否则被冷却/限流丢掉的中线破位当天就再也不会有第二次。
  * best-effort：单只取数失败跳过，不影响主监控。
  */
 async function midTrendScan(
@@ -309,7 +371,6 @@ async function midTrendScan(
     if (period > 0 && closes.length >= period) {
       const ma = mean(closes.slice(closes.length - period));
       if (price < ma) {
-        seenWeeklyBreak.add(code);
         out.push(
           buildWeeklyBreak(
             ctx,
@@ -328,7 +389,6 @@ async function midTrendScan(
       if (peak > 0) {
         const dd = ((peak - price) / peak) * 100;
         if (dd >= trail) {
-          seenWeeklyBreak.add(code);
           out.push(
             buildWeeklyBreak(
               ctx,
@@ -345,7 +405,6 @@ async function midTrendScan(
     // 死叉为「当根穿越」状态，次日转空头不再复发；叠加按日去重，不刷屏。
     const ind = await getDailyIndicators(code, day);
     if (ind?.macd?.state === '死叉') {
-      seenWeeklyBreak.add(code);
       out.push(
         buildWeeklyBreak(
           ctx,
@@ -356,7 +415,6 @@ async function midTrendScan(
       continue;
     }
     if (ind?.kdj && ind.kdj.signal === '超买' && ind.kdj.k < ind.kdj.d) {
-      seenWeeklyBreak.add(code);
       out.push(
         buildWeeklyBreak(
           ctx,
@@ -440,6 +498,8 @@ async function tick(cfg: WatchConfig): Promise<void> {
 
   const codes = [...meta.keys()];
   const quotes = codes.length > 0 ? await getQuotes(codes) : [];
+  // 首见标的的当日高点先并发播种，循环里只读结果（串行 await 会把首个 tick 拖成 N 次串行取数）
+  const seededHighs = await seedDayHighs(quotes, day);
 
   // 中线趋势破坏扫描分频：每 max(pollSec, 1800s)=30min 一次（周线慢变 + 按日去重，不刷屏）
   const doMidScan = now - lastMidScanAt >= Math.max(cfg.pollSec, 1800) * 1000;
@@ -455,14 +515,18 @@ async function tick(cfg: WatchConfig): Promise<void> {
     const prev = rollState.get(q.code);
     const prevPrice = prev?.lastPrice ?? null;
 
-    // 坏价过滤：异常跳变跳过本轮，不评估、不更新滚动状态（保留上一良好价）
-    if (prevPrice != null && isAbnormalJump(q.code, prevPrice, q.price)) continue;
+    const name = m.name || q.name;
 
-    const dayHigh = Math.max(prev?.dayHigh ?? 0, q.price);
+    // 坏价过滤：异常跳变跳过本轮，不评估、不更新滚动状态（保留上一良好价）
+    if (prevPrice != null && isAbnormalJump(q.code, name, prevPrice, q.price)) continue;
+
+    // 本进程首见该标的：用当日日线 high 播种，否则盘中重启会把今日高点重置成当时现价
+    const baseHigh = prev?.dayHigh ?? seededHighs.get(q.code) ?? q.price;
+    const dayHigh = Math.max(baseHigh, q.price);
 
     const ctx: QuoteCtx = {
       code: q.code,
-      name: m.name || q.name,
+      name,
       source: m.source,
       planOnly: m.planOnly,
       price: q.price,
@@ -471,7 +535,7 @@ async function tick(cfg: WatchConfig): Promise<void> {
       avgCost: m.avgCost,
       dayHigh,
       prevPrice,
-      limitUp: approxLimitUp(q.code, q.prevClose),
+      limitUp: approxLimitUp(q.code, q.prevClose, name),
       turnoverRate: q.turnoverRate,
       volumeRatio: q.volumeRatio,
       atrPct: getAtrPct(q.code, day),
@@ -500,9 +564,9 @@ async function tick(cfg: WatchConfig): Promise<void> {
     }
 
     // 尾盘了结：到达战法档案 eodCutoffMin 后，每日一次提示该战法持仓不过夜
-    // （中线档 eodCutoffMin=0 表示持有过夜，不产尾盘了结）
+    // （中线档 eodCutoffMin=0 表示持有过夜，不产尾盘了结）。
+    // 按日去重位在投递成功后才置位（见下方 dispatch 结果处理）。
     if (m.profile && m.profile.eodCutoffMin > 0 && minutes >= m.profile.eodCutoffMin && !seenEodSettle.has(q.code)) {
-      seenEodSettle.add(q.code);
       signals.push(buildEodSettle(ctx));
     }
 
@@ -560,7 +624,19 @@ async function tick(cfg: WatchConfig): Promise<void> {
   // 信号流去向化广播：被迟滞静默者标 hysteresis；放行者交 dispatcher 按冷却/限流/送AI 等去向广播。
   // 保证每条信号每 tick 恰好广播一次且都带去向标签（前端据此折叠并解释「为何没升级」）。
   for (const s of suppressed) broadcastDisposition(s, 'hysteresis');
-  if (passed.length > 0) await dispatchSignals(passed, cfg);
+  if (passed.length === 0) return;
+
+  const processed = await dispatchSignals(passed, cfg);
+
+  // 「一天只有一次机会」的关键卖点：真正落库/投递之后才置当日去重位。
+  // 在投递之前置位的话，被 dispatcher 的冷却 / minScore / maxConcurrent / 缓存复用丢掉时，
+  // 尾盘了结与中线破位当天就再也不会出现第二次。
+  for (const s of processed) {
+    if (s.type === 'eod_settle') seenEodSettle.add(s.code);
+    else if (s.type === 'weekly_break') seenWeeklyBreak.add(s.code);
+  }
+  // 放行后又被下游丢掉的信号要还回迟滞门，否则 active 状态会让它下一 tick 起彻底静默
+  releaseGate(passed.filter((s) => !processed.has(s)));
 }
 
 function buildStatus(cfg: WatchConfig): WatchStatus {
@@ -575,14 +651,26 @@ function buildStatus(cfg: WatchConfig): WatchStatus {
   };
 }
 
-/** 调度下一轮（setTimeout 递归，避免重入） */
-function scheduleNext(delaySec: number): void {
-  timer = setTimeout(() => void loop(), Math.max(3, delaySec) * 1000);
+/** 包裹 tick 的并发护栏：已有检测在跑则跳过本次，避免两条 loop 并发竞写 rollState */
+async function safeTick(cfg: WatchConfig): Promise<void> {
+  if (ticking) return;
+  ticking = true;
+  try {
+    await tick(cfg);
+  } finally {
+    ticking = false;
+  }
 }
 
-async function loop(): Promise<void> {
+/** 调度下一轮（setTimeout 递归，避免重入）；旧世代不再排程 */
+function scheduleNext(delaySec: number, myEpoch: number): void {
+  if (myEpoch !== epoch) return;
+  timer = setTimeout(() => void loop(myEpoch), Math.max(3, delaySec) * 1000);
+}
+
+async function loop(myEpoch: number): Promise<void> {
   const cfg = getWatchConfig();
-  if (!cfg.enabled) {
+  if (!cfg.enabled || myEpoch !== epoch) {
     running = false;
     timer = null;
     return;
@@ -601,7 +689,7 @@ async function loop(): Promise<void> {
           console.warn('[watch] 反思回看异常:', e instanceof Error ? e.message : e);
         }
       }
-      await tick(cfg);
+      await safeTick(cfg);
       // 死信重投：最多每 60s 一次
       if (Date.now() - lastRetryAt > 60_000) {
         lastRetryAt = Date.now();
@@ -625,36 +713,53 @@ async function loop(): Promise<void> {
     console.warn('[watch] tick 异常:', e instanceof Error ? e.message : e);
   }
 
-  scheduleNext(isTradingSession() ? cfg.pollSec : 30);
+  scheduleNext(isTradingSession() ? cfg.pollSec : 30, myEpoch);
 }
 
-/** 启动引擎（按当前配置；未开启则不启动） */
+/**
+ * 启动引擎（按当前配置；未开启则不启动）。
+ * 不能用 `if (timer) return` 判「已在跑」：tick 期间 timer 为 null，
+ * 此时改配置/切开关会再起一条 loop，两条永久并存——重复扣费、重复告警，
+ * 且共享 rollState 会打乱所有依赖 prevPrice 的边沿判定（急跌/跌破成本/炸板）。
+ */
 export function startWatchEngine(): void {
-  if (timer) return;
   const cfg = getWatchConfig();
   if (!cfg.enabled) {
     console.log('[watch] 引擎未开启（可在设置页或盯盘页启用）');
     return;
   }
+  if (timer) {
+    clearTimeout(timer);
+    timer = null;
+  }
+  epoch += 1; // 新世代：作废在途旧 loop
   console.log('[watch] 引擎启动');
-  void loop();
+  void loop(epoch);
 }
 
 /** 停止引擎 */
 export function stopWatchEngine(): void {
+  epoch += 1; // 让在途旧 loop 失效，不再排程
   if (timer) clearTimeout(timer);
   timer = null;
   running = false;
 }
 
-/** 配置变更后调用：据 enabled 重启或停止 */
+/**
+ * 配置变更后调用：据 enabled 启动或停止。
+ * 已在跑时**不重启**：startWatchEngine 会立刻同步跑一次完整 tick（全池 getQuotes +
+ * 计划条件求值 + 命中回写），设置页连点保存就是 N 次额外全池取数（东财 push2 有反爬限流），
+ * ticking 只挡并发、挡不住连续保存。阈值类配置由每轮 tick 自行 getWatchConfig 读到，
+ * pollSec 变更最迟下一轮生效，都不需要重启。
+ * 用 running 而非 timer 判「已在跑」：tick 期间 timer 为 null，据它判会起出第二条 loop。
+ */
 export function applyWatchConfig(): void {
   const cfg = getWatchConfig();
-  if (cfg.enabled) {
-    if (!timer) startWatchEngine();
-  } else {
+  if (!cfg.enabled) {
     stopWatchEngine();
+    return;
   }
+  if (!running) startWatchEngine();
 }
 
 export function getWatchStatus(): WatchStatus {
