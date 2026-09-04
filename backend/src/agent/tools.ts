@@ -2091,7 +2091,18 @@ export const tools: ToolDef[] = [
       const snap = symbolPlanOrch.getCachedContext(asString(args.contextId).trim());
       if (!snap) return '上下文已过期或不存在，请重新调用 get_symbol_technical_context。';
       const which = asString(args.catalog);
-      return preview(formatCandidates(snap.catalog, which === 'conditions' ? 'conditions' : 'levels'), 6000);
+      // 断言账本的历史遵循率只作提示回流，取不到就空着——统计缺席不该挡住计划生成
+      let hint = '';
+      try {
+        const { accuracyHintLine } = await import('../assertions/service');
+        hint = accuracyHintLine(snap.context.code);
+      } catch {
+        /* 账本不可用时静默降级 */
+      }
+      return preview(
+        formatCandidates(snap.catalog, which === 'conditions' ? 'conditions' : 'levels', hint),
+        6000,
+      );
     },
   },
   {

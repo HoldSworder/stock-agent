@@ -23,7 +23,7 @@ export const ACTION_TAG_TYPE: Record<BoardActionTag, ElTagType> = {
   回避: 'success',
 };
 
-/** 主线生命周期阶段 → 展示文案（来自 breadth 确定性锚） */
+/** 主线生命周期阶段 → 展示文案（来自板块创新高表现这一按规则算出的基准） */
 export const STAGE_LABEL: Record<BoardMainlineStage, string> = {
   advancing: '主升',
   brewing: '酝酿',
@@ -44,7 +44,7 @@ export const STAGE_ACTION_LABEL: Record<BoardStageAction, string> = {
   none: '不参与',
 };
 
-/** 暴露状态 → 展示文案 */
+/** 持仓所在板块的状态 → 展示文案 */
 export const EXPO_STATUS_LABEL: Record<BoardExposureStatus, string> = {
   mainline: '在主线',
   fading: '退潮',
@@ -52,7 +52,7 @@ export const EXPO_STATUS_LABEL: Record<BoardExposureStatus, string> = {
   none: '无主线',
 };
 
-/** 暴露状态 → 风险语义色（非涨跌色：在主线=success 稳、退潮=warning、拥挤=danger 需警惕） */
+/** 持仓所在板块的状态 → 风险语义色（非涨跌色：在主线=success 稳、退潮=warning、拥挤=danger 需警惕） */
 export const EXPO_STATUS_TYPE: Record<BoardExposureStatus, ElTagType> = {
   mainline: 'success',
   fading: 'warning',

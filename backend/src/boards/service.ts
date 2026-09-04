@@ -89,13 +89,13 @@ export async function buildBoardWorkbench(): Promise<BoardWorkbench> {
   return {
     asOf: consensus.asOf,
     items,
-    note: '板块作战台：投影自主线共识（确定性锚 + 多源协同 + 中线趋势），派生操盘动作/周期/风险标签，仅研判不下单，仅供参考。',
+    note: '板块作战台：由主线共识推出（板块创新高表现 + 多源协同 + 中线趋势），给出操盘动作/周期/风险标签，仅研判不下单，仅供参考。',
   };
 }
 
 /** 派生失效条件（研判级，非硬规则）：锚失效 / 强度转弱 / ETF 破位 */
 function deriveInvalidators(item: BoardWorkbenchItem): string[] {
-  const list = ['板块跌出「新高宽度」确认（确定性主线锚失效）'];
+  const list = ['板块跌出「创新高表现」确认（主线基准失效）'];
   if (item.strengthTrend !== 'falling') list.push('多源协同强度转为走弱（rising/flat → falling）');
   if (item.etf) list.push(`${item.etf.name} 跌破关键均线（代表 ETF 趋势破位）`);
   return list;
@@ -130,6 +130,6 @@ export async function buildBoardDetail(boardCode: string): Promise<BoardWorkbenc
     exposure: expo?.holdings ?? [],
     aiAction: null,
     snapshotDate: shanghaiDateStr(new Date()),
-    note: '板块详情：龙头/补涨为确定性排序研判，持仓暴露为主线成分懒相交，仅供参考不下单。',
+    note: '板块详情：龙头/补涨按规则排序，「我的持仓」取主线成分与持仓的交集，仅供参考不下单。',
   };
 }

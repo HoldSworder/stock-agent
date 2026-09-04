@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { SYMBOL_PLAN_OUTCOMES } from '@stock-agent/shared';
 import * as repo from './repo';
 import { listPlanMarks } from './markSync';
 import { evaluateAllLivePlans, evaluatePlanById } from './evaluate';
@@ -102,22 +103,46 @@ export function registerSymbolPlansModule(app: FastifyInstance): void {
     }
   });
 
-  /** 收盘复核归因 */
+  /**
+   * 收盘复核归因。归因必须是 SYMBOL_PLAN_OUTCOMES 里的枚举——
+   * 早先这里收任意字符串塞进 note，于是「这些计划错在哪一类」这个复盘唯一要回答的问题
+   * 永远统计不出来。拒绝自由文本，自由描述放 note。
+   */
   app.post<{ Params: { id: string }; Body: { outcome?: string; note?: string } }>(
     '/api/symbol-plans/:id/review',
     (req, reply) => {
       const plan = repo.getPlan(req.params.id);
       if (!plan) return reply.code(404).send({ ok: false, error: '计划不存在' });
-      const outcome = req.body?.outcome?.trim() || 'correct_wait';
+      const raw = req.body?.outcome?.trim() ?? '';
+      const hit = SYMBOL_PLAN_OUTCOMES.find((o) => o.value === raw);
+      if (!hit) {
+        return reply.code(400).send({
+          ok: false,
+          error: `outcome 需为以下之一：${SYMBOL_PLAN_OUTCOMES.map((o) => o.value).join(' / ')}`,
+        });
+      }
       repo.appendEvent({
         planId: plan.id,
         planVersion: plan.version,
         kind: 'reviewed',
-        note: `${outcome}${req.body?.note ? `：${req.body.note}` : ''}`,
+        outcome: hit.value,
+        note: `${hit.label}${req.body?.note ? `：${req.body.note}` : ''}`,
       });
       return { ok: true };
     },
   );
+
+  /** 可选归因枚举，供前端渲染选项 */
+  app.get('/api/symbol-plans/outcomes', async () => ({
+    ok: true,
+    data: SYMBOL_PLAN_OUTCOMES,
+  }));
+
+  /** 归因分布统计，并入战绩页 */
+  app.get('/api/symbol-plans/outcome-stats', async () => ({
+    ok: true,
+    data: repo.planOutcomeStats(),
+  }));
 
   /** 手动过期 */
   app.post<{ Params: { id: string } }>('/api/symbol-plans/:id/expire', (req, reply) => {
@@ -210,7 +235,7 @@ export function registerSymbolPlansModule(app: FastifyInstance): void {
           const s = await regenerateStalePlans();
           console.log(
             `[symbolPlans] 收盘重算：待重算 ${s.stale}，成功 ${s.regenerated}，失败 ${s.failed}，` +
-              `顺延 ${s.deferred}，换口径 ${s.outdated}，退出队列 ${s.retired}`,
+              `顺延 ${s.deferred}，算法已变 ${s.outdated}，退出队列 ${s.retired}`,
           );
         },
       },

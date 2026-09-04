@@ -37,6 +37,12 @@ export const router = createRouter({
     { path: '/research', redirect: { path: '/intel', query: { tab: 'research' } } },
     { path: '/etf', name: 'etf', component: () => import('./views/EtfView.vue') },
     { path: '/review', name: 'review', component: () => import('./views/ReviewView.vue') },
+    { path: '/accuracy', name: 'accuracy', component: () => import('./views/AccuracyView.vue') },
+    {
+      path: '/calendar',
+      name: 'calendar',
+      component: () => import('./views/TurningCalendarView.vue'),
+    },
     { path: '/decision', name: 'decision', component: () => import('./views/DecisionView.vue') },
     { path: '/chat', name: 'chat', component: () => import('./views/ChatView.vue') },
     // 账户二合一：真实持仓 + 自选合并为「持仓与自选」页

@@ -595,7 +595,7 @@ const equityOption = computed<EChartsCoreOption>(() => {
 
             <template v-if="detailTab === 'doc'">
             <div v-if="selected.pickMd" class="pd-block">
-              <div class="block-h"><span>选股口径</span></div>
+              <div class="block-h"><span>选股规则</span></div>
               <MarkdownView :source="selected.pickMd" class="prose" />
             </div>
             <div v-if="selected.buyMd" class="pd-block">
@@ -673,7 +673,7 @@ const equityOption = computed<EChartsCoreOption>(() => {
                     <el-input-number v-model="spec.barLimit" size="small" :min="60" :max="2000" :controls="false" @change="markDirty" />
                   </label>
                   <label>
-                    <span>成交口径</span>
+                    <span>成交价怎么算</span>
                     <el-select v-model="spec.fill" size="small" @change="markDirty">
                       <el-option label="次根开盘" value="nextOpen" />
                       <el-option label="次根收盘" value="nextClose" />
@@ -932,7 +932,7 @@ const equityOption = computed<EChartsCoreOption>(() => {
             <el-input v-model="form.sourceUrl" placeholder="https://" />
           </el-form-item>
         </div>
-        <el-form-item label="选股口径（markdown）">
+        <el-form-item label="选股规则（markdown）">
           <el-input v-model="form.pickMd" type="textarea" :rows="5" />
         </el-form-item>
         <el-form-item label="买点（markdown）">

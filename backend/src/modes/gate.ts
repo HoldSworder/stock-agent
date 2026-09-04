@@ -94,8 +94,8 @@ export function evaluateModeGateFromDaily(
   if (run.length < days.length) {
     const dropped = days.length - run.length;
     r.note +=
-      `本次只统计最新口径（${protocolKey(run[0])}）下 ${run[0].date} 起的 ${run.length} 个交易日；` +
-      `更早的 ${dropped} 个交易日出自不同引擎/标的池/成本口径，保留可见但不混算。`;
+      `本次只统计最新规则版本（${protocolKey(run[0])}）下 ${run[0].date} 起的 ${run.length} 个交易日；` +
+      `更早的 ${dropped} 个交易日用的是另一套引擎/标的池/费用假设，仍可查看但不和这批混着算。`;
   }
   return r;
 }

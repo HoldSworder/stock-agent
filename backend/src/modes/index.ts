@@ -136,8 +136,9 @@ export function registerModesModule(app: FastifyInstance): void {
     jobs: [
       {
         id: 'modes.dailyTrack',
-        label: '关注模式收盘跟踪（15:10）',
-        defaultCron: '10 15 * * 1-5',
+        // 挪到 15:35：它按日线算模式当日收益，等前面几个快照都落完再跑，避开 15:10 的取数高峰
+        label: '关注模式收盘跟踪（15:35）',
+        defaultCron: '35 15 * * 1-5',
         defaultEnabled: true,
         run: async () => {
           await runAllFollowedTracking();

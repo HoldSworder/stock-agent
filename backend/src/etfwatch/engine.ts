@@ -213,7 +213,7 @@ function buildCandidates(
   if (r30.state === '金叉' && !held.has(1)) {
     const key = `${t.code}:buy:1:${r30.barTime}`;
     if (regimeFrozen) {
-      out.push(mk('buy_layer', 1, '30m', 0, r30.dif, r30.dea, `30分钟金叉但日线收盘 ${day.macd.close} 跌破 MA60 ${day.ma60?.toFixed(3)}（逆势冻结 L1），降级观察`, key, null));
+      out.push(mk('buy_layer', 1, '30m', 0, r30.dif, r30.dea, `30分钟金叉但日线收盘 ${day.macd.close} 跌破 MA60 ${day.ma60?.toFixed(3)}（逆势，禁止建第一层），降级观察`, key, null));
     } else if (cfg.higherTfFilter && !r60.bullish) {
       out.push(mk('buy_layer', 1, '30m', 0, r30.dif, r30.dea, `30分钟金叉但 60分钟未多头（DIF ${r60.dif}<DEA ${r60.dea}），降级观察`, key, null));
     } else if (cfg.zeroAxisFilter && !r30.aboveZero) {

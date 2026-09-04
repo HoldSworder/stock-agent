@@ -70,8 +70,8 @@ const lastPollText = computed(() => {
 
 // ===== 展示映射 =====
 const TYPE_LABEL: Record<EtfWatchSignal['type'], string> = {
-  buy_layer: '建层',
-  sell_layer: '撤层',
+  buy_layer: '建一层仓',
+  sell_layer: '减一层仓',
   hard_stop: '硬止损',
 };
 const typeTag = (t: EtfWatchSignal['type']): 'success' | 'warning' | 'danger' =>
@@ -500,8 +500,8 @@ watch(
       </div>
     </div>
     <div class="page-sub">
-      确定性检测 30分钟 / 60分钟 / 日线 MACD 金叉死叉（收盘确认 + 大周期方向 + 零轴过滤），按 2:2:1
-      分层给出建仓/撤层/硬止损告警；买点经 AI 结合主线/大盘/资金给混合置信度。仅告警不下单，按引擎自身信号维护「建议持仓层」。
+      按规则检测 30分钟 / 60分钟 / 日线 MACD 金叉死叉（收盘确认 + 大周期方向 + 零轴过滤），按 2:2:1
+      分层给出建仓/减一层仓/硬止损告警；买点经 AI 结合主线/大盘/资金给混合置信度。仅告警不下单，按引擎自身信号维护「建议持仓层」。
     </div>
 
     <!-- 引擎状态条 -->
@@ -583,7 +583,7 @@ watch(
 
       <!-- 信号流 -->
       <section class="panel">
-        <div class="panel-title">确定性信号流</div>
+        <div class="panel-title">规则信号流</div>
         <div v-if="store.signals.length" class="feed">
           <div v-for="s in store.signals" :key="signalKey(s)" class="feed-row">
             <div class="feed-body">
@@ -860,7 +860,7 @@ watch(
         <el-divider content-position="left">过滤与风控</el-divider>
         <el-form-item label="大周期方向过滤">
           <el-switch v-model="form.higherTfFilter" />
-          <span class="form-hint">L1需60分多头/L2需日线多头/L3需周线多头；并冻结日线价&lt;MA60时建仓</span>
+          <span class="form-hint">L1需60分多头/L2需日线多头/L3需周线多头；日线价&lt;MA60 时禁止建仓</span>
         </el-form-item>
         <el-form-item label="零轴过滤">
           <el-switch v-model="form.zeroAxisFilter" />

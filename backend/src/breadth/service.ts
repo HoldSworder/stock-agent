@@ -16,6 +16,7 @@ import {
   type BoardMeta,
   type NewHighWindow,
 } from './data';
+import { canPersistSnapshot } from '../scheduling/snapshotWindow';
 import {
   getLatestSnapshotDate,
   listRecentSnapshots,
@@ -93,10 +94,14 @@ const JUNK_BOARD_PATTERNS: readonly RegExp[] = [
   /次新|注册制|创业板综|科创板块?|北交所|转债|可转债|融资融券|两融|股权转让|参股|参控股/,
   // 时间/统计类噪声
   /近期|最近|破发|高股息|分红|股息/,
+  // 平台自造的聚合桶：不是行业也不是题材，成分每天换一批，
+  // 「热股里有 12 只创新高」说明不了任何赛道在走强，却会挤掉真板块的位置
+  /热股|热门|人气|龙虎榜|游资|机构重仓|基金重仓|北向/,
+  /^题材股$|^概念股$|^其他$/,
 ];
 
 /** 板块是否为应剔除的伪概念（任一模式命中即剔除） */
-function isJunkBoard(name: string): boolean {
+export function isJunkBoard(name: string): boolean {
   return JUNK_BOARD_PATTERNS.some((re) => re.test(name));
 }
 
@@ -297,8 +302,13 @@ export function assessPersistence(
     if (!ok) break;
     streakDays += 1;
   }
-  // 近端居榜首天数：今日 + 历史中排名 ≤ TOP_RANK 的天数（限 LOOKBACK_DAYS+1 窗口）
-  const topSeq = [rank, ...hist.map((h) => h.rank)].slice(0, LOOKBACK_DAYS + 1);
+  // 近端居榜首天数：今日 + 近 LOOKBACK_DAYS 个**交易日**里排名 ≤ TOP_RANK 的天数。
+  // 与 streakDays 同样对着交易日日历数：直接取 hist 的前 N 行，会把缺口两侧接起来，
+  // 让三周前的几条旧记录冒充「近 5 日」。那天没有快照就是没居首，不能跳过去接下一条。
+  const topSeq =
+    recentDates != null
+      ? [rank, ...recentDates.map((d) => histByDate.get(d)?.rank ?? Number.POSITIVE_INFINITY)]
+      : [rank, ...hist.map((h) => h.rank)].slice(0, LOOKBACK_DAYS + 1);
   const topDays = topSeq.filter((rk) => rk <= TOP_RANK).length;
   const wasMainline = hist.some((h) => h.rank <= TOP_RANK);
   const verdict = judge({ count, ratio, rank, prevCount, topDays, wasMainline, continuity });
@@ -328,7 +338,7 @@ export function boardStageActionOf(
     hist,
     row.coreCodes,
     date,
-    distinctDates(recent),
+    expectedRecentDates(date, LOOKBACK_DAYS),
   );
   return { action, stage, tradeDate: date };
 }
@@ -386,8 +396,22 @@ export function takeWithFading<T extends { stage: BoardMainlineStage }>(
 }
 
 /** 近端快照集里实际存在的 distinct 交易日（新→旧），作为连续达标天数的对齐基准 */
-function distinctDates(history: BoardBreadthSnapshotRow[]): string[] {
-  return [...new Set(history.map((r) => r.tradeDate))].sort((a, b) => (a < b ? 1 : -1));
+/**
+ * 「本该有快照」的近 n 个交易日（新→旧，不含当日）。
+ *
+ * 连续性判定必须对着这个日历数，不能对着库里实际存在的日期数。
+ * 快照整天没跑时，实际日期序列会把缺口两侧直接接起来——
+ * 实测库里存在 8-06 之后直接断到 8-28 的情况，按实际日期算会把三周前的
+ * 三条记录报成「连续达标 3 日」。对着日历数则缺席那天查不到行，链条自然断开。
+ */
+function expectedRecentDates(tradeDate: string, n: number): string[] {
+  const out: string[] = [];
+  let cursor = tradeDate;
+  for (let i = 0; i < n; i += 1) {
+    cursor = prevTradingDay(cursor);
+    out.push(cursor);
+  }
+  return out;
 }
 
 /** 按 boardCode 把历史快照分组并按交易日新→旧排序 */
@@ -489,7 +513,8 @@ export async function buildBreadthOverview(persist = false): Promise<BoardBreadt
   // 4) 历史快照（近 LOOKBACK_DAYS 交易日）按 boardCode 分组（新→旧）
   const recentSnapshots = listRecentSnapshots(tradeDate, LOOKBACK_DAYS);
   const histByBoard = groupHistory(recentSnapshots);
-  const recentDates = distinctDates(recentSnapshots);
+  // 对着交易日日历取近端日期，而不是库里实际存在的日期——缺口不得被跳过
+  const recentDates = expectedRecentDates(tradeDate, LOOKBACK_DAYS);
 
   // 5) 排名池：当日有新高的板块。新高数降序，平手按占比降序，
   //    但名次用竞争排名（并列同名次 1,1,3）——按序号严格递增时，「新高数并列第一、占比低 0.1pt」
@@ -555,7 +580,19 @@ export async function buildBreadthOverview(persist = false): Promise<BoardBreadt
   });
 
   // 8) 落库（仅当有真实计数；按上限截取，控制每日行数）
-  if (persist && isTradingDay() && items.length > 0) {
+  // 时刻与完整性两道门见 canPersistSnapshot 的说明：宁可这天没有快照，
+  // 也不要一份「看起来是当日定盘值、其实是半天或缺数据」的行——后者事后无从分辨
+  if (persist) {
+    const gate = canPersistSnapshot('breadth');
+    if (!gate.ok) throw new Error(gate.reason);
+    if (stale) {
+      throw new Error('创新高或板块成分没取全，本次不写快照，保留上一份');
+    }
+    if (items.length === 0) {
+      throw new Error('今日没有任何板块计数，本次不写快照');
+    }
+  }
+  if (persist && items.length > 0) {
     const coreByCode = new Map(counts.map((c) => [c.meta.code, c.coreCodes]));
     upsertSnapshots(
       takeWithFading(items, Math.max(MAX_BOARDS, 60)).map((it) => ({
@@ -582,11 +619,92 @@ export async function buildBreadthOverview(persist = false): Promise<BoardBreadt
     items: takeWithFading(items, MAX_BOARDS),
     mainlines,
     note:
-      '板块新高宽度（主线识别，确定性只读，仅供参考，不构成投资建议）：' +
+      '板块创新高表现（主线识别，按规则计算，仅供参考，不构成投资建议）：' +
       `按板块内${WINDOW}个股数横向排名，"最多且持续多日稳居榜首、且核心股跨日延续"判定主线。` +
       '阶段（酝酿/主升/分歧/退幕）只用于收紧动作（该不该开新仓、是否只减不加），不用于放大仓位。' +
-      (stale ? '⚠️ 创新高/板块成分取数降级，榜为不完整估计（请到数据源页检查 AKShare 配置）。' : ''),
+      (stale ? '⚠️ 创新高/板块成分没取到，榜为不完整估计（请到数据源页检查 AKShare 配置）。' : ''),
     stale,
+  };
+}
+
+/** 一个能映射到代表 ETF 的板块及其成分 */
+export interface EtfBoard {
+  kind: BoardKind;
+  boardCode: string | null;
+  boardName: string;
+  etf: { code: string; name: string };
+  codes: string[];
+}
+
+/**
+ * 「有代表 ETF 的赛道」全集：板块 + 成分股。
+ *
+ * 这是历史新高回补的取数范围。为什么只覆盖这一批而不是全市场：
+ * 板块新高宽度原本靠同花顺创新高榜，那个接口只返回「此刻」，没有日期参数，
+ * 所以历史必须自己从 K 线算——而自算要求先有该板块全部成分的日线。
+ * 全市场几百个板块的成分并集约等于整个 A 股，日线量级不现实；
+ * 而你的打法是先用 ETF 锁赛道，能落到 ETF 的这几十个板块才是真正会下单的范围。
+ *
+ * 覆盖的是**全部**能映射到 ETF 的板块，不是「今天进了前 60 名」的那几个——
+ * 否则光伏、军工热的那天照样没有历史可比。
+ */
+export async function etfBoardUniverse(): Promise<{ boards: EtfBoard[]; codes: string[] }> {
+  const kinds: BoardKind[] = ['industry', 'concept'];
+  const metas: Array<{ kind: BoardKind; meta: BoardMeta; etf: { code: string; name: string } }> = [];
+  for (const kind of kinds) {
+    const list = await fetchBoards(kind).catch(() => [] as BoardMeta[]);
+    for (const meta of list) {
+      if (isJunkBoard(meta.name)) continue;
+      const etf = mapBoardEtf(meta.name);
+      if (etf) metas.push({ kind, meta, etf });
+    }
+  }
+  const boards: EtfBoard[] = [];
+  const all = new Set<string>();
+  // 成分接口有 6h 缓存，但首次仍是几十次请求，限并发避免打爆 aktools
+  await mapLimit(metas, 4, async ({ kind, meta, etf }) => {
+    const codes = await fetchBoardConstituents(kind, meta.name).catch(() => [] as string[]);
+    if (codes.length === 0) return;
+    boards.push({ kind, boardCode: meta.code ?? null, boardName: meta.name, etf, codes });
+    for (const c of codes) all.add(c);
+  });
+  boards.sort((a, b) => a.boardName.localeCompare(b.boardName));
+  return { boards, codes: [...all].sort() };
+}
+
+/** 富集后的板块行：快照原始计数 + 阶段/动作/持续性判定 + 代表 ETF */
+export type BoardStageRow = BoardBreadthSnapshotRow &
+  ReturnType<typeof assessPersistence> & { etf: { code: string; name: string } | null };
+
+/**
+ * 读最新快照并补齐阶段判定（纯本地 DB 读，不现场重跑、不联网）。
+ *
+ * 现场重跑要遍历全部板块成分、实测约 4 分钟，绝不能挂在驾驶舱这种要秒开的路径上。
+ * 与 formatBreadthForPlan 共用同一份富集逻辑：两处各写一份的话，
+ * 计划底稿说某板块在主升、驾驶舱说它在酝酿，同一天两个结论。
+ */
+export function listBoardStagesFromSnapshot(): { date: string; rows: BoardStageRow[] } | null {
+  const date = getLatestSnapshotDate();
+  if (!date) return null;
+  const rows = listSnapshotsByDate(date);
+  if (rows.length === 0) return { date, rows: [] };
+  const histByBoard = groupHistory(listRecentSnapshots(date, LOOKBACK_DAYS));
+  const recentDates = expectedRecentDates(date, LOOKBACK_DAYS);
+  return {
+    date,
+    rows: rows.map((r) => ({
+      ...r,
+      ...assessPersistence(
+        r.rank,
+        r.newHighCount,
+        r.ratio,
+        histByBoard.get(r.boardCode) ?? [],
+        r.coreCodes,
+        date,
+        recentDates,
+      ),
+      etf: mapBoardEtf(r.boardName),
+    })),
   };
 }
 
@@ -595,35 +713,18 @@ export async function buildBreadthOverview(persist = false): Promise<BoardBreadt
  * 计划 agent 据此把"哪个板块新高最多且持续"作为主线判断的确定性证据之一。无快照时显式说明，由上层据时效降权。
  */
 export function formatBreadthForPlan(): string {
-  const date = getLatestSnapshotDate();
-  if (!date) {
+  const snap = listBoardStagesFromSnapshot();
+  if (!snap) {
     return '【板块新高宽度·最新】无快照（板块新高模块未启用或未落库；到调度页启用「收盘快照」后次日起可用）。';
   }
-  const rows = listSnapshotsByDate(date);
-  if (rows.length === 0) return '【板块新高宽度·最新】无快照数据。';
-
-  const recent = listRecentSnapshots(date, LOOKBACK_DAYS);
-  const histByBoard = groupHistory(recent);
-  const recentDates = distinctDates(recent);
-  const enriched = rows.map((r) => ({
-    ...r,
-    ...assessPersistence(
-      r.rank,
-      r.newHighCount,
-      r.ratio,
-      histByBoard.get(r.boardCode) ?? [],
-      r.coreCodes,
-      date,
-      recentDates,
-    ),
-    etf: mapBoardEtf(r.boardName),
-  }));
+  const { date, rows: enriched } = snap;
+  if (enriched.length === 0) return '【板块新高宽度·最新】无快照数据。';
   const mains = enriched.filter((e) => e.stage === 'advancing');
   const top = enriched.slice(0, 8);
 
   const fresh = date === shanghaiToday() ? '' : `（${date}，非当日产出，注意时效）`;
   const lines: string[] = [
-    `【板块新高宽度·最新】${fresh}（${WINDOW}口径，板块内创新高个股数横向排名；"最多且持续多日稳居榜首、且核心股跨日延续"判主线，确定性只读）`,
+    `【板块创新高表现·最新】${fresh}（按${WINDOW}统计，板块内创新高个股数横向排名；"最多且持续多日稳居榜首、且核心股跨日延续"判主线，按规则计算）`,
     '阶段硬路由：酝酿=可试仓 / 主升=可追领涨 / 分歧=只减不加 / 退幕=只退出。阶段只收紧不放大仓位。',
   ];
   if (mains.length > 0) {
@@ -722,7 +823,7 @@ export function formatMidlineBreadthForEtf(windowDays = MID_WINDOW_DAYS): string
 
   const fresh = date === shanghaiToday() ? '' : `（最新快照 ${date}，注意时效）`;
   const lines: string[] = [
-    `【中长期主线·板块新高宽度】${fresh}（${WINDOW}口径，回看约${windowDays}个交易日；"窗口内多数时间居前${MID_TOP_RANK}名"判定中长期主线，确定性只读，仅供参考）`,
+    `【中长期主线·板块创新高表现】${fresh}（按${WINDOW}统计，回看约${windowDays}个交易日；"这段时间里多数日子都排在前${MID_TOP_RANK}名"判定中长期主线，按规则计算，仅供参考）`,
   ];
   if (mains.length > 0) {
     lines.push(

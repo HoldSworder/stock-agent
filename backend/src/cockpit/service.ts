@@ -1,6 +1,7 @@
 import { desc, gte, sql } from 'drizzle-orm';
 import type {
   CockpitEvent,
+  CockpitModuleGroup,
   CockpitModuleSummary,
   CockpitOverview,
   CockpitScreenerPick,
@@ -211,6 +212,13 @@ interface ModuleSource {
   key: string;
   title: string;
   route: string;
+  /**
+   * 在驾驶舱的归宿。缺省 analysis。
+   *
+   * `covered` 的模块已经在动作清单里以动作形式出现（纪律→止损动作、盯盘→告警动作），
+   * 再放一张卡等于同一件事说两遍，读的人还得自己对上号。
+   */
+  group?: CockpitModuleGroup;
   routeQuery?: Record<string, string>;
   latest?: () => { createdAt: string | null; outputText: string | null } | undefined;
   /** 一键复盘为结构化 JSON，取 comprehensiveStance 作 headline */
@@ -240,13 +248,20 @@ export function shanghaiDateOf(iso: string): string {
 }
 
 const MODULE_SOURCES: ModuleSource[] = [
-  { key: 'intel', title: '情报研判', route: '/intel', latest: () => listIntelReviews(1)[0] },
-  { key: 'market-board', title: '大盘与板块研判', route: '/market', latest: () => listMarketBoardReviews(1)[0] },
-  { key: 'etf', title: 'ETF 综合研判', route: '/etf', latest: () => listEtfAnalyzeReviews(1)[0] },
+  { key: 'intel', title: '情报研判', route: '/intel', group: 'analysis', latest: () => listIntelReviews(1)[0] },
+  {
+    key: 'market-board',
+    title: '大盘与板块研判',
+    route: '/market',
+    group: 'analysis',
+    latest: () => listMarketBoardReviews(1)[0],
+  },
+  { key: 'etf', title: 'ETF 综合研判', route: '/etf', group: 'analysis', latest: () => listEtfAnalyzeReviews(1)[0] },
   {
     key: 'review',
     title: '一键复盘',
     route: '/review',
+    group: 'analysis',
     structured: true,
     latest: () => listReviews(3).find((r) => r.outputText),
   },
@@ -254,6 +269,8 @@ const MODULE_SOURCES: ModuleSource[] = [
     key: 'etf-watch',
     title: 'ETF 多周期盯盘',
     route: '/etf-watch',
+    // 告警已成为动作清单里的条目，这里不再重复放卡
+    group: 'covered',
     build: () => {
       const states = listLayerStates();
       const alerts = listEtfAlerts(1, false);
@@ -275,6 +292,7 @@ const MODULE_SOURCES: ModuleSource[] = [
     key: 'watch',
     title: '实时盯盘',
     route: '/watch',
+    group: 'covered',
     build: () => {
       const alerts = listAlerts(3).filter((a) => a.shouldAlert);
       const n = countAlertsToday();
@@ -290,6 +308,8 @@ const MODULE_SOURCES: ModuleSource[] = [
     key: 'discipline',
     title: '持仓纪律',
     route: '/positions',
+    // 纪律的每一条都已经是动作清单里的 P0/P1，卡片只会让人重复读一遍
+    group: 'covered',
     build: () => {
       const events = listDisciplineEvents(20);
       const today = shanghaiToday();
@@ -307,6 +327,7 @@ const MODULE_SOURCES: ModuleSource[] = [
     key: 'sentiment',
     title: '市场情绪',
     route: '/market',
+    group: 'analysis',
     routeQuery: { tab: 'sentiment' },
     build: () => {
       const row = db
@@ -327,6 +348,7 @@ const MODULE_SOURCES: ModuleSource[] = [
     key: 'modes',
     title: '模式跟踪',
     route: '/modes',
+    group: 'research',
     build: () => {
       const followed = listResearchModes().filter((m) => m.followed);
       if (followed.length === 0) return null;
@@ -352,6 +374,7 @@ const MODULE_SOURCES: ModuleSource[] = [
     key: 'kol',
     title: '大V观点',
     route: '/kol',
+    group: 'research',
     build: () => {
       const start = todayStartIso();
       const n = db
@@ -405,6 +428,7 @@ export function buildModuleSummaries(): CockpitModuleSummary[] {
         excerpt: built?.excerpt ?? '暂无产出（该模块未启用或尚未运行）',
         createdAt: built?.createdAt ?? null,
         stale: built?.createdAt ? shanghaiDateOf(built.createdAt) !== today : true,
+        group: m.group ?? 'analysis',
       });
       continue;
     }
@@ -418,9 +442,10 @@ export function buildModuleSummaries(): CockpitModuleSummary[] {
         route: m.route,
         routeQuery: m.routeQuery,
         headline: '',
-        excerpt: '暂无持久化产出（对应分析未运行或未产出）',
+        excerpt: '暂无结果（对应的分析还没跑过，或没跑出内容）',
         createdAt: null,
         stale: true,
+        group: m.group ?? 'analysis',
       });
       continue;
     }
@@ -446,6 +471,7 @@ export function buildModuleSummaries(): CockpitModuleSummary[] {
       excerpt: excerpt || '（产出为空）',
       createdAt,
       stale,
+      group: m.group ?? 'analysis',
     });
   }
 
@@ -461,6 +487,8 @@ export function buildModuleSummaries(): CockpitModuleSummary[] {
       excerpt: cs?.summary || `${detail.items.length} 个标的`,
       createdAt: detail.plan.createdAt,
       stale: detail.plan.planDate !== today,
+      // 计划里的每个触发项都已经是动作清单里的条目
+      group: 'covered',
     });
   } else {
     cards.push({
@@ -471,6 +499,7 @@ export function buildModuleSummaries(): CockpitModuleSummary[] {
       excerpt: '今日暂无计划（盘前生成任务未运行）',
       createdAt: null,
       stale: true,
+      group: 'covered',
     });
   }
 
@@ -485,6 +514,7 @@ export function buildModuleSummaries(): CockpitModuleSummary[] {
       excerpt: latestRun.selectionLogic || `全市场 ${latestRun.marketCount} → 硬筛 ${latestRun.filteredCount} → 入选 ${latestRun.topN}`,
       createdAt: latestRun.createdAt,
       stale: shanghaiDateOf(latestRun.createdAt) !== today,
+      group: 'analysis',
     });
   } else {
     cards.push({
@@ -495,6 +525,7 @@ export function buildModuleSummaries(): CockpitModuleSummary[] {
       excerpt: '暂无选股运行',
       createdAt: null,
       stale: true,
+      group: 'analysis',
     });
   }
 

@@ -49,6 +49,7 @@ const ma = (ma20: number, ma60: number): MaStructure => ({
 
 const vp = (verdict: string, pattern: VolumePriceReading['pattern'] = null): VolumePriceReading => ({
   period: 'day',
+  completeBar: true,
   amountRatio20: 1,
   volumeRatio20: 1,
   amountState: 'normal',

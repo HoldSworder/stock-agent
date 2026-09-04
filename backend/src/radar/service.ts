@@ -292,6 +292,6 @@ export async function buildRadarOverview(): Promise<RadarOverview> {
     industries,
     positions: [],
     candidates: [],
-    note: '中线趋势研判（确定性指标，仅供参考，不构成下单建议）',
+    note: '中线趋势研判（按规则计算的指标，仅供参考，不构成下单建议）',
   };
 }

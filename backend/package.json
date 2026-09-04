@@ -11,6 +11,7 @@
     "dev:plain": "tsx watch src/server.ts",
     "start": "tsx src/server.ts",
     "typecheck": "tsc --noEmit",
+    "glossary:check": "tsx src/scripts/glossary.selfcheck.ts --test && tsx src/scripts/glossary.selfcheck.ts --strict",
     "modes:reseed": "tsx src/scripts/reseed-modes.ts",
     "db:push": "drizzle-kit push"
   },

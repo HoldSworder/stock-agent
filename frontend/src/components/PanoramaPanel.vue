@@ -205,7 +205,7 @@ defineExpose({ reload: load });
     <div class="pa-head">
       <span class="pa-title">今日全景</span>
       <span class="pa-sub">
-        统一读模型 · 各页结论收口于此，明细点「查看 →」下钻
+        各页结论都汇总在这里，明细点「查看 →」展开
         <template v-if="liveLoading">· 实时数据加载中…</template>
         <template v-else-if="liveError">· 实时层失败：{{ liveError }}</template>
       </span>

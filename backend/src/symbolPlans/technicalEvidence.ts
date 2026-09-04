@@ -71,15 +71,15 @@ async function loadPeriod(
   // 周线在降级到 mootdx 时可能拿到不复权数据（实测链尾），显式标注
   const adjusted = period !== 'week';
   if (!adjusted) {
-    warnings.push('周线在数据源降级时可能为不复权，除权标的均线可能漂移');
+    warnings.push('周线在数据源不全时可能是不复权的，除权标的均线可能漂移');
   }
   if (bars.length < limit) {
-    warnings.push(`请求 ${limit} 根，实得 ${bars.length} 根，按实际样本降级`);
+    warnings.push(`需要 ${limit} 根 K 线，只拿到 ${bars.length} 根，结论按实际样本给`);
   }
   // 收完判定必须与求值层同一 helper：午休时段同样属于「当日 K 未收完」，
   // 否则 11:35 会拿半天成交额去和 20 日中位数比，得出「全天放量/缩量」的假确认
   const completeBar = !isBarUnclosed(period, bars[bars.length - 1].time);
-  if (!completeBar) warnings.push(`当前 ${period} K 未收完，量能与阶段结论按盘中口径降级`);
+  if (!completeBar) warnings.push(`当前 ${period} K 线还没收完，量能与阶段结论只能按盘中数据先给个粗判`);
   return {
     period,
     bars,
@@ -278,7 +278,7 @@ export async function buildTechnicalContext(input: BuildContextInput): Promise<B
   //    60m 优先做缠论（次级别结构），无 60m 时退回日线并标注
   const structBase = periods.find((p) => p.period === '60m') ?? dayData;
   if (structBase.period !== '60m') {
-    warnings.push('缺少 60 分钟数据，缠论结构退回日线口径');
+    warnings.push('缺少 60 分钟数据，缠论结构改用日线来算');
   }
   const dow = computeDowStructure(dayBars, 'day');
   const chan = computeChanStructure(structBase.bars, structBase.period);

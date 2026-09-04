@@ -12,6 +12,7 @@ import type {
   ScorePart,
   StrengthBreakdown,
 } from '@stock-agent/shared';
+import { canPersistSnapshot } from '../scheduling/snapshotWindow';
 import { nowIso, shanghaiToday } from '../util';
 import { countConsecutivePhase, getLatestSnapshot, getPrevSnapshot, upsertSnapshot } from './repo';
 
@@ -306,8 +307,8 @@ function isEqwUsable(eqw: MarketRegimeEqualWeight | null | undefined): boolean {
   return !!eqw && eqw.source !== 'breadth';
 }
 
-/** 代理口径下统一的文字口径说明（读数与证据共用） */
-const EQW_PROXY_TEXT = '等权口径缺失（仅有上涨家数占比代理），未做失真校正';
+/** 用代理数据时统一的说明文字（读数与证据共用） */
+const EQW_PROXY_TEXT = '取不到全A等权指数（只有上涨家数占比可用作替代），未做失真校正';
 
 interface DimContext {
   items: MarketRegimeIndexItem[];
@@ -373,7 +374,7 @@ function buildDimensions(
             : '全A等权偏弱，个股赚钱效应有限',
       evidence: !isEqwUsable(eqw)
         ? eqw?.upRatio != null
-          ? `${eqw.name}·涨占比${eqw.upRatio}%（非等权口径，不作 MA60 与 20 日涨幅结论）`
+          ? `${eqw.name}·涨占比${eqw.upRatio}%（这不是等权指数，不作 MA60 与 20 日涨幅结论）`
           : '—'
         : `${eqw!.name}·${eqw!.aboveMa60 ? '站上MA60' : '失守MA60'}·20日${eqw!.trendPct20 >= 0 ? '+' : ''}${eqw!.trendPct20}%${eqw!.upRatio != null ? `·涨占比${eqw!.upRatio}%` : ''}`,
     },
@@ -589,7 +590,7 @@ export async function buildRegimeOverview(persist = true): Promise<MarketRegimeO
       ? `${benchmark?.name}近20日+${benchmark?.trendPct20}% 但全A等权${eqw?.trendPct20}%，权重股护盘、多数个股走弱，普涨成色不足`
       : isEqwUsable(eqw)
         ? '权重与等权方向一致，未见明显护盘失真'
-        : '等权口径暂缺，未做背离校正',
+        : '全A等权指数暂时取不到，未做背离校正',
   };
 
   // 6) 维度打分 + 合成（保留每维原始分供面板逐维展示）
@@ -682,12 +683,33 @@ export async function buildRegimeOverview(persist = true): Promise<MarketRegimeO
       meta.advice +
       (consecutiveDays === 1 ? '（阶段今日新切换，建议再观察 1-2 日确认）' : ''),
     note:
-      '大盘阶段研判（确定性合成，仅供参考，不构成投资建议）。' +
-      (stale ? '⚠️ 部分数据源降级，结论为不完整估计。' : ''),
+      '大盘阶段研判（按规则合成，仅供参考，不构成投资建议）。' +
+      (stale ? '⚠️ 部分数据没取全，结论为不完整估计。' : ''),
     stale,
     hmm,
   };
 
+  // 三道门。第一道尤其重要：这里原本连交易日都不判，
+  // 而页面路由曾以 persist=true 调用本函数，于是周末打开大盘页就会写出一行「周末快照」，
+  // 它会挤占连续交易日序列，让阶段连续天数与环比全部失真
+  if (persist) {
+    const gate = canPersistSnapshot('regime');
+    if (!gate.ok) throw new Error(gate.reason);
+    if (stale) {
+      throw new Error('指数数据没取全，本次不写大盘阶段快照，保留上一份');
+    }
+    // 只看「缓存里有今天这一根」不够：盘中合成的临时 bar 日期也是今天。
+    // 必须确认每个指数的最后一根都停在当日，且此刻已过收盘回填时间（由上面的时刻闸门保证）
+    const notClosed = REGIME_INDICES.filter((_, i) => {
+      const bars = barsList[i];
+      return bars.length === 0 || bars[bars.length - 1].time.slice(0, 10) !== tradeDate;
+    });
+    if (notClosed.length > 0) {
+      throw new Error(
+        `${notClosed.map((ix) => ix.name).join('、')} 的日线还不是当日收盘线（日线回填可能未完成），本次不写快照`,
+      );
+    }
+  }
   if (persist && items.length > 0) {
     upsertSnapshot({
       tradeDate,
@@ -744,7 +766,7 @@ export function formatForAgent(ov: MarketRegimeOverview): string {
     .join('；');
   // 代理口径不得进 prompt 冒充等权结论：LLM 会把「失守MA60·20日+0%」当成事实继续推理
   const eqw = !ov.equalWeight
-    ? '等权口径暂缺'
+    ? '全A等权指数暂时取不到'
     : !isEqwUsable(ov.equalWeight)
       ? `${EQW_PROXY_TEXT}${ov.equalWeight.upRatio != null ? `，上涨占比${ov.equalWeight.upRatio}%` : ''}`
       : `${ov.equalWeight.name} ${ov.equalWeight.aboveMa60 ? '站上MA60' : '失守MA60'}，20日${ov.equalWeight.trendPct20 >= 0 ? '+' : ''}${ov.equalWeight.trendPct20}%${ov.equalWeight.upRatio != null ? `，上涨占比${ov.equalWeight.upRatio}%` : ''}`;
@@ -755,11 +777,11 @@ export function formatForAgent(ov: MarketRegimeOverview): string {
     ? `\nHMM概率视角（全A等权${ov.hmm.symbol}·${ov.hmm.window}日）：当前【${ov.hmm.state}】｜强弱读数 ${ov.hmm.strength}/100｜强势${ov.hmm.probs.强势}%·震荡${ov.hmm.probs.震荡}%·弱势${ov.hmm.probs.弱势}%（与规则结论相互印证，分歧即预警）`
     : '';
   return (
-    `大盘阶段（${ov.tradeDate}${ov.stale ? '·数据降级' : ''}）\n` +
+    `大盘阶段（${ov.tradeDate}${ov.stale ? '·数据没取全' : ''}）\n` +
     `阶段【${ov.phase}】｜强度分 ${ov.score}/100（较上一交易日 ${d}）｜已持续 ${ov.consecutiveDays} 个交易日\n` +
     `明日倾向【${ov.tomorrowBias}】｜建议交易频率【${ov.suggestedFrequency}】｜建议仓位 ${ov.positionRange}\n` +
     `权重指数：${idx}\n` +
-    `等权口径：${eqw}\n` +
+    `全A等权指数：${eqw}\n` +
     `权重vs等权：${ov.divergence.note}\n` +
     `驱动：${drivers}\n` +
     `风险：${risks}\n` +

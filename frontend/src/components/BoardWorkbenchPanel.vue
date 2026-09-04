@@ -14,6 +14,7 @@ import {
   STAGE_ACTION_LABEL,
   STAGE_LABEL,
 } from '@/constants/boardTags';
+import { BOARD_ACTION_TAG_LABELS } from '@stock-agent/shared';
 import type {
   AiActionVerdict,
   BoardWorkbench,
@@ -59,7 +60,7 @@ const aiLoading = ref(false);
 
 async function openDetail(it: BoardWorkbenchItem) {
   if (!it.boardCode) {
-    ElMessage.info('该板块暂无稳定代码，无法下钻详情');
+    ElMessage.info('该板块暂无稳定代码，无法展开详情');
     return;
   }
   detailTitle.value = `${it.board} 作战台`;
@@ -101,7 +102,7 @@ onMounted(() =>
         板块主线作战台
         <MetricScaleHint
           name="多源协同度"
-          note="动作标签为确定性派生：共振+走强→加仓候选/试错，共振→持有，观察→观察，背离→减仓，退潮→回避。仅研判不下单。"
+          note="动作标签由规则推出：共振+走强→加仓候选/小仓试单，共振→持有，观察→观察，背离→减仓，退潮→回避。仅研判不下单。"
         />
         <span v-if="data" class="as-of">更新 {{ dayjs(data.asOf).format('MM-DD HH:mm') }}</span>
       </div>
@@ -110,7 +111,8 @@ onMounted(() =>
       </el-button>
     </div>
     <div class="wb-sub">
-      投影自主线共识（确定性锚 + 多源协同 + 中线趋势），派生操盘动作 / 周期 / 风险；点击卡片下钻龙头·补涨·持仓暴露。
+      由主线共识推出（板块创新高表现 + 多源协同 + 中线趋势），给出操盘动作 / 周期 /
+      风险；点击卡片展开龙头·补涨·我在该板块的持仓。
       <span class="muted">仅研判不下单，仅供参考</span>
     </div>
 
@@ -125,7 +127,7 @@ onMounted(() =>
       >
         <div class="wc-head">
           <el-tag size="small" effect="dark" :type="ACTION_TAG_TYPE[it.actionTag]">
-            {{ it.actionTag }}
+            {{ BOARD_ACTION_TAG_LABELS[it.actionTag] }}
           </el-tag>
           <span class="wc-board">{{ it.board }}</span>
           <span class="wc-cycle">{{ it.cycleFit }}</span>
@@ -165,7 +167,7 @@ onMounted(() =>
                 <span class="d-reason">{{ s.reason }}</span>
               </div>
             </div>
-            <span v-else class="muted">暂无（成分取数为空或降级）</span>
+            <span v-else class="muted">暂无（成分股没取到）</span>
           </div>
 
           <div class="d-block">
@@ -180,7 +182,7 @@ onMounted(() =>
           </div>
 
           <div v-if="detail.exposure.length" class="d-block">
-            <div class="d-cap">我的持仓 / 自选暴露</div>
+            <div class="d-cap">我在这个板块的持仓 / 自选</div>
             <div class="d-list">
               <div v-for="h in detail.exposure" :key="`${h.account}:${h.code}`" class="d-row">
                 <el-tag size="small" :type="EXPO_STATUS_TYPE[h.status]" effect="plain">
@@ -216,7 +218,7 @@ onMounted(() =>
             <div v-if="aiAction" class="d-ai">
               <div class="d-ai-line">
                 <el-tag size="small" effect="dark" :type="ACTION_TAG_TYPE[aiAction.action]">
-                  {{ aiAction.action }}
+                  {{ BOARD_ACTION_TAG_LABELS[aiAction.action] }}
                 </el-tag>
                 <span class="d-ai-concl">{{ aiAction.conclusion }}</span>
               </div>

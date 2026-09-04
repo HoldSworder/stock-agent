@@ -175,7 +175,7 @@ onMounted(load);
   <div class="tools-panel">
     <div class="panel-head">
       <div class="panel-sub">
-        系统提供给 agent 的全部工具清单。启停与描述覆盖统一收口在 getToolDefinitions，对尾盘 / 持仓 / 计划 / 对话等所有运行全局生效。描述留空即使用代码默认。渐进式披露下，仅「核心」工具初始即加载，其余由模型经 search_tools 按需检索；可逐工具切换核心常驻。
+        系统提供给 agent 的全部工具清单。这里的启停与描述改动全局生效，对尾盘 / 持仓 / 计划 / 对话等所有运行都生效。描述留空即使用代码默认。渐进式披露下，仅「核心」工具初始即加载，其余由模型经 search_tools 按需检索；可逐工具切换核心常驻。
       </div>
       <div class="head-actions">
         <span class="head-stat">{{ enabledCount }} / {{ tools.length }} 启用</span>

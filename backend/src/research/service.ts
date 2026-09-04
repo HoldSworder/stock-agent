@@ -186,7 +186,7 @@ export async function analyzeBatch(opts: BatchOpts): Promise<ResearchAiAnalysis>
 
   const picked = await collectContents(reports, limit);
   if (!picked.length) {
-    throw new Error('近期无可分析的研报正文（可能自选股暂无研报或数据源限流）');
+    throw new Error('近期无可分析的研报正文（可能自选股暂无研报，或数据源请求太频繁被拒）');
   }
 
   const corpus = picked
@@ -586,7 +586,7 @@ export async function fetchAnnouncementContents(artCodes: string[], cap = 20): P
     }
     await new Promise((res) => setTimeout(res, 1100));
   }
-  if (!blocks.length) return '未取到所选公告正文（art_code 无效或数据源限流）。';
+  if (!blocks.length) return '未取到所选公告正文（公告编号无效，或数据源请求太频繁被拒）。';
   return ['## 选中公告正文摘录', ...blocks].join('\n\n');
 }
 

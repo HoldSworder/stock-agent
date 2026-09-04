@@ -36,8 +36,12 @@ export function registerSentimentModule(app: FastifyInstance): void {
     jobs: [
       {
         id: 'sentiment.snapshot',
-        label: '情绪周期收盘快照（15:10）',
-        defaultCron: '10 15 * * 1-5',
+        // 15:15 而不是 15:10：要等 klinecache.close(15:10) 把当日真实收盘线回填完，
+        // 否则算的是盘中合成的临时 bar。时刻与 SNAPSHOT_EARLIEST_SAVE 保持一致
+        label: '情绪周期收盘快照（15:15）',
+        defaultCron: '15 15 * * 1-5',
+        // 纯计算不花钱，而驾驶舱的情绪读数全靠它。关着等于那一块永远停在旧数据
+        defaultEnabled: true,
         run: async () => {
           await buildSentimentOverview(true);
         },

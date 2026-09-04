@@ -1,11 +1,13 @@
-import { and, desc, eq, inArray, or, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, or, sql } from 'drizzle-orm';
 import type {
+  PlanOutcomeStat,
   SymbolPlanEvent,
   SymbolPlanEventKind,
+  SymbolPlanOutcome,
   SymbolPlanStatus,
   SymbolTradePlan,
 } from '@stock-agent/shared';
-import { PLAN_LIVE_STATUSES } from '@stock-agent/shared';
+import { PLAN_LIVE_STATUSES, SYMBOL_PLAN_OUTCOMES } from '@stock-agent/shared';
 import { db, schema } from '../db/client';
 import { newId, nowIso } from '../util';
 
@@ -395,7 +397,7 @@ export function expireOutdatedCandidateModelPlans(
       planId: r.id,
       planVersion: r.version,
       kind: 'expired',
-      note: `候选模型版本已从 ${r.candidateModelVersion || '(空)'} 升到 ${currentVersion}，价位口径变化，置为过期待重算`,
+      note: `候选模型版本已从 ${r.candidateModelVersion || '(空)'} 升到 ${currentVersion}，价位算法变了，标为过期待重算`,
     });
   }
   return rows.map((r) => ({
@@ -412,6 +414,8 @@ export function appendEvent(input: {
   kind: SymbolPlanEventKind;
   conditionId?: string | null;
   note: string;
+  /** 复盘归因，仅 kind='reviewed' 时给；单开一列才聚合得出来 */
+  outcome?: SymbolPlanOutcome | null;
 }): SymbolPlanEvent {
   const row = {
     id: newId(),
@@ -420,10 +424,37 @@ export function appendEvent(input: {
     kind: input.kind,
     conditionId: input.conditionId ?? null,
     note: input.note,
+    outcome: input.outcome ?? null,
     createdAt: nowIso(),
   };
   db.insert(schema.symbolTradePlanEvents).values(row).run();
   return row as SymbolPlanEvent;
+}
+
+/** 复盘归因分布。只数 reviewed 事件里带枚举的那些，历史上塞在 note 里的老记录不参与 */
+export function planOutcomeStats(): PlanOutcomeStat[] {
+  const rows = db
+    .select({
+      outcome: schema.symbolTradePlanEvents.outcome,
+      count: sql<number>`count(*)`,
+    })
+    .from(schema.symbolTradePlanEvents)
+    .where(
+      and(
+        eq(schema.symbolTradePlanEvents.kind, 'reviewed'),
+        isNotNull(schema.symbolTradePlanEvents.outcome),
+      ),
+    )
+    .groupBy(schema.symbolTradePlanEvents.outcome)
+    .all();
+  const labelOf = new Map(SYMBOL_PLAN_OUTCOMES.map((o) => [o.value, o.label]));
+  return rows
+    .map((r) => ({
+      outcome: r.outcome as SymbolPlanOutcome,
+      label: labelOf.get(r.outcome as SymbolPlanOutcome) ?? String(r.outcome),
+      count: Number(r.count ?? 0),
+    }))
+    .sort((a, b) => b.count - a.count);
 }
 
 // ===== 事件类条件锁存 =====

@@ -82,7 +82,8 @@ onMounted(() =>
       </el-button>
     </div>
     <div class="c-sub">
-      三方对齐：<b>新高宽度</b>（确定性锚）+ <b>多源协同</b>（题材强度趋势）+ <b>中线趋势</b>（均线排列）。
+      三方对齐：<b>板块创新高表现</b>（按规则算的基准）+ <b>多源协同</b>（题材强度趋势）+
+      <b>中线趋势</b>（均线排列）。
       <el-tag size="small" type="danger" effect="plain">三方共振=值得跟</el-tag>
       <el-tag size="small" type="warning" effect="plain">分歧=有背离需警惕</el-tag>
       <el-tag size="small" type="info" effect="plain">观察=仅锚成立</el-tag>

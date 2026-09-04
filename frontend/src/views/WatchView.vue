@@ -130,12 +130,12 @@ const typeTag = (t: WatchSignal['type']) =>
 const dir = (v: number) => (v > 0 ? 'up' : v < 0 ? 'down' : '');
 const pctText = (v: number) => (v >= 0 ? '+' : '') + v.toFixed(2) + '%';
 
-/** 信号去向中文标签：解释一条信号在确定性管道中的最终落点 */
+/** 信号去向中文标签：解释一条信号最终被怎么处理了 */
 const DISPOSITION_LABELS: Record<WatchDisposition, string> = {
   hysteresis: '迟滞静默',
   cooldown: '冷却中',
   low_score: '低于门槛',
-  over_capacity: '限流丢弃',
+  over_capacity: '超出本轮上限',
   cache_reused: '缓存复用',
   to_ai: '已送研判',
 };
@@ -454,7 +454,7 @@ watch(
         </div>
         <span v-else class="form-hint">暂无本地模拟战法</span>
 
-        <el-divider content-position="left">轮询与限流</el-divider>
+        <el-divider content-position="left">刷新频率与每轮上限</el-divider>
         <el-form-item label="轮询间隔(秒)">
           <el-input-number v-model="form.pollSec" :min="3" :max="60" />
         </el-form-item>
@@ -498,7 +498,7 @@ watch(
         <el-form-item label="结果反思">
           <el-switch v-model="form.reflection" />
         </el-form-item>
-        <el-form-item label="确定性门槛">
+        <el-form-item label="规则分下限">
           <el-input-number v-model="form.minScore" :min="0" :max="100" :step="5" />
           <span class="form-hint">信号分低于此值直接沉默，0=不拦截</span>
         </el-form-item>

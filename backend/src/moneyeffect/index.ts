@@ -26,8 +26,10 @@ export function registerMoneyEffectModule(app: FastifyInstance): void {
     jobs: [
       {
         id: 'moneyeffect.snapshot',
-        label: '首板赚钱效应收盘快照（15:10）',
-        defaultCron: '10 15 * * 1-5',
+        // 挪出 15:10：那一刻 klinecache.close 正在回填全市场日线，
+        // 同分钟起跑的几个任务会一起抢上游。这个只取 883994 一条，往后挪两分钟即可
+        label: '首板赚钱效应收盘快照（15:12）',
+        defaultCron: '12 15 * * 1-5',
         defaultEnabled: true,
         run: async () => {
           await buildMoneyEffectOverview(true);

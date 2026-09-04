@@ -439,7 +439,7 @@ async function computeQuoteNote(code: string, signal?: AbortSignal): Promise<str
   const last = flows.length ? flows[flows.length - 1] : null;
   if (last) {
     const inflow = last.main / 1e8;
-    parts.push(`主力净流入${inflow >= 0 ? '+' : ''}${inflow.toFixed(2)}亿(东财口径)`);
+    parts.push(`主力净流入${inflow >= 0 ? '+' : ''}${inflow.toFixed(2)}亿(东财数据)`);
   }
   return parts.join(' ');
 }
@@ -1399,7 +1399,7 @@ export async function runDecisionCached(
   if (hit) {
     opts.onEvent?.({
       type: 'token',
-      text: `（命中决策缓存，dataAsOf ${hit.dataAsOf}，未失效，直接复用）\n\n${hit.result.narrative}`,
+      text: `（用的是 ${hit.dataAsOf} 已经算好的结果，还在有效期内，没有重跑）\n\n${hit.result.narrative}`,
     });
     return { result: hit.result, cached: true };
   }
@@ -2256,7 +2256,7 @@ function buildEtfAnalystPrompt(meta: EtfAnalystMeta, code: string, ctx: EtfPrefe
   };
   const header: Record<EtfDataKey, string> = {
     quote: '=== ETF 实时行情/折溢价 ===',
-    metrics: '=== 确定性指标：年线偏离/价格分位/动量/波动/年内区间 ===',
+    metrics: '=== 按规则计算的指标：年线偏离/价格分位/动量/波动/年内区间 ===',
     size: '=== 规模/成交/资金 ===',
     kline: '=== K线技术位（东财60日线）===',
     series: '=== 近20日逐日量价序列 ===',

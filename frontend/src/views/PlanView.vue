@@ -670,7 +670,7 @@ onUnmounted(() => {
         <template v-else>
           <ModuleScheduleDialog module="plan" />
           <el-button :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
-          <el-button :icon="Aim" @click="goDrilldown">下钻强赛道龙头</el-button>
+          <el-button :icon="Aim" @click="goDrilldown">从强赛道里挑龙头</el-button>
           <el-button
             v-if="plan && !viewingDate"
             :icon="Compass"
@@ -701,7 +701,7 @@ onUnmounted(() => {
       </div>
     </div>
     <div class="page-sub">
-      盘前作战室：研报 / 热点 / 板块 / 持仓 / 大盘 / 外围串联，盘中盯盘程序化对照，盘后收盘复盘闭环（仅研判不下单）
+      盘前作战室：研报 / 热点 / 板块 / 持仓 / 大盘 / 外围串联，盘中盯盘程序化对照，盘后收盘复盘、结论自动带进明日计划（仅研判不下单）
     </div>
 
     <!-- 一键计划管线进度 -->

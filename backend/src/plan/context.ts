@@ -70,7 +70,7 @@ async function buildLiveIndexBlock(): Promise<string> {
 function buildIntelBlock(): string {
   const latest = listIntelReviews(1)[0];
   if (!latest?.outputText)
-    return '【情报研判·最新】无持久化情报研判（情报合并定时未启用或未产出）。';
+    return '【情报研判·最新】暂无情报研判（这项定时任务没开启，或今天还没跑出结果）。';
   return `【情报研判·最新】${freshness(latest.createdAt)}\n${clip(latest.outputText, 3200)}`;
 }
 
@@ -78,7 +78,7 @@ function buildIntelBlock(): string {
 function buildMarketBoardBlock(): string {
   const latest = listMarketBoardReviews(1)[0];
   if (!latest?.outputText)
-    return '【大盘与板块研判·最新】无持久化大盘与板块研判（大盘合并定时未启用或未产出）。';
+    return '【大盘与板块研判·最新】暂无大盘与板块研判（这项定时任务没开启，或今天还没跑出结果）。';
   return `【大盘与板块研判·最新】${freshness(latest.createdAt)}\n${clip(latest.outputText, 3200)}`;
 }
 
@@ -86,16 +86,16 @@ function buildMarketBoardBlock(): string {
 function buildEtfBlock(): string {
   const latest = listEtfAnalyzeReviews(1)[0];
   if (!latest?.outputText)
-    return '【ETF 综合研判·最新】无持久化 ETF 综合研判（ETF 合并定时未启用或未产出）。';
+    return '【ETF 综合研判·最新】暂无 ETF 综合研判（这项定时任务没开启，或今天还没跑出结果）。';
   return `【ETF 综合研判·最新】${freshness(latest.createdAt)}\n${clip(latest.outputText, 2800)}`;
 }
 
 /** 复盘：最新一次「一键复盘」综合方向/外围/主线/明日策略 */
 function buildReviewBlock(): string {
   const latest = listReviews(3).find((r) => r.outputText);
-  if (!latest) return '【一键复盘·最新】无持久化深度复盘（复盘定时未启用或未产出）。';
+  if (!latest) return '【一键复盘·最新】暂无深度复盘（这项定时任务没开启，或今天还没跑出结果）。';
   const obj = parseJsonObject<Partial<MarketReviewResult>>(latest.outputText);
-  if (!obj) return `【一键复盘·最新】${freshness(latest.createdAt)}\n（结构化解析失败）`;
+  if (!obj) return `【一键复盘·最新】${freshness(latest.createdAt)}\n（这份复盘的内容读不出来）`;
   const lines: string[] = [`【一键复盘·最新】${freshness(latest.createdAt)}`];
   const cs = obj.comprehensiveStance;
   if (cs) {
@@ -135,8 +135,8 @@ function buildReviewBlock(): string {
 function buildPrevPlanReviewBlock(): string {
   const prev = getPreviousReviewedPlan(shanghaiToday());
   if (!prev?.reviewSummary)
-    return '【上一计划复盘·闭环反哺】无已收盘的历史计划复盘（首次运行或上一计划未收盘归档）。';
-  return `【上一计划复盘·闭环反哺】（${prev.planDate} 计划收盘复盘，含次日预案草稿）\n${clip(prev.reviewSummary, 2500)}`;
+    return '【上一计划复盘】暂无已收盘的历史计划复盘（首次运行，或上一份计划还没收盘归档）。';
+  return `【上一计划复盘】（${prev.planDate} 计划收盘复盘，含次日预案草稿）\n${clip(prev.reviewSummary, 2500)}`;
 }
 
 /**
@@ -148,7 +148,7 @@ function buildPrevPlanReviewBlock(): string {
 export async function buildPlanContext(): Promise<string> {
   const liveIndex = await buildLiveIndexBlock();
   return [
-    `今日计划基准（${shanghaiToday()}）——以下为各模块【最新一次持久化 AI 分析】，缺失/非当日已标注，请据时效自行降权：`,
+    `今日计划基准（${shanghaiToday()}）——以下为各模块【最新一次已保存的 AI 分析】，缺失/非当日已标注，请据时效自行降权：`,
     liveIndex,
     buildIntelBlock(),
     buildMarketBoardBlock(),

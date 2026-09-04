@@ -426,10 +426,10 @@ export async function runPlaybookBacktest(spec: PlaybookSpec): Promise<PlaybookB
       ? `卖出条件（${spec.exit.mode === 'all' ? '全部满足' : '任一满足'}）：${spec.exit.rules.map(describeRule).join('；')}`
       : '未配置卖出条件，仅按止损/止盈/持有上限离场',
     `离场兜底：止损 ${spec.stopLossPct ?? '—'}% / 止盈 ${spec.takeProfitPct ?? '—'}% / 持有上限 ${spec.maxHoldBars ?? '—'} 根`,
-    `成交口径：信号收盘确认，次一根 bar ${spec.fill === 'nextClose' ? '收盘' : '开盘'}成交，买入当根不卖（T+1）`,
+    `成交价怎么算：信号收盘确认，下一根 K 线${spec.fill === 'nextClose' ? '收盘' : '开盘'}成交，买入当根不卖（T+1）`,
     `成本：佣金双边 ${costs.commissionBps}bps（最低 ${costs.minCommission} 元，按 ${NOTIONAL} 元名义本金折算费率）` +
       ` + 过户费双边 ${costs.transferFeeBps}bps + 印花税卖出 ${costs.stampDutyBps}bps + 滑点双边 ${costs.slippageBps}bps`,
-    '组合口径：每只标的独立一份资金、同时最多一笔持仓，权益按标的等权合成',
+    '组合怎么算：每只标的独立一份资金、同时最多一笔持仓，总权益按各标的等额合成',
     '权益曲线含持仓期浮动盈亏（按收盘市值计，浮盈尚未扣卖出侧成本）；逐笔收益为已实现、已扣双边成本',
   ];
   const coverage: PlaybookCoverage = {
@@ -443,7 +443,7 @@ export async function runPlaybookBacktest(spec: PlaybookSpec): Promise<PlaybookB
   if (failed.length) notes.push(`以下标的取数失败或样本不足，已跳过：${failed.join('、')}`);
   if (skipped.length) {
     notes.push(
-      `取数超出整轮 ${FETCH_BUDGET_MS / 1000} 秒预算，以下标的未纳入本次回测（结果为部分标的口径）：${skipped.join('、')}`,
+      `取数超出整轮 ${FETCH_BUDGET_MS / 1000} 秒上限，以下标的没跑进这次回测（所以结果只覆盖部分标的）：${skipped.join('、')}`,
     );
   }
   if (coverage.ratio < COVERAGE_WARN_RATIO) {

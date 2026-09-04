@@ -23,8 +23,8 @@ onMounted(() =>
 <template>
   <div v-if="holdings.length" class="expo">
     <div class="expo-title">
-      持仓 / 自选板块暴露
-      <span class="muted">主线板块成分 ∩ 我的标的 · 仅研判</span>
+      我的持仓 / 自选落在哪些板块
+      <span class="muted">主线板块成分股里，有哪些是我的标的 · 仅研判</span>
     </div>
     <div class="expo-list">
       <div v-for="h in holdings" :key="`${h.account}:${h.code}`" class="expo-row">

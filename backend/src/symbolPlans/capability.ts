@@ -53,7 +53,7 @@ export const CAPABILITIES: Record<string, CapabilityEntry> = {
   /** 板块成分广度：只读收盘后日频快照 board_newhigh_snapshots，禁止实时遍历 */
   boardBreadthSnapshot: {
     verdict: 'available',
-    note: '读 board_newhigh_snapshots 日频快照；快照任务未开启或过期时降级',
+    note: '读每日的板块创新高快照；该快照任务没开或已过期时，这项结论会打折扣',
   },
 };
 

@@ -477,7 +477,7 @@ const equityOption = computed<EChartsCoreOption>(() => {
 
           <!-- 口径说明 -->
           <div class="panel notes">
-            <div class="panel-title">口径说明</div>
+            <div class="panel-title">这些数字怎么算的</div>
             <ul>
               <li v-for="(n, i) in result.notes" :key="i">{{ n }}</li>
             </ul>

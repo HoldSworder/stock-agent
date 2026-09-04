@@ -551,7 +551,7 @@ onUnmounted(() => {
           <el-collapse-item name="ai" title="AI 大盘与板块研判结论">
             <BoardReviewConclusion v-if="boardDetail.includes('ai')" />
           </el-collapse-item>
-          <el-collapse-item name="breadth" title="板块新高宽度（确定性主线锚 · 明细）">
+          <el-collapse-item name="breadth" title="板块创新高表现（主线基准 · 明细）">
             <BoardBreadthPanel v-if="boardDetail.includes('breadth')" />
           </el-collapse-item>
           <el-collapse-item name="themes" title="主线题材（多源协同度 · 明细）">

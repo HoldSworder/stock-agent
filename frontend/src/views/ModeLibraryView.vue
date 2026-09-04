@@ -392,7 +392,7 @@ function tagsArr(tags?: string | null): string[] {
                 <span
                   v-if="m.gatePassed === false"
                   class="gate-chip"
-                  title="跟踪样本未通过晋级门（笔数/置信下界/有效簇数/费后收益），收益曲线好看不代表证据充分"
+                  title="跟踪样本未通过达标检验（笔数/置信下界/独立样本数/费后收益），收益曲线好看不代表证据充分"
                 >
                   证据不足
                 </span>
@@ -401,7 +401,9 @@ function tagsArr(tags?: string | null): string[] {
                 <span
                   class="mono"
                   :class="retClass(m.headlineFlatReturn ?? m.headlineReturn)"
-                  :title="m.headlineFlatReturn != null ? '非复利(等权)收益' : '复利收益（暂无非复利口径）'"
+                  :title="
+                    m.headlineFlatReturn != null ? '非复利(每笔等额)收益' : '复利收益（暂无非复利数据）'
+                  "
                 >{{ pctRaw(m.headlineFlatReturn ?? m.headlineReturn) }}</span>
                 <span v-if="m.headlineFlatReturn != null" class="mut sm">等权</span>
                 <span class="mono mut">回撤 {{ pctRaw(m.headlineDrawdown) }}</span>
@@ -477,7 +479,7 @@ function tagsArr(tags?: string | null): string[] {
                 <template v-else>
                   <div class="proto-line" :class="{ stale: !selectedBt.protocol || selectedBt.protocol !== currentProtocol }">
                     <template v-if="!selectedBt.protocol">
-                      协议号缺失：该结果产出于协议号机制之前，规则口径未知，不能作为当前策略的证据。
+                      没有规则版本号：这条结果产出于版本号机制之前，当时用的是哪套规则已不可考，不能作为当前策略的证据。
                     </template>
                     <template v-else-if="selectedBt.protocol !== currentProtocol">
                       旧协议 {{ selectedBt.protocol }}（当前 {{ currentProtocol }}）：规则已改动，该结果不再作为当前证据。
@@ -492,7 +494,7 @@ function tagsArr(tags?: string | null): string[] {
                         class="v mono"
                         :class="retClass(selectedBt.metrics.flatReturn)"
                       >{{ pctRaw(selectedBt.metrics.flatReturn) }}</span>
-                      <span v-else class="v mono mut" title="该旧模式暂无非复利口径">—</span>
+                      <span v-else class="v mono mut" title="该旧模式没有非复利数据">—</span>
                     </div>
                     <div class="kpi">
                       <span class="k">复利收益</span>
@@ -523,7 +525,7 @@ function tagsArr(tags?: string | null): string[] {
                   <div v-if="selectedBt.costSensitivity.length" class="sub-tbl">
                     <div class="sub-h">成本敏感性</div>
                     <table class="mini">
-                      <thead><tr><th>口径</th><th>收益</th><th>回撤</th><th>次数</th></tr></thead>
+                      <thead><tr><th>费用假设</th><th>收益</th><th>回撤</th><th>次数</th></tr></thead>
                       <tbody>
                         <tr v-for="(c, i) in selectedBt.costSensitivity" :key="i">
                           <td>{{ c.caliber }}</td>
@@ -654,10 +656,10 @@ function tagsArr(tags?: string | null): string[] {
                 </div>
               </div>
 
-              <!-- 晋级门体检：收益曲线好看 ≠ 证据充分。逐条给出统计门槛的实测与要求 -->
+              <!-- 达标检验：收益曲线好看 ≠ 证据充分。逐条给出统计门槛的实测与要求 -->
               <div class="gate-box" :class="{ passed: trackingDetail.gate.passed }">
                 <div class="gate-head">
-                  <span class="gate-title">晋级门体检</span>
+                  <span class="gate-title">达标检验</span>
                   <span class="gate-verdict" :class="trackingDetail.gate.passed ? 'ok' : 'bad'">
                     {{ trackingDetail.gate.passed ? '全部通过' : '证据不足' }}
                   </span>

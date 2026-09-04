@@ -81,7 +81,7 @@ onUnmounted(() => store.disconnect());
     <div class="wp-head">
       <div class="wp-title">
         尾盘套利盯盘
-        <el-tag size="small" effect="plain" type="info">无 LLM · 确定性</el-tag>
+        <el-tag size="small" effect="plain" type="info">不用 AI · 按规则计算</el-tag>
         <el-tag v-if="store.status?.inSession" size="small" type="success" effect="plain">交易时段</el-tag>
         <el-tag v-else size="small" type="info" effect="plain">非交易时段</el-tag>
       </div>
@@ -110,7 +110,7 @@ onUnmounted(() => store.disconnect());
       type="warning"
       :closable="false"
       show-icon
-      title="卖点为确定性规则（止损/止盈/移动止盈/尾盘了结），命中即自动模拟卖出；实际下单还需在安全控制台开启「本地自动模拟」总闸。"
+      title="卖点为固定规则（止损/止盈/移动止盈/尾盘了结），触发即自动模拟卖出；实际下单还需在安全控制台开启「本地自动模拟」总闸。"
     />
 
     <!-- 今日信号流 -->

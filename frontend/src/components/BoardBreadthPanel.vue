@@ -77,14 +77,14 @@ onMounted(() => void load().catch((e) => ElMessage.error(e instanceof Error ? e.
   <div class="panel-block" v-loading="loading">
     <div class="block-head">
       <div class="block-title">
-        板块新高宽度 · 主线识别
-        <span v-if="ov" class="sub">（{{ ov.window }}口径 · 全市场新高 {{ ov.marketNewHighTotal }} 只）</span>
+        板块创新高表现 · 主线识别
+        <span v-if="ov" class="sub">（按{{ ov.window }}统计 · 全市场新高 {{ ov.marketNewHighTotal }} 只）</span>
       </div>
       <el-button :icon="Refresh" size="small" :loading="loading || refreshing" @click="refresh">刷新</el-button>
     </div>
     <div class="block-sub">
       统计每个概念/行业板块内创新高个股数并横向排名，「新高数最多、持续多日稳居榜首、且核心股跨日延续」判定主线。
-      阶段只用于收紧动作（能不能开新仓、是否只减不加），不用于放大仓位（确定性只读，仅研判不下单）。
+      阶段只用于收紧动作（能不能开新仓、是否只减不加），不用于放大仓位（按规则计算，仅研判不下单）。
     </div>
 
     <template v-if="ov">
@@ -172,7 +172,10 @@ onMounted(() => void load().catch((e) => ElMessage.error(e instanceof Error ? e.
           </template>
         </el-table-column>
       </el-table>
-      <el-empty v-if="!items.length" description="暂无板块新高数据（创新高/成分股取数降级，请到数据源页检查 AKShare 配置）" />
+      <el-empty
+      v-if="!items.length"
+      description="暂无板块新高数据（创新高/成分股没取到，请到数据源页检查 AKShare 配置）"
+    />
 
       <div class="note">
         {{ ov.note }}

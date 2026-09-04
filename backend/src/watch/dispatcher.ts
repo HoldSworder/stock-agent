@@ -446,7 +446,7 @@ async function processSignal(s: WatchSignal, cfg: WatchConfig): Promise<boolean>
   // 今日计划触发命中：回写计划标的状态(triggered)并记 trigger_hit 事件（仅研判，不下单）
   if (s.type === 'plan_buy' || s.type === 'plan_stop' || s.type === 'plan_take_profit') {
     try {
-      recordWatchTrigger(s.code, s.type, verdict.advice || s.detail, runId);
+      recordWatchTrigger(s.code, s.type, verdict.advice || s.detail, runId, s.price);
     } catch (e) {
       console.warn('[watch] 计划触发回写失败:', e instanceof Error ? e.message : e);
     }

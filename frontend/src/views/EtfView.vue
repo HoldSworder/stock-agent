@@ -498,7 +498,7 @@ onUnmounted(() => {
       <!-- ===================== Tab2 我的跟踪池 ===================== -->
       <el-tab-pane label="我的跟踪池" name="pool">
         <div class="page-sub">
-          独立跟踪池，叠加估值分位、年线偏离、折溢价、动量轮动、网格水位等确定性指标生成买卖信号，仅供研判，不自动下单
+          独立跟踪池，叠加估值分位、年线偏离、折溢价、动量轮动、网格档位等按规则计算的指标生成买卖信号，仅供研判，不自动下单
         </div>
 
         <div class="filters">
@@ -617,7 +617,7 @@ onUnmounted(() => {
       <!-- ===================== Tab3 行业轮动 ===================== -->
       <el-tab-pane label="行业轮动" name="rotation" lazy>
         <div class="page-sub">
-          中线赛道层：跟踪池 + 主题赛道代表 ETF 的相对强弱(RS)/趋势/资金流确定性轮动榜 + 5 态，仅供研判，不自动下单
+          中线赛道层：跟踪池 + 主题赛道代表 ETF 的相对强弱(RS)/趋势/资金流轮动榜（按规则计算）+ 5 态，仅供研判，不自动下单
           <span v-if="rot"> · 更新 {{ dayjs(rot.asOf).format('HH:mm:ss') }}</span>
         </div>
 
@@ -709,13 +709,13 @@ onUnmounted(() => {
         <div class="panel drill-panel" v-loading="drillLoading">
           <div class="drill-head">
             <div>
-              <span class="drill-title">中线下钻</span>
+              <span class="drill-title">从强赛道里挑龙头</span>
               <span class="drill-sub">
-                取轮动榜「上升/加速 + RS 为正」的强赛道 ETF，合并其成分股为 universe，在其中跑中线龙头选股（纯量化）
+                取轮动榜「上升/加速 + RS 为正」的强赛道 ETF，把它们的成分股合成一个候选池，在其中跑中线龙头选股（不调 AI）
               </span>
             </div>
             <el-button type="primary" :loading="drillLoading" @click="runDrilldown">
-              {{ drill ? '重新下钻' : '开始下钻' }}
+              {{ drill ? '重新挑一次' : '开始挑' }}
             </el-button>
           </div>
 
@@ -788,7 +788,7 @@ onUnmounted(() => {
           </template>
           <el-empty
             v-else-if="!drillLoading"
-            description="点「开始下钻」从强赛道 ETF 钻取中线龙头个股"
+            description="点「开始挑」从强赛道 ETF 的成分股里选出中线龙头"
             :image-size="60"
           />
         </div>

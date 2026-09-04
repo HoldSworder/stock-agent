@@ -86,7 +86,7 @@ onMounted(() => void load().catch((e) => ElMessage.error(msg(e))));
   <div class="sentiment-panel" v-loading="loading">
     <div class="panel-head">
       <span class="panel-tip">
-        S1 短线择时总开关 · 确定性 0-100 情绪指数 + 周期阶段（乐咕活跃度 + 东财涨停池合成）
+        短线择时总开关 · 按规则算的 0-100 情绪指数 + 周期阶段（乐咕活跃度 + 东财涨停池合成）
       </span>
       <el-button :icon="Refresh" :loading="loading || refreshing" size="small" @click="refresh">刷新</el-button>
     </div>
@@ -158,7 +158,7 @@ onMounted(() => void load().catch((e) => ElMessage.error(msg(e))));
           type="warning"
           :closable="false"
           show-icon
-          title="部分数据源降级，情绪指数为不完整估计（请到数据源页检查 AKShare 配置）。"
+          title="部分数据没取全，情绪指数为不完整估计（请到数据源页检查 AKShare 配置）。"
           style="margin-top: 12px"
         />
         <div class="note">{{ ov.note }}</div>

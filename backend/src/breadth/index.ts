@@ -47,8 +47,11 @@ export function registerBreadthModule(app: FastifyInstance): void {
     jobs: [
       {
         id: 'breadth.snapshot',
-        label: '板块新高宽度收盘快照（15:20）',
-        defaultCron: '20 15 * * 1-5',
+        // 最重的一个（要遍历全部板块成分），排在三者最后，避开与大盘阶段抢上游
+        label: '板块新高宽度收盘快照（15:25）',
+        defaultCron: '25 15 * * 1-5',
+        // 纯计算不花钱。板块暴露、主线泳道、动作清单的退潮判断都建立在它之上
+        defaultEnabled: true,
         run: async () => {
           await buildBreadthOverview(true);
         },

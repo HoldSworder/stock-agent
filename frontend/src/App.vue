@@ -18,6 +18,7 @@ import {
   Collection,
   // Stopwatch,  // 回测下沉后暂未使用，恢复回测导航时一并取消注释
   Bell,
+  Calendar,
   DataLine,
   ChatLineSquare,
   Notebook,
@@ -81,6 +82,8 @@ const groups = [
     desc: 'TRADE',
     items: [
       { to: '/plan', title: '今日计划', desc: 'War Room', icon: Files },
+      // 归「交易」而非「复盘」：它答的是未来几天在哪转折，是盘前要看的东西
+      { to: '/calendar', title: '转折日历', desc: 'Turning', icon: Calendar },
       { to: '/watch', title: '实时盯盘', desc: 'Watch', icon: Aim },
       { to: '/etf-watch', title: 'ETF多周期盯盘', desc: 'ETF Watch', icon: DataLine },
       { to: '/positions', title: '持仓与自选', desc: 'Account', icon: Wallet },
@@ -91,6 +94,7 @@ const groups = [
     desc: 'REVIEW',
     items: [
       { to: '/review', title: '复盘', desc: 'Review', icon: Memo },
+      { to: '/accuracy', title: '说准率', desc: 'Accuracy', icon: Aim },
       { to: '/strategy', title: '战法模拟', desc: 'Strategy', icon: DataAnalysis },
       { to: '/playbooks', title: '战法库', desc: 'Playbooks', icon: Notebook },
       { to: '/factors', title: '因子探索', desc: 'Factors', icon: Grid },

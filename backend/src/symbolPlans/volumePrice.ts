@@ -7,6 +7,7 @@ import type {
   VolumeReadout,
   VolumeState,
 } from '@stock-agent/shared';
+import { BREAK_CONFIRM } from '@stock-agent/shared';
 
 // 量价证据（计划 4.2）。这是 MVP 真正新增的三项技术计算之一：
 // 成交额比与收盘位置。ATR/均线/枢轴/斐波/MACD 一律复用 market/levels.ts 与 market/indicators.ts，
@@ -157,7 +158,7 @@ function pickBasis(
 function basisText(basis: VolumeBasisReading): string {
   return basis.source === 'amount'
     ? `成交额比 ${basis.ratio.toFixed(2)}（${VOLUME_STATE_LABEL[basis.state]}）`
-    : `成交量比 ${basis.ratio.toFixed(2)}（${VOLUME_STATE_LABEL[basis.state]}，本源无成交额，成交量口径）`;
+    : `成交量比 ${basis.ratio.toFixed(2)}（${VOLUME_STATE_LABEL[basis.state]}，该数据源没有成交额，改用成交量算）`;
 }
 
 /**
@@ -174,6 +175,7 @@ export function computeVolumePrice(input: VolumePriceInput): VolumePriceReading 
   if (!last || bars.length < LOOKBACK + 1) {
     return {
       period,
+      completeBar,
       amountRatio20: null,
       volumeRatio20: null,
       amountState: null,
@@ -195,7 +197,7 @@ export function computeVolumePrice(input: VolumePriceInput): VolumePriceReading 
   const amountUsable = amountMed.count >= MIN_VALID_SAMPLES && amountMed.value > 0;
   if (!amountUsable && amountMed.count > 0) {
     warnings.push(
-      `分母窗口内仅 ${amountMed.count}/${LOOKBACK} 根有成交额（疑似停牌），不足 ${MIN_VALID_SAMPLES} 根，量能结论降级`,
+      `作为分母的这段时间里只有 ${amountMed.count}/${LOOKBACK} 根 K 线有成交额（疑似停牌），不足 ${MIN_VALID_SAMPLES} 根，量能结论只能给个粗判`,
     );
   }
   const amountRatio20 = amountUsable && last.amount > 0 ? last.amount / amountMed.value : null;
@@ -213,8 +215,8 @@ export function computeVolumePrice(input: VolumePriceInput): VolumePriceReading 
   if (amountRatio20 == null && amountMed.count === 0) {
     warnings.push(
       basis != null
-        ? '本源不返回成交额（腾讯 fqkline 日线 / 新浪），量能判定已回退「成交量」口径'
-        : '成交额数据缺失且成交量口径也不可用，量能结论降级',
+        ? '该数据源不给成交额（腾讯 fqkline 日线 / 新浪），量能判定已改用成交量'
+        : '成交额和成交量都取不到，量能结论只能给个粗略判断',
     );
   }
 
@@ -223,6 +225,7 @@ export function computeVolumePrice(input: VolumePriceInput): VolumePriceReading 
     warnings.push('当前 bar 未收完，量能仅作盘中参考，不构成放量/缩量确认');
     return {
       period,
+      completeBar,
       amountRatio20,
       volumeRatio20,
       amountState: null,
@@ -241,6 +244,7 @@ export function computeVolumePrice(input: VolumePriceInput): VolumePriceReading 
   const { pattern, verdict } = buildVerdict(bars, basis, closeLocation);
   return {
     period,
+    completeBar,
     amountRatio20,
     volumeRatio20,
     amountState,
@@ -330,14 +334,16 @@ function buildVerdict(
 
   const ratioText = basisText(basis);
   const locText = closeLoc != null ? `，收盘位置 ${closeLoc.toFixed(2)}` : '';
-  const expanded = ratio >= 1.35;
+  // 门槛取自 shared/BREAK_CONFIRM：详情页速读卡片要按同一套数字渲染三条件清单，
+  // 这里留字面量的话，调阈值后界面会继续照旧数字打勾
+  const expanded = ratio >= BREAK_CONFIRM.downVolumeRatio;
   const down = prev ? last.close < prev.close : false;
 
   // 前高：不含当根的近 LOOKBACK 根最高收盘。窗口必须跟 LOOKBACK 联动，
   // 否则调整 LOOKBACK 后「突破前高」会静默换成另一套口径。
   const prevHigh = Math.max(...bars.slice(-(LOOKBACK + 1), -1).map((b) => b.close));
 
-  if (expanded && down && closeLoc != null && closeLoc <= 0.33) {
+  if (expanded && down && closeLoc != null && closeLoc <= BREAK_CONFIRM.downCloseLocation) {
     return {
       pattern: 'heavy_down',
       verdict: `${ratioText}${locText}：放量下跌，优先判为风险而非资金进场`,
@@ -349,7 +355,12 @@ function buildVerdict(
       verdict: `${ratioText}${locText}：放量滞涨，未突破前高且收盘偏低`,
     };
   }
-  if (ratio >= 1.2 && last.close > prevHigh && closeLoc != null && closeLoc >= 0.67) {
+  if (
+    ratio >= BREAK_CONFIRM.upVolumeRatio &&
+    last.close > prevHigh &&
+    closeLoc != null &&
+    closeLoc >= BREAK_CONFIRM.upCloseLocation
+  ) {
     return { pattern: 'breakout_confirmed', verdict: `${ratioText}${locText}：突破获量能确认` };
   }
   // 与 classifyRatio 的 clear_shrink 用同一边界（< 0.8），避免标签与结论各用一套阈值

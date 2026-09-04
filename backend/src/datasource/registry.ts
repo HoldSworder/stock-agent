@@ -116,10 +116,10 @@ const SOURCES: SourceDef[] = [
     category: '行情',
     protocol: 'http-rest',
     baseUrl: 'www.jisilu.cn',
-    description: 'ETF/可转债 折溢价与 IOPV 权威源。默认开启用于补 ETF 折溢价（优先采用其 discount_rt）；公开端点偶发需 cookie，被限流时填。',
+    description: 'ETF/可转债 折溢价与 IOPV 权威源。默认开启用于补 ETF 折溢价（优先采用其 discount_rt）；公开接口偶发需 cookie，请求被拒时填。',
     enabledKey: 'jisiluEnabled',
     fields: [
-      { key: 'jisiluCookie', label: 'Cookie', secret: true, required: false, placeholder: '可选：jisilu.cn 登录 Cookie（公开端点被限流时填）' },
+      { key: 'jisiluCookie', label: 'Cookie', secret: true, required: false, placeholder: '可选：jisilu.cn 登录 Cookie（公开接口请求被拒时填）' },
     ],
     healthCheck: () => pingJisilu(),
   },
@@ -144,7 +144,7 @@ const SOURCES: SourceDef[] = [
     protocol: 'http-rest',
     baseUrl: 'a-stock-data sidecar → /api/call',
     description:
-      'a-stock-data 全栈 28 端点专属 sidecar（独立容器部署，与 aktools 并行，稳定后可逐步替代）：mootdx 通达信 K线/五档/逐笔/财务（TCP 7709，不封 IP，K线调度首选源）、腾讯估值、百度K线MA、东财研报+行业研报、同花顺一致预期EPS、龙虎榜/全市场龙虎榜/解禁/板块归属/行业排名、两融/大宗/股东户数/分红/资金流、个股新闻/全球资讯、巨潮公告、新浪财报三表。Agent 经 astock_call 按端点名调用；东财端点内置 em_get 串行限流防封。Base URL 填 sidecar 暴露地址（NAS 独立容器为 http://<NAS局域网IP>:9119，如 http://192.168.31.144:9119）。mootdx 需国内 IP（部署在 NAS）。',
+      'a-stock-data 全栈 28 端点专属 sidecar（独立容器部署，与 aktools 并行，稳定后可逐步替代）：mootdx 通达信 K线/五档/逐笔/财务（TCP 7709，不封 IP，K线调度首选源）、腾讯估值、百度K线MA、东财研报+行业研报、同花顺一致预期EPS、龙虎榜/全市场龙虎榜/解禁/板块归属/行业排名、两融/大宗/股东户数/分红/资金流、个股新闻/全球资讯、巨潮公告、新浪财报三表。Agent 经 astock_call 按端点名调用；东财端点内置串行降速防封。Base URL 填 sidecar 暴露地址（NAS 独立容器为 http://<NAS局域网IP>:9119，如 http://192.168.31.144:9119）。mootdx 需国内 IP（部署在 NAS）。',
     enabledKey: 'astockEnabled',
     fields: [
       { key: 'astockBaseUrl', label: 'Base URL', secret: false, required: true, placeholder: 'http://192.168.31.144:9119（NAS 暴露端口）' },
@@ -173,7 +173,7 @@ const SOURCES: SourceDef[] = [
     protocol: 'http-rest',
     baseUrl: 'push2.eastmoney.com',
     description:
-      '隔夜美股龙头/行业 ETF（如 NVDA/SMH）→ A股概念·ETF·个股 的盘前情绪/叙事传导底稿。经东财 push2 抓美股 secid 隔夜涨跌（无鉴权、复用现有通道），叠加人工维护映射表。仅作盘前背景，非择时信号。',
+      '隔夜美股龙头/行业 ETF（如 NVDA/SMH）→ A股概念·ETF·个股 的盘前情绪/叙事传导原始数据。经东财 push2 抓美股 secid 隔夜涨跌（无鉴权、复用现有通道），叠加人工维护映射表。仅作盘前背景，非择时信号。',
     enabledKey: 'usMapEnabled',
     fields: [],
     healthCheck: async () => {
@@ -304,7 +304,7 @@ const SOURCES: SourceDef[] = [
     protocol: 'http-rest',
     baseUrl: 'cls.cn/telegraph（经 AKShare 透传）',
     description:
-      '财经快讯/电报，经 AKShare(aktools) 透传，免鉴权。首选财联社电报（stock_info_global_cls），不可用时按序降级到同花顺/富途/东财/新浪全球快讯；在情报页「财联社电报」Tab 展示。依赖 AKShare 数据源连通；财联社源需较新版 akshare。',
+      '财经快讯/电报，经 AKShare(aktools) 透传，免鉴权。首选财联社电报（stock_info_global_cls），不可用时按序改用同花顺/富途/东财/新浪全球快讯顶上；在情报页「财联社电报」Tab 展示。依赖 AKShare 数据源连通；财联社源需较新版 akshare。',
     enabledKey: 'clsEnabled',
     fields: [],
     healthCheck: () => pingCls(),
@@ -395,11 +395,11 @@ const SOURCES: SourceDef[] = [
   },
   {
     id: 'local',
-    name: '本地 SQLite',
+    name: '本机数据库',
     category: '本地',
     protocol: 'local',
     baseUrl: 'better-sqlite3',
-    description: '本机数据库：自选股 / 持仓快照 / 设置 / 战法 / ETF 池等持久化存储。',
+    description: '存在这台机器上的数据：自选股 / 持仓快照 / 设置 / 战法 / ETF 池等。',
     fields: [],
     healthCheck: async () => {
       sqlite.prepare('SELECT 1').get();

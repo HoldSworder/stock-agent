@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import type {
+  AssertionSource,
   CandidateCatalog,
   CandidateCondition,
   CandidateConditionPurpose,
@@ -14,7 +15,12 @@ import type {
   PriceLevels,
   TradeLevelRole,
 } from '@stock-agent/shared';
-import { PLAN_PERIODS, PLAYBOOK_RULE_CAPABILITY } from '@stock-agent/shared';
+import {
+  CANDIDATE_SOURCE_TO_ASSERTION,
+  PLAN_PERIODS,
+  PLAYBOOK_RULE_CAPABILITY,
+} from '@stock-agent/shared';
+import { currentWeights } from '../assertions/weightService';
 // 直接用 playbook 的纯函数求值，不经 evaluate.ts：那边依赖 repo 与计划实例，
 // 从这里引会成环，且候选阶段根本没有计划可传
 import { buildSeries, evalRule, type Series } from '../playbook/rules';
@@ -122,6 +128,11 @@ export interface CatalogInput {
   /** 有效期（ISO），到期后 contextId 失效 */
   expiresAt: string;
   createdAt: string;
+  /**
+   * 各套方法的可信度权重，只影响候选价位的呈现顺序。
+   * 不传则读当前生效值；自检靠传入不同权重来验证「换权重不改候选集合」。
+   */
+  reliabilityWeights?: Map<AssertionSource, number>;
 }
 
 // ===== 4.11.1 原始候选来源 =====
@@ -822,17 +833,71 @@ export function buildCandidateCatalog(input: CatalogInput): CandidateCatalog {
     warnings.push(`含 ${liveOnly} 条实时专用条件（时间窗），不可进入历史回测 spec`);
   }
 
+  // 目录指纹必须在重排之前算：它是给「目录有没有变」用的，
+  // 呈现顺序换了不等于目录内容变了，否则每次权重微调都会让所有下游认为目录已失效
+  const catalogHash = computeCatalogHash(candidateLevels, conditions);
+
   return {
     contextId: input.contextId,
     candidateModelVersion: CANDIDATE_MODEL_VERSION,
-    catalogHash: computeCatalogHash(candidateLevels, conditions),
-    levels: candidateLevels,
+    catalogHash,
+    levels: reorderByReliability(candidateLevels, input.reliabilityWeights ?? currentWeights()),
     conditions,
     omittedCounts: omitted,
     warnings,
     createdAt: input.createdAt,
     expiresAt: input.expiresAt,
   };
+}
+
+/**
+ * 用各套方法的历史成绩给候选价位重排。
+ *
+ * **只换顺序，不换集合**——这是整个加权设计的安全边界，靠三点保证：
+ * 1. 本函数在裁剪之后才跑，裁剪用的仍是原始分，进目录的还是那批价位
+ * 2. 在 `candidateId` 分配之后才跑，id 里的名次下标不受影响，计划条件的引用不会错位
+ * 3. 在条件生成与目录指纹之后才跑，进 AI 计划的条件与今天完全一致
+ *
+ * 所以最坏情况下加权算错，也只是把好位子排到了后面，不会让任何一个位子凭空消失、
+ * 也不会改变计划能选的东西。这一条由自检钉死。
+ *
+ * 一个簇可能同时被几套方法指到，取其中**最高**的权重：
+ * 簇里只要有一套经得起检验的方法指向这个位子，它就值得优先看，
+ * 不该被同簇里一套差方法拉低——那样等于惩罚了「多方法共振」，与共振本身的含义相反。
+ */
+export function reorderByReliability(
+  levels: CandidateLevel[],
+  weights: Map<AssertionSource, number>,
+): CandidateLevel[] {
+  if (weights.size === 0) return levels;
+  const weightOfLevel = (lv: CandidateLevel): number => {
+    let best = 1;
+    for (const s of lv.sources) {
+      const mapped = CANDIDATE_SOURCE_TO_ASSERTION[s];
+      if (!mapped) continue;
+      const w = weights.get(mapped);
+      if (w != null && w > best) best = w;
+    }
+    return best;
+  };
+  // 分层重排：不同 timeframe 之间的顺序有其他含义（条件轮转靠它），不跨层动
+  const out: CandidateLevel[] = [];
+  for (const period of PLAN_PERIODS) {
+    const slice = levels.filter((l) => l.timeframe === period);
+    const idx = new Map(slice.map((l, i) => [l.candidateId, i]));
+    out.push(
+      ...slice.slice().sort((a, b) => {
+        // 保底价位仍然排最前，加权不该把必须展示的位子挤下去
+        const g = Number(b.guaranteed) - Number(a.guaranteed);
+        if (g !== 0) return g;
+        const d = b.score * weightOfLevel(b) - a.score * weightOfLevel(a);
+        if (Math.abs(d) > 1e-9) return d;
+        // 打平时退回原顺序，保证同输入同输出
+        return (idx.get(a.candidateId) ?? 0) - (idx.get(b.candidateId) ?? 0);
+      }),
+    );
+  }
+  return out;
 }
 
 export const CANDIDATE_LIMITS = {

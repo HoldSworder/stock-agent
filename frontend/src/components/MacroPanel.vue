@@ -31,7 +31,7 @@ onMounted(() => void load());
 <template>
   <div class="macro">
     <div class="macro-head">
-      <span class="macro-tip">宏观·资金面底稿 · 日频/收盘级低频数据 · 定性为环境背景与护栏，非择时信号</span>
+      <span class="macro-tip">宏观·资金面原始数据 · 日频/收盘级低频数据 · 定性为环境背景与护栏，非择时信号</span>
       <el-button size="small" text :loading="loading || refreshing" @click="refresh">刷新</el-button>
     </div>
 

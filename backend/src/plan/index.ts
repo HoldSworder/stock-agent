@@ -51,7 +51,7 @@ export function registerPlanModule(app: FastifyInstance): void {
       },
       {
         id: 'plan.review',
-        label: '收盘复盘闭环',
+        label: '收盘复盘（结论带进明日计划）',
         defaultCron: '30 15 * * 1-5',
         run: async () => {
           await runTask(

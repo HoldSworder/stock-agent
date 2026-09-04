@@ -180,14 +180,14 @@ async function loadAutoSim() {
 
 async function toggleAutoSim(val: string | number | boolean) {
   const on = val === true;
-  // 未过晋级门就开自动模拟 = 拿没有统计支撑的规则去自动下单，必须让人显式确认一次
+  // 未过达标检验就开自动模拟 = 拿没有统计支撑的规则去自动下单，必须让人显式确认一次
   if (on && forward.value && !forward.value.gate.passed) {
     const failed = forward.value.gate.checks.filter((c) => !c.passed).map((c) => c.label);
     try {
       await ElMessageBox.confirm(
-        `本战法尚未通过晋级门（未达标项：${failed.join('、')}）。\n` +
+        `本战法尚未通过达标检验（未达标项：${failed.join('、')}）。\n` +
           '开启后自动模拟将按尚无统计支撑的规则下单，仅建议在明确知道自己在做实验时开启。',
-        '晋级门未通过',
+        '达标检验未通过',
         { type: 'warning', confirmButtonText: '我知道风险，仍然开启', cancelButtonText: '取消' },
       );
     } catch {
@@ -780,7 +780,7 @@ onUnmounted(() => ws?.close());
     <div v-if="vsSim" class="vs-sim" v-loading="vsSimLoading">
       <div class="vs-head">
         <span class="vs-title">真实 vs 模拟绩效对照</span>
-        <span class="vs-meta">只读对照 · 不反哺调参</span>
+            <span class="vs-meta">只做对照 · 不会自动改参数</span>
       </div>
       <div class="vs-grid">
         <div class="vs-card real">
@@ -814,7 +814,7 @@ onUnmounted(() => ws?.close());
             <el-table-column label="胜率" align="right" min-width="68">
               <template #default="{ row }"><span class="num">{{ row.winRate != null ? `${row.winRate}%` : '—' }}</span></template>
             </el-table-column>
-            <el-table-column label="选股口径" min-width="100">
+            <el-table-column label="选股规则" min-width="100">
               <template #default="{ row }"><span class="vs-screen">{{ row.screenStrategyName || '—' }}</span></template>
             </el-table-column>
           </el-table>
@@ -961,10 +961,10 @@ onUnmounted(() => ws?.close());
             </div>
           </div>
 
-          <!-- 前向验证：样本曲线统计 + 自动模拟闸门（确定性只读） -->
+          <!-- 用之后的新数据检验：样本曲线统计 + 自动模拟闸门（按规则计算，只读） -->
           <div v-if="!isMiaoxiang" class="forward-panel" v-loading="forwardLoading">
             <div class="forward-head">
-              <span class="forward-title">前向验证</span>
+              <span class="forward-title">用之后的新数据检验</span>
               <span class="forward-meta">
                 {{ forward?.sinceDate ? `自 ${forward.sinceDate} · ${forward.days} 个样本日` : '尚无样本（收盘后自动采集）' }}
               </span>
@@ -974,7 +974,7 @@ onUnmounted(() => ws?.close());
                 effect="plain"
                 type="warning"
               >
-                选股口径：{{ forward.screenStrategyName }}
+                选股规则：{{ forward.screenStrategyName }}
               </el-tag>
               <el-tag
                 size="small"
@@ -1025,10 +1025,10 @@ onUnmounted(() => ws?.close());
                 </span>
               </div>
             </div>
-            <!-- 晋级门体检：曲线好看不等于证据充分，逐条给出统计门槛 -->
+            <!-- 达标检验：曲线好看不等于证据充分，逐条给出统计门槛 -->
             <div v-if="forward" class="fwd-gate-box" :class="{ passed: forward.gate.passed }">
               <div class="fgb-head">
-                <span class="fgb-title">晋级门体检</span>
+                <span class="fgb-title">达标检验</span>
                 <span class="fgb-verdict" :class="forward.gate.passed ? 'ok' : 'bad'">
                   {{ forward.gate.passed ? '全部通过' : '证据不足' }}
                 </span>
@@ -1259,7 +1259,7 @@ onUnmounted(() => ws?.close());
               <template #empty>暂无历史持仓</template>
             </el-table>
             <p class="hist-note">
-              「卖出后至今」= 现价/均卖价-1：正=卖出后仍涨（卖飞少赚）、负=卖出后下跌（躲跌卖对）。确定性统计，仅供复盘参考。
+              「卖出后至今」= 现价/均卖价-1：正=卖出后仍涨（卖飞少赚）、负=卖出后下跌（躲跌卖对）。按规则统计，仅供复盘参考。
             </p>
           </el-tab-pane>
 
@@ -1525,7 +1525,7 @@ onUnmounted(() => ws?.close());
             />
           </el-select>
           <span class="form-tip">
-            关联后买入标的须来自选股模块该预设选出的候选清单，使买入标准与选股口径同源
+            关联后买入标的须来自选股模块该预设选出的候选清单，让买入标准和选股用同一套规则
           </span>
         </el-form-item>
         <el-form-item label="Skill 自迭代">

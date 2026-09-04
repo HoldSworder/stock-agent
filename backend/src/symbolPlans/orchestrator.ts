@@ -303,7 +303,7 @@ export async function prepareContext(input: PrepareInput): Promise<CachedContext
   if (built.context.dataStatus === 'degraded') {
     marketAction = tighten(marketAction, 'wait');
     primaryAction = tighten(primaryAction, 'wait');
-    reasons.push('关键数据降级，标的动作与情景动作一并收紧为等待');
+    reasons.push('关键数据没取全，标的动作与情景动作一并收紧为等待');
   }
 
   const assetSpecificRisks = [

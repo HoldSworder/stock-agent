@@ -35,7 +35,7 @@ onMounted(() => void load());
 <template>
   <div class="usmap">
     <div class="usmap-head">
-      <span class="usmap-tip">美股映射底稿 · 隔夜美股行业/主题 ETF 排名 → A股概念·ETF 桥接 · 盘前情绪/方向背景，非择时信号</span>
+      <span class="usmap-tip">美股映射原始数据 · 隔夜美股行业/主题 ETF 排名 → A股概念·ETF 桥接 · 盘前情绪/方向背景，非择时信号</span>
       <el-button size="small" text :loading="loading || refreshing" @click="refresh">刷新</el-button>
     </div>
 

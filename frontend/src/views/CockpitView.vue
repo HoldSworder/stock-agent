@@ -10,6 +10,8 @@ import AiAnalysisHub from '@/components/AiAnalysisHub.vue';
 import StockLink from '@/components/StockLink.vue';
 import MoneyEffectBadge from '@/components/MoneyEffectBadge.vue';
 import PanoramaPanel from '@/components/PanoramaPanel.vue';
+import TodayActionPanel from '@/components/TodayActionPanel.vue';
+import IndexFundFlowPanel from '@/components/IndexFundFlowPanel.vue';
 import CockpitFocusPanel from '@/components/CockpitFocusPanel.vue';
 import { EXPO_STATUS_LABEL, EXPO_STATUS_TYPE } from '@/constants/boardTags';
 import type {
@@ -19,7 +21,11 @@ import type {
   CockpitOverview,
   PositionAttributionReport,
   SafetyState,
+  TurningCalendar,
+  TurningExpect,
+  AssertionAccuracyReport,
 } from '@stock-agent/shared';
+import { TURNING_MIN_STREAK, turningActionText } from '@stock-agent/shared';
 
 const data = ref<CockpitOverview | null>(null);
 const loading = ref(false);
@@ -57,6 +63,16 @@ const watchStore = useWatchStore();
 const autoTrades = computed(() => watchStore.trades.slice(0, 8));
 const moneyEffect = computed(() => data.value?.moneyEffect ?? null);
 const modules = computed(() => data.value?.modules ?? []);
+/**
+ * 「今日各家怎么看」：情报 / 大盘板块 / ETF / 复盘 / 情绪 / 选股。
+ *
+ * 原本 12 张卡等权铺网格，占掉半屏却谁也不比谁重要。现在按它回答的问题分流：
+ * 已经变成动作的（纪律、盯盘、计划）不再重复放卡，研究类下沉折叠。
+ */
+const analysisModules = computed(() => modules.value.filter((m) => m.group === 'analysis'));
+/** 研究参考：与今天做什么无关，默认折叠 */
+const researchModules = computed(() => modules.value.filter((m) => m.group === 'research'));
+const researchOpen = ref(false);
 const screenerPicks = computed(() => data.value?.screenerPicks ?? []);
 const events = computed(() => data.value?.events ?? []);
 
@@ -113,8 +129,90 @@ async function load() {
   }
 }
 
+/**
+ * 转折日历单独拉，不挂在上面那条串行链后面。
+ *
+ * 实测挂在链尾时它要等归因与板块暴露都回来才发请求，整整 40 秒后才出现——
+ * 而这张卡的全部意义就是「盘前扫一眼就知道这几天哪天可能转折」，等 40 秒等于没有。
+ * 它只读账本、不依赖上面任何一块的结果，本来就没有串行的理由。
+ */
+async function loadTurning(): Promise<void> {
+  try {
+    turning.value = await api.assertions.calendar({ days: TURNING_DAYS });
+    sideErrors.turning = '';
+  } catch (e) {
+    turning.value = null;
+    sideErrors.turning = e instanceof Error ? e.message : String(e);
+  }
+}
+
+/** 驾驶舱只看未来一周多一点：更远的转折不影响今天要做的事，完整清单去 /calendar */
+const TURNING_DAYS = 10;
+const turning = ref<TurningCalendar | null>(null);
+
+/**
+ * 说准率总体一句话。
+ *
+ * 只在这里给一个总数与入口，不在动作卡上标任何单来源比例——
+ * 安慰剂对照显示六套画线方法没有一套强于同距离随机价位，
+ * 把「黄金分割 51%」贴在动作旁边等于暗示它有预测力。完整统计去 /accuracy。
+ */
+const accuracy = ref<AssertionAccuracyReport | null>(null);
+async function loadAccuracy(): Promise<void> {
+  try {
+    accuracy.value = await api.assertions.report();
+  } catch {
+    accuracy.value = null;
+  }
+}
+
+/** 技术观察折叠区：只报待观察的数量与入口，不参与今天的买卖排序 */
+const techOpen = ref(false);
+const weeklyTurnCount = computed(() => turning.value?.weekly.entries.length ?? 0);
+// 与转折日历页逐字一致：同一条预测在两个页面读到不同说法，比措辞不好更糟
+const EXPECT_LABEL: Record<TurningExpect, string> = {
+  high: '可能见高点',
+  low: '可能见低点',
+  unknown: '方向说不准',
+};
+/** 「8月26日 周三」——带星期，判断「是不是这周内」比看月日快 */
+const TURN_WEEKDAY = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+function turnDateText(iso: string): string {
+  const d = dayjs(iso);
+  return `${d.month() + 1}月${d.date()}日 ${TURN_WEEKDAY[d.day()]}`;
+}
+
 /** 旁路区块的取数失败原因（空串=正常）；显式呈现，避免区块静默消失 */
-const sideErrors = reactive({ attribution: '', exposure: '' });
+const sideErrors = reactive({ attribution: '', exposure: '', turning: '' });
+
+/**
+ * L2 证据区的展开状态，记在 localStorage。
+ *
+ * 默认折叠：这些区块回答的是「为什么」，与动作清单同屏摊开会把「做什么」淹掉。
+ * 但用户一旦展开过就说明他想常看，下次进来不该又给他收上。
+ */
+const EVIDENCE_KEY = 'cockpit:evidenceOpen';
+const evidenceOpen = ref(localStorage.getItem(EVIDENCE_KEY) === '1');
+function toggleEvidence(): void {
+  evidenceOpen.value = !evidenceOpen.value;
+  localStorage.setItem(EVIDENCE_KEY, evidenceOpen.value ? '1' : '0');
+}
+
+/**
+ * 带 #ev-xxx 锚点进来时自动展开证据区并滚过去。
+ *
+ * 没有这一步的话，动作卡上的「查看 →」跳回本页会什么都不发生——
+ * 目标区块正折叠着，用户只会以为链接坏了。
+ */
+function revealAnchor(): void {
+  const id = location.hash.replace(/^#/, '');
+  if (!id.startsWith('ev-')) return;
+  evidenceOpen.value = true;
+  // 等 v-show 那一帧渲染完再滚，否则量到的是折叠状态下的位置
+  requestAnimationFrame(() => {
+    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+}
 
 
 // 贡献（小数）格式化为百分点文本：+0.42pct / -0.18pct
@@ -125,7 +223,7 @@ const dir = (v: number) => (v > 0 ? 'up' : v < 0 ? 'down' : '');
 async function doKill() {
   try {
     const { value } = await ElMessageBox.prompt(
-      '拉下安全总闸后，所有交易/模拟动作（本地战法、妙想模拟、盯盘自动卖出）将被立即拒绝。可填写原因：',
+      '拉下安全总闸后，系统自己下的模拟动作（本地战法、妙想模拟、盯盘自动卖出）将被立即拒绝。\n注意：它管不到你在券商的真实持仓，该止损的还是要自己去止损。可填写原因：',
       '急停确认',
       { confirmButtonText: '确认急停', cancelButtonText: '取消', inputPlaceholder: '急停原因（可选）' },
     );
@@ -207,8 +305,12 @@ const TRADE_KIND_LABEL: Record<'auto_buy' | 'auto_sell' | 'rejected', string> = 
 
 onMounted(() => {
   void load();
+  void loadTurning();
+  void loadAccuracy();
   watchStore.connect();
+  revealAnchor();
 });
+watch(() => route.hash, revealAnchor);
 
 onUnmounted(() => {
   watchStore.disconnect();
@@ -220,24 +322,19 @@ onUnmounted(() => {
     <div class="page-head">
       <div class="page-title">驾驶舱</div>
       <div class="head-actions">
-        <el-button :icon="Refresh" type="primary" :loading="loading" @click="load">刷新</el-button>
+        <el-button :icon="Refresh" type="primary" :loading="loading" @click="load(); loadTurning()">刷新</el-button>
       </div>
     </div>
     <div class="page-sub">
-      系统唯一入口：各页结论收口于此，明细点各块「查看 →」下钻；急停与跨模块事件时间线常驻。
+      系统唯一入口：各页结论都汇总在这里，明细点各块「查看 →」展开；急停与跨模块事件时间线常驻。
       <span v-if="data" class="as-of">更新于 {{ dayjs(data.asOf).format('MM-DD HH:mm:ss') }}</span>
     </div>
 
     <el-tabs v-model="tab" class="cockpit-tabs">
       <el-tab-pane label="驾驶舱" name="cockpit">
         <div v-loading="loading">
-          <!-- 今日全景：四层结论层，统一读模型（与大盘/纪律/计划页同源口径）。
-               大盘阶段、计划兑现、强势主线、主线作战台已并入其中，此处不再重复呈现。 -->
-          <PanoramaPanel />
-
-          <!-- 首板赚钱效应（883994·最近一次快照，完整趋势见大盘页情绪 tab） -->
-          <MoneyEffectBadge v-if="moneyEffect" :money-effect="moneyEffect" class="cockpit-me" />
-
+          <!-- ===== L0 今日总纲：不可折叠。安全状态与数据完整性看不见，
+               整份清单就没法判断可不可信 ===== -->
           <!-- 安全总闸 / 急停 -->
           <div v-if="safety" class="safety-bar" :class="{ killed: safety.killSwitch }">
             <div class="safety-state">
@@ -248,6 +345,9 @@ onUnmounted(() => {
               <div>
                 <div class="safety-title">
                   {{ safety.killSwitch ? '安全总闸已拉下（急停中）' : '安全总闸正常' }}
+                  <!-- 必须点明管辖范围：这个闸只拦系统自己下的模拟单，
+                       券商里的真实持仓它一点都管不到。以为拉了闸就不用管止损，是会亏钱的误解 -->
+                  <span class="safety-scope">只管系统下的模拟单，管不到你在券商的真实持仓</span>
                 </div>
                 <div class="safety-meta">
                   <span class="sw">
@@ -291,7 +391,7 @@ onUnmounted(() => {
                         <li>② <b>自动本地 / 外部模拟</b> 开<span class="gm-loc">本驾驶舱 · 安全条开关</span></li>
                         <li>
                           ③ <b>自动模拟总闸</b> + 该战法 <b>白名单</b> 同时开
-                          <span class="gm-loc">「战法」页 · 总闸在前向验证区，白名单在战法编辑弹窗</span>
+                          <span class="gm-loc">「战法」页 · 总闸在「用之后的新数据检验」区，白名单在战法编辑弹窗</span>
                         </li>
                         <li>④ <b>交易日 + 交易时段</b><span class="gm-loc">系统自动判定，无开关</span></li>
                       </ol>
@@ -324,19 +424,53 @@ onUnmounted(() => {
             </el-button>
           </div>
 
+          <!-- ===== L1 今日动作清单：驾驶舱的主体 =====
+               下面所有区块都降级成它的证据。先回答「今天按顺序做什么」，
+               再让想深究的人往下翻「凭什么这么说」——而不是把几十个读数摊开让人自己合成 -->
+          <TodayActionPanel ref="actionPanel" />
+
+          <!-- 宽基指数资金流：只常驻一行结论，明细点开才看。
+               放在动作清单之后、证据区之前——它不是买卖动作，但每天值得扫一眼，
+               收进默认折叠的证据区等于看不见 -->
+          <IndexFundFlowPanel compact class="cockpit-flow" />
+
+          <!-- ===== L2 证据区：默认折叠 =====
+               这些是上面每条动作的依据。折叠不是嫌它们没用，而是它们回答的是
+               「为什么」而不是「做什么」，同时摊开会把动作淹掉 -->
+          <div class="ev-bar">
+            <button class="ev-toggle" @click="toggleEvidence">
+              {{ evidenceOpen ? '收起' : '展开' }}证据区
+              <span class="ev-hint">{{ evidenceOpen ? '' : '全景 · 关注 · 板块 · 归因 · 转折日' }}</span>
+            </button>
+          </div>
+
+          <div v-show="evidenceOpen" class="ev-region">
+            <!-- 今日全景：四层结论层，统一读模型（与大盘/纪律/计划页同源口径）。
+                 大盘阶段、计划兑现、强势主线、主线作战台已并入其中，此处不再重复呈现。 -->
+            <div id="ev-panorama" class="ev-block">
+              <PanoramaPanel />
+            </div>
+
+            <!-- 首板赚钱效应（883994·最近一次快照，完整趋势见大盘页情绪 tab） -->
+            <MoneyEffectBadge v-if="moneyEffect" :money-effect="moneyEffect" class="cockpit-me" />
+
           <!-- ===== 盘中：我的票有没有风险 / 下一步动作 ===== -->
-          <div class="flow-head"><span class="flow-tag mid">盘中</span>持仓风险 · 主线暴露 · 自动成交</div>
+          <div class="flow-head">
+            <span class="flow-tag mid">盘中</span>持仓风险 · 我的票在不在主线 · 自动成交
+          </div>
 
           <!-- 关注标的：自维护小清单，点标的直达详情弹窗（K线 + 交易规划 + 对话） -->
-          <CockpitFocusPanel />
+          <div id="ev-focus" class="ev-block">
+            <CockpitFocusPanel />
+          </div>
 
           <!-- 持仓/自选板块暴露：我的票是否处于主线 / 退潮 / 拥挤 -->
           <div v-if="sideErrors.exposure" class="side-fail panel">
-            ⚠ 板块暴露取数失败：{{ sideErrors.exposure }}（数据未到，不是功能下线）
+            ⚠ 板块归属取数失败：{{ sideErrors.exposure }}（数据未到，不是功能下线）
           </div>
-          <section v-if="exposure.length" class="panel">
+          <section v-if="exposure.length" id="ev-board-exposure" class="panel ev-block">
             <div class="panel-head">
-              <span class="section-title">持仓 / 自选板块暴露</span>
+              <span class="section-title">我的持仓 / 自选落在哪些板块</span>
               <span class="panel-meta">主线板块成分 ∩ 我的持仓/自选</span>
             </div>
             <div class="expo-list">
@@ -372,7 +506,7 @@ onUnmounted(() => {
           <div v-if="sideErrors.attribution" class="side-fail">
             ⚠ 当日归因取数失败：{{ sideErrors.attribution }}（数据未到，不是功能下线）
           </div>
-          <div v-else-if="attribution && attribution.items.length" class="attr-card">
+          <div v-else-if="attribution && attribution.items.length" id="ev-attribution" class="attr-card ev-block">
             <span class="attr-card-title">当日盈亏归因</span>
             <span class="attr-card-total">
               账户贡献
@@ -392,32 +526,132 @@ onUnmounted(() => {
             </span>
           </div>
 
-          <!-- 模块总结卡：各模块最新一次持久化产出（只读，秒开） -->
+          <!--
+            未来转折：波浪时间位算出来的转折日。系统早就在算，但此前只冻结进账本、
+            没有任何页面展示——实测 8/20 就说出了 8/25 这个低点，没人看得到。
+            这里只给未来 10 天的摘要，完整清单在 /calendar。
+          -->
+          <section v-if="turning?.daily.entries.length || sideErrors.turning" id="ev-turning" class="panel ev-block">
+            <div class="panel-head">
+              <span class="section-title">未来可能转折的日子</span>
+              <span class="panel-meta">
+                <!--
+                  这里只放日线（未来几天要面对的）。周线尺度以月计、且刚开始记录还没有成绩，
+                  放在这张卡里会被读成「先跌到 26 号再涨到 9 月」这种没验证过的剧本
+                -->
+                只看短期（日线）·
+                <!-- 取接口实时值而不是写死百分比，否则样本涨上去后这里还在念旧数 -->
+                <template v-if="turning?.reliability.events.rate != null">
+                  日子说准约 {{ (turning.reliability.events.rate * 100).toFixed(0) }}%（{{
+                    turning.reliability.events.settled
+                  }}
+                  次独立预测）·
+                </template>
+                往哪边转还没验出准头 ·
+                <RouterLink to="/calendar">完整日历</RouterLink>
+              </span>
+            </div>
+            <div v-if="sideErrors.turning" class="side-fail">
+              ⚠ 转折日历取数失败：{{ sideErrors.turning }}（数据未到，不是功能下线）
+            </div>
+            <div v-else class="turn-list">
+              <div
+                v-for="e in turning!.daily.entries"
+                :key="e.date"
+                class="turn-row"
+                :class="{ 'is-weak': e.maxStreak < TURNING_MIN_STREAK || e.superseded }"
+              >
+                <span class="turn-date">{{ turnDateText(e.date) }}</span>
+                <!--
+                  方向还没跑赢基线（系统 12/24，不动脑筋永远猜见高是 14/24），
+                  所以标成实验判断、用中性色，不能拿红绿暗示涨跌结论
+                -->
+                <span class="turn-expect" title="实验性判断，方向尚未验出准头">
+                  实验 · {{ EXPECT_LABEL[e.expect] }}
+                </span>
+                <span v-if="e.superseded" class="turn-streak is-warn">最新分析没再提它</span>
+                <span
+                  v-else
+                  class="turn-streak"
+                  :class="e.maxStreak < TURNING_MIN_STREAK ? 'is-warn' : 'is-strong'"
+                >
+                  {{ e.maxStreak < TURNING_MIN_STREAK ? '首次给出' : `连续 ${e.maxStreak} 天没改口` }}
+                </span>
+                <span class="turn-when num">
+                  {{ e.inDays === 0 ? '就是今天' : `${e.inDays} 个交易日后` }}
+                </span>
+                <span class="turn-codes">
+                  <StockLink
+                    v-for="i in e.items"
+                    :key="i.code"
+                    :code="i.code"
+                    :name="i.label"
+                    :secid="i.secid ?? undefined"
+                    class="turn-code"
+                  />
+                </span>
+                <!-- 文案取自 shared：同一条预测在驾驶舱与日历页读到不同说法比措辞不好更糟 -->
+                <span class="turn-action">{{ turningActionText(e.maxStreak, e.superseded) }}</span>
+              </div>
+            </div>
+          </section>
+
+          </div>
+          <!-- ↑ L2 证据区结束 -->
+
+          <!-- ===== L3 产出与执行记录 =====
+               这层回答的是「系统都产出了什么、我做过什么」，与今天该做什么无关，
+               所以放在最后。仍未解除的风险不会只留在这里——那种必须进上面的动作区 -->
+          <!-- 今日分析摘要：各家怎么看，一项一行。
+               纪律 / 盯盘 / 计划三类不在这里——它们已经是上面动作清单里的动作，
+               再放一张卡等于同一件事说两遍 -->
           <section class="panel module-panel">
             <div class="panel-head">
-              <span class="section-title">模块总结</span>
-              <span class="panel-meta">各模块最新产出 · 点卡片查看全文</span>
+              <span class="section-title">今日分析摘要</span>
+              <span class="panel-meta">各模块最新产出 · 点一行看全文</span>
             </div>
-            <div class="module-grid">
+            <div class="ana-list">
               <button
-                v-for="m in modules"
+                v-for="m in analysisModules"
                 :key="m.key"
-                class="module-card"
+                class="ana-row"
                 :class="{ stale: m.stale, empty: !m.createdAt }"
                 type="button"
                 @click="goModule(m)"
               >
-                <div class="mc-head">
-                  <span class="mc-title">{{ m.title }}</span>
-                  <span v-if="m.stale && m.createdAt" class="mc-stale">非当日</span>
-                </div>
-                <div v-if="m.headline" class="mc-headline">{{ m.headline }}</div>
-                <div class="mc-excerpt">{{ m.excerpt }}</div>
-                <div class="mc-foot">
-                  <span class="mc-time num">{{ m.createdAt ? dayjs(m.createdAt).format('MM-DD HH:mm') : '—' }}</span>
-                  <span class="mc-link">查看全文 →</span>
-                </div>
+                <span class="ana-title">{{ m.title }}</span>
+                <span class="ana-body">
+                  <b v-if="m.headline" class="ana-headline">{{ m.headline }}</b>
+                  <span class="ana-excerpt">{{ m.excerpt }}</span>
+                </span>
+                <span v-if="m.stale && m.createdAt" class="mc-stale">非当日</span>
+                <span class="ana-time num">{{ m.createdAt ? dayjs(m.createdAt).format('MM-DD HH:mm') : '—' }}</span>
               </button>
+            </div>
+
+            <!-- 研究参考：与今天做什么无关，默认折叠 -->
+            <div v-if="researchModules.length" class="research-fold">
+              <button class="ev-toggle" @click="researchOpen = !researchOpen">
+                {{ researchOpen ? '收起' : '展开' }}研究参考
+                <span class="ev-hint">{{ researchModules.map((m) => m.title).join(' · ') }}</span>
+              </button>
+              <div v-show="researchOpen" class="ana-list">
+                <button
+                  v-for="m in researchModules"
+                  :key="m.key"
+                  class="ana-row"
+                  :class="{ stale: m.stale, empty: !m.createdAt }"
+                  type="button"
+                  @click="goModule(m)"
+                >
+                  <span class="ana-title">{{ m.title }}</span>
+                  <span class="ana-body">
+                    <b v-if="m.headline" class="ana-headline">{{ m.headline }}</b>
+                    <span class="ana-excerpt">{{ m.excerpt }}</span>
+                  </span>
+                  <span class="ana-time num">{{ m.createdAt ? dayjs(m.createdAt).format('MM-DD HH:mm') : '—' }}</span>
+                </button>
+              </div>
             </div>
             <!-- 最新选股候选速览 -->
             <div v-if="screenerPicks.length" class="screener-picks">
@@ -430,6 +664,46 @@ onUnmounted(() => {
                   <span v-if="p.confidence != null" class="sp-conf num">信心{{ p.confidence }}</span>
                   <span v-if="p.thesis" class="sp-thesis">{{ p.thesis }}</span>
                 </div>
+              </div>
+            </div>
+          </section>
+
+          <!--
+            技术观察：波浪 / 共振 / 周线转折。
+            默认折叠且**只报数量与入口**，不进今天的买卖排序——
+            安慰剂对照显示这几套画线方法还没证明强于同距离随机价位，
+            让它们独立生成买卖动作是拿没验证过的东西指挥仓位。
+          -->
+          <section class="panel tech-panel">
+            <button class="ev-toggle" @click="techOpen = !techOpen">
+              {{ techOpen ? '收起' : '展开' }}技术观察
+              <span class="ev-hint">周线转折 {{ weeklyTurnCount }} 个 · 波浪与共振 · 说准率</span>
+            </button>
+            <div v-show="techOpen" class="tech-body">
+              <div class="tech-row">
+                <span class="tech-k">周线级转折</span>
+                <span class="tech-v">
+                  {{ weeklyTurnCount ? `${weeklyTurnCount} 个待观察日` : '暂无' }}，时间尺度以月计，只作记号不据此买卖
+                </span>
+                <RouterLink to="/calendar" class="tech-go">完整日历 →</RouterLink>
+              </div>
+              <div class="tech-row">
+                <span class="tech-k">波浪与共振</span>
+                <span class="tech-v">
+                  按标的看：点任一标的打开详情弹窗，勾选波浪图层，速读卡里有共振价位与破位确认条件
+                </span>
+              </div>
+              <div class="tech-row">
+                <span class="tech-k">说准率</span>
+                <span class="tech-v">
+                  <template v-if="accuracy">
+                    已判定 {{ accuracy.overall.settled }} 条，说准
+                    {{ accuracy.overall.rate != null ? `${(accuracy.overall.rate * 100).toFixed(0)}%` : '样本还不够' }}。
+                    各方法之间的差别尚未证明强于随机同距离价位，所以动作卡上不标单项比例
+                  </template>
+                  <template v-else>统计还没取到</template>
+                </span>
+                <RouterLink to="/accuracy" class="tech-go">完整统计 →</RouterLink>
               </div>
             </div>
           </section>
@@ -483,6 +757,137 @@ onUnmounted(() => {
   margin-top: 4px;
 }
 
+/* ---- 今日分析摘要（原 12 张等权卡网格改为一项一行）---- */
+.ana-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.ana-row {
+  display: grid;
+  grid-template-columns: 96px 1fr auto auto;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 7px 8px;
+  border: none;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  border-radius: 4px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  color: var(--el-text-color-primary);
+}
+.ana-row:hover {
+  background: var(--el-fill-color-light);
+}
+.ana-row.empty {
+  opacity: 0.55;
+}
+.ana-title {
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.ana-body {
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--el-text-color-regular);
+}
+.ana-headline {
+  margin-right: 6px;
+  color: var(--el-text-color-primary);
+}
+.ana-excerpt {
+  /* 摘要只给一行：它的作用是判断要不要点进去，不是在这里读完 */
+  display: -webkit-box;
+  -webkit-line-clamp: 1;
+  line-clamp: 1;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.ana-time {
+  font-size: 11.5px;
+  color: var(--el-text-color-secondary);
+  white-space: nowrap;
+}
+.research-fold {
+  margin-top: 10px;
+}
+@media (max-width: 900px) {
+  .ana-row {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+}
+
+/* ---- 技术观察折叠区 ---- */
+.tech-body {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.tech-row {
+  display: grid;
+  grid-template-columns: 88px 1fr auto;
+  gap: 10px;
+  align-items: baseline;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+.tech-k {
+  font-weight: 600;
+  color: var(--el-text-color-primary);
+  white-space: nowrap;
+}
+.tech-v {
+  color: var(--el-text-color-regular);
+}
+.tech-go {
+  white-space: nowrap;
+}
+@media (max-width: 900px) {
+  .tech-row {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* ---- L2 证据区 ---- */
+.ev-bar {
+  margin: 4px 0 12px;
+}
+.ev-toggle {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 12px;
+  border: 1px dashed var(--el-border-color);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--el-text-color-regular);
+  font-size: 13px;
+  cursor: pointer;
+}
+.ev-toggle:hover {
+  border-color: var(--el-color-primary);
+  color: var(--el-color-primary);
+}
+.ev-hint {
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+}
+/* 锚点跳转后留出顶部余量，否则标题会贴在视口最上沿被导航挡住 */
+.ev-block {
+  scroll-margin-top: 72px;
+}
+
+/* 资金面常驻行：贴着动作清单，与下方证据区留出间距 */
+.cockpit-flow {
+  margin: 12px 0 4px;
+}
+
 /* ---- 安全总闸 / 急停 ---- */
 .cockpit-me {
   margin: 0 0 12px;
@@ -525,6 +930,13 @@ onUnmounted(() => {
   font-weight: 600;
   font-size: 14.5px;
   color: var(--text-0);
+}
+.safety-scope {
+  margin-left: 8px;
+  font-family: var(--font-body, inherit);
+  font-weight: 400;
+  font-size: 12px;
+  color: var(--text-2, var(--el-text-color-secondary));
 }
 .safety-meta {
   display: flex;
@@ -973,6 +1385,79 @@ onUnmounted(() => {
   color: #e6a23c;
   line-height: 1.6;
   margin: 8px 0;
+}
+/* 未来转折：每个预测日一行 */
+.turn-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.turn-row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  padding: 5px 0;
+  font-size: 12.5px;
+  border-bottom: 1px dashed var(--border);
+}
+.turn-row:last-child {
+  border-bottom: none;
+}
+/* 连续天数不够的条目实测只有 20% 命中，压暗不让它抢注意力 */
+.turn-row.is-weak {
+  opacity: 0.7;
+}
+.turn-date {
+  min-width: 108px;
+  font-weight: 600;
+  color: var(--text-0);
+}
+.turn-when {
+  color: var(--text-2);
+  font-size: 11.5px;
+}
+/* 动作提示独占一行，缩进到日期之后 */
+.turn-action {
+  flex-basis: 100%;
+  margin-left: 108px;
+  color: var(--text-1);
+  font-size: 11.5px;
+}
+.turn-expect {
+  padding: 0 6px;
+  border-radius: 3px;
+  font-size: 11.5px;
+}
+/* A 股红涨绿跌：见高点用红、见低点用绿 */
+.turn-expect.is-high {
+  background: rgba(246, 70, 93, 0.12);
+  color: var(--up, #f6465d);
+}
+.turn-expect.is-low {
+  background: rgba(31, 199, 127, 0.12);
+  color: var(--down, #1fc77f);
+}
+.turn-expect.is-unknown {
+  color: var(--text-2);
+}
+/* 连续天数是本卡唯一有实测支撑的强弱信号 */
+.turn-streak {
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+.turn-streak.is-strong {
+  color: var(--status-warn);
+  font-weight: 600;
+}
+.turn-streak.is-warn {
+  color: var(--text-2);
+}
+.turn-codes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: auto;
 }
 /* 持仓板块暴露行 */
 .expo-list {

@@ -410,7 +410,7 @@ export const miaoxiang = {
     // 故障重试后吞成通用报错。这里只对限流(112)重试，其余（含拒单）一律直接返回完整响应体，
     // 让 code / message 等拒单原因原样透传给调用方（mx_trade 会 preview 给模型据实回复）。
     return postJson(ENDPOINTS.trade, payload, 5, undefined, (json) =>
-      isRateLimited(json) ? '妙想下单被限流(code=112)，重试' : null,
+      isRateLimited(json) ? '妙想下单请求太频繁被拒(code=112)，重试' : null,
     );
   },
   cancel(p: CancelParams) {

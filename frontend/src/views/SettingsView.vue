@@ -148,7 +148,7 @@ onMounted(load);
   <div class="page">
     <div class="page-head"><div class="page-title">系统设置</div></div>
     <div class="page-sub">
-      数据源凭据 / 模型与推送 / 数据库运维统一收口于此。三类配置后端接口各自独立。
+      数据源凭据 / 模型与推送 / 数据库维护都集中在这里。三类配置各自独立保存。
     </div>
 
     <el-tabs v-model="tab" class="settings-tabs">

@@ -12,6 +12,8 @@ import type {
   PlanFulfillment,
   PlanItemStatus,
   PlanTrigger,
+  PlanTriggerHitPayload,
+  PlanTriggerKind,
   RunTrigger,
 } from '@stock-agent/shared';
 import { isIndividualStock } from '../decision/sellcheck';
@@ -22,7 +24,7 @@ import { getPrompt, PROMPT_KEYS, registerPromptDef } from '../agent/promptConfig
 import { signals as etfSignals } from '../etf/service';
 import { fetchRealPositions } from '../realPositions';
 import { buildRotationOverview, formatForAgent } from '../rotation/service';
-import { shanghaiToday } from '../util';
+import { nowIso, shanghaiToday } from '../util';
 import * as repo from './repo';
 
 // 今日计划业务封装：按 Asia/Shanghai 推算当日，负责生成落库（save）、盘中读取/对照（get/update）、
@@ -653,33 +655,77 @@ export async function runPlanGeneration(opts: {
   return result;
 }
 
+/** 盯盘信号类型 → 计划触发器。认不出的信号一律给 null，不猜 */
+const SIGNAL_TO_TRIGGER_KIND: Record<string, PlanTriggerKind> = {
+  plan_buy: 'buy',
+  plan_stop: 'stop_loss',
+  plan_take_profit: 'take_profit',
+};
+
+/** 取该触发器在计划项上设定的价位 */
+function triggerValueOf(item: DailyPlanItem, kind: PlanTriggerKind | null): number | null {
+  if (!kind) return null;
+  const t =
+    kind === 'buy'
+      ? item.buyTrigger
+      : kind === 'sell'
+        ? item.sellTrigger
+        : kind === 'stop_loss'
+          ? item.stopLoss
+          : item.takeProfit;
+  return t?.value ?? null;
+}
+
 /** 盘中对照回写某标的状态/备注，记 note/trigger_hit 事件 */
 export function updateItem(
   code: string,
   status: PlanItemStatus | undefined,
   note: string | null,
   runId: string | null,
+  /**
+   * 触发的是哪个触发器。调用方知道就传，不知道就别传——
+   * 留空会如实记成「原因未记录」，好过猜一个错的出来
+   */
+  triggerKind?: PlanTriggerKind,
 ): DailyPlanItem | null {
   const plan = getTodayPlan();
   if (!plan) return null;
   const item = repo.updateItemByCode(plan.id, code, { status, note });
   if (!item) return null;
+  const triggered = status === 'triggered';
+  const payload: PlanTriggerHitPayload | { code: string; status?: string; note: string | null } =
+    triggered
+      ? {
+          code,
+          triggerKind: triggerKind ?? null,
+          triggerValue: triggerValueOf(item, triggerKind ?? null),
+          triggeredAt: nowIso(),
+          observedPrice: null,
+          note,
+        }
+      : { code, status, note };
   repo.appendEvent({
     planId: plan.id,
     itemId: item.id,
-    kind: status === 'triggered' ? 'trigger_hit' : 'note',
-    payload: { code, status, note },
+    kind: triggered ? 'trigger_hit' : 'note',
+    payload,
     runId,
   });
   return item;
 }
 
-/** 盯盘命中回写：标记 triggered（仅当前为 pending）并记事件 */
+/**
+ * 盯盘命中回写：标记 triggered（仅当前为 pending）并记事件。
+ *
+ * @param observedPrice 触发那一刻的价格。动作清单要拿它和触发价对比，
+ *   判断是刚刚穿过还是已经走远，不记就只能显示「触发过」这种没法操作的信息
+ */
 export function recordWatchTrigger(
   code: string,
   signalType: string,
   note: string,
   runId: string | null,
+  observedPrice?: number | null,
 ): void {
   const plan = getTodayPlan();
   if (!plan) return;
@@ -688,13 +734,51 @@ export function recordWatchTrigger(
   if (!item) return;
   const nextStatus: PlanItemStatus = item.status === 'pending' ? 'triggered' : item.status;
   repo.updateItemByCode(plan.id, code, { status: nextStatus, note });
+  const triggerKind = SIGNAL_TO_TRIGGER_KIND[signalType] ?? null;
+  const payload: PlanTriggerHitPayload = {
+    code,
+    triggerKind,
+    triggerValue: triggerValueOf(item, triggerKind),
+    triggeredAt: nowIso(),
+    observedPrice: observedPrice ?? null,
+    note,
+  };
   repo.appendEvent({
     planId: plan.id,
     itemId: item.id,
     kind: 'trigger_hit',
-    payload: { code, signalType, note },
+    // signalType 保留：动作层认 triggerKind，排障时还想知道原始信号名
+    payload: { ...payload, signalType },
     runId,
   });
+}
+
+/**
+ * 读回某计划项最近一次触发的原因。
+ *
+ * 读不到、或当时没记 triggerKind 时返回 kind=null，调用方必须显示
+ * `PLAN_TRIGGER_UNKNOWN_TEXT` 而不是挑一个默认值——把老记录当成止损会凭空生成卖出建议。
+ */
+export function lastTriggerHitOf(planId: string, itemId: string): PlanTriggerHitPayload | null {
+  // listEvents 已按时间倒序，第一条就是最近一次
+  const last = repo
+    .listEvents(planId, 300)
+    .find((e) => e.kind === 'trigger_hit' && e.itemId === itemId);
+  if (!last?.payload) return null;
+  try {
+    const p = JSON.parse(last.payload) as Partial<PlanTriggerHitPayload>;
+    return {
+      code: p.code ?? '',
+      // 老记录没有这个字段，解析出来是 undefined，一律归为「未记录」
+      triggerKind: p.triggerKind ?? null,
+      triggerValue: p.triggerValue ?? null,
+      triggeredAt: p.triggeredAt ?? last.ts,
+      observedPrice: p.observedPrice ?? null,
+      note: p.note ?? null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 /** 是否设了任一触发价（买/卖/损/盈），作为兑现率分母判定 */

@@ -142,6 +142,6 @@ export async function buildMainlineConsensus(): Promise<MainlineConsensus> {
   return {
     asOf: nowIso(),
     items,
-    note: '主线共识：以确定性「板块新高宽度」为锚，叠加多源协同度与中线趋势三方对齐（仅研判不下单，仅供参考）。',
+    note: '主线共识：以按规则算出的「板块创新高表现」为基准，叠加多源协同度与中线趋势三方对齐（仅研判不下单，仅供参考）。',
   };
 }

@@ -48,6 +48,12 @@ export const INDEX_DEFS: readonly IndexDef[] = [
   { key: 'SSEC', name: '上证指数', secid: '1.000001', aliases: ['ssec', '上证', '上证指数', '大盘'] },
   { key: 'SZSE', name: '深证成指', secid: '0.399001', aliases: ['szse', '深成指', '深证成指', '深成'] },
   { key: 'CHINEXT', name: '创业板指', secid: '0.399006', aliases: ['chinext', '创业板', '创业板指', '创指'] },
+  {
+    key: 'CSI1000',
+    name: '中证1000',
+    secid: '1.000852',
+    aliases: ['csi1000', '中证1000', '中证一千', '000852', '中小盘'],
+  },
   { key: 'STAR50', name: '科创50', secid: '1.000688', aliases: ['star50', '科创50', '科创板50', '科创'] },
   { key: 'BSE50', name: '北证50', secid: '0.899050', aliases: ['bse50', '北证50', '北交所50', '北证'] },
   { key: 'XIN9', name: '富时中国A50', secid: '100.XIN9', aliases: ['xin9', 'a50', '富时a50', '富时中国a50'] },

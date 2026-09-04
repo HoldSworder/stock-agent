@@ -12,7 +12,7 @@ export async function buildDragonOverview(): Promise<DragonOverview> {
 /** 龙头梯队文本摘要（注入 agent 研判/决策的确定性底稿） */
 export function formatDragonForAgent(ov: DragonOverview): string {
   const lines: string[] = [
-    `连板梯队龙头辨识（${ov.asOf.slice(0, 10)}${ov.stale ? '·数据降级' : ''}）`,
+    `连板梯队龙头辨识（${ov.asOf.slice(0, 10)}${ov.stale ? '·数据没取全' : ''}）`,
     `涨停 ${ov.limitUpCount} 只 ｜最高 ${ov.maxStreak} 连板 ｜炸板率 ${ov.brokenRate.toFixed(1)}%`,
   ];
   if (ov.topDragon) {

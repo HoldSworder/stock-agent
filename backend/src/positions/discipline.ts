@@ -64,12 +64,20 @@ export function isEtfPosition(code: string, name: string): boolean {
   return /^(15\d{4}|5\d{5})$/.test(code) || /ETF|LOF/i.test(name);
 }
 
-/** 取 ETF 跟踪池信号（best-effort，动态导入避免与 agent/runner 形成静态循环依赖） */
-async function loadEtfSignals(): Promise<Map<string, EtfSignal>> {
+/**
+ * 取**手上这几只** ETF 的信号（best-effort，动态导入避免与 agent/runner 形成静态循环依赖）。
+ *
+ * 早先这里调的是全池 `signals()`：只要账户里有一只 ETF，就会把跟踪池里每一只都算一遍、
+ * 每只单独拉一次实时行情。实测这让 `evaluateDiscipline()` 要跑 9-11 秒，
+ * 而驾驶舱动作清单每次刷新都要等它——盘中轮询会把这个开销变成常态。
+ *
+ * 纪律只用到每只自己的 stopLoss / takeProfit，跨池排名用不上，所以定向算就够了。
+ */
+async function loadEtfSignals(codes: string[]): Promise<Map<string, EtfSignal>> {
+  if (codes.length === 0) return new Map();
   try {
     const etf = await import('../etf/service');
-    const result = await etf.signals();
-    return new Map(result.signals.map((s) => [s.code, s]));
+    return await etf.signalsFor(codes);
   } catch {
     return new Map();
   }
@@ -340,9 +348,9 @@ export async function evaluateDiscipline(portfolio?: RealPortfolio): Promise<Dis
   const regimePhase = readRegimePhase();
   const budget = budgetForPhase(regimePhase);
 
-  // 仅当存在 ETF 持仓时才拉取 ETF 信号，避免纯个股账户多打一次行情接口
-  const hasEtf = pf.positions.some((p) => isEtfPosition(p.code, p.name));
-  const etfSignals = hasEtf ? await loadEtfSignals() : new Map<string, EtfSignal>();
+  // 只算真实持有的那几只 ETF，不遍历整个跟踪池
+  const etfCodes = pf.positions.filter((p) => isEtfPosition(p.code, p.name)).map((p) => p.code);
+  const etfSignals = await loadEtfSignals(etfCodes);
 
   // 日线用于 ATR 与跳空分位；走 W1 的本地缓存，命中即秒回，取不到就退化为「只按结构止损」
   const barsByCode = await loadBars(pf.positions.map((p) => p.code));

@@ -42,7 +42,7 @@ watch(tab, (v) => {
       </div>
     </div>
     <div class="page-sub">
-      多平台热点情报与机构研报集中收口；AI 研判由本系统 LLM 现场生成，并回流今日计划。
+      多平台热点情报与机构研报都汇总在这里；AI 研判由本系统现场生成，并带进今日计划。
     </div>
 
     <el-tabs v-model="tab" class="intel-hub-tabs">

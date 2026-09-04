@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue';
+import { useRoute } from 'vue-router';
 import { ElMessage } from 'element-plus';
 import { Refresh, VideoPlay, Check, CaretRight } from '@element-plus/icons-vue';
 import { api } from '@/api';
@@ -18,6 +19,61 @@ const expanded = reactive<Record<string, boolean>>({});
 
 const centralCount = computed(() => items.value.filter((i) => i.type === 'central').length);
 const moduleCount = computed(() => items.value.filter((i) => i.type === 'module').length);
+
+/**
+ * 搜索与筛选。
+ *
+ * 这一页原本是 40 多条中央任务与模块定时的混排单列表，没有搜索也没有分组——
+ * 想确认「板块宽度快照到底有没有在跑」只能拿眼睛一行行扫。
+ * 实际后果是几个关键快照任务关了三周没人发现，驾驶舱一直在拿三周前的数据当今天的判断。
+ */
+const keyword = ref('');
+const onlyAttention = ref(false);
+
+/** 上次成功超过这么久就算「可能没在跑」，与驾驶舱的断供门槛同量级 */
+const STALE_SUCCESS_MS = 3 * 24 * 3600_000;
+
+/** 这条需要人处理吗：没启用，或启用了却长期没成功过 */
+function needsAttention(i: ScheduleOverviewItem): boolean {
+  if (!i.enabled) return true;
+  if (!i.lastSuccessAt) return true;
+  return Date.now() - new Date(i.lastSuccessAt).getTime() > STALE_SUCCESS_MS;
+}
+
+const attentionCount = computed(() => items.value.filter(needsAttention).length);
+
+const filtered = computed(() => {
+  const kw = keyword.value.trim().toLowerCase();
+  return items.value.filter((i) => {
+    if (onlyAttention.value && !needsAttention(i)) return false;
+    if (!kw) return true;
+    return (
+      i.name.toLowerCase().includes(kw) ||
+      i.id.toLowerCase().includes(kw) ||
+      (i.module ?? '').toLowerCase().includes(kw)
+    );
+  });
+});
+
+/** 按模块分组，中央任务归到一组置顶。组内保持后端给的顺序 */
+const groups = computed(() => {
+  const map = new Map<string, ScheduleOverviewItem[]>();
+  for (const i of filtered.value) {
+    const key = i.type === 'central' ? '中央任务' : (i.module ?? '其他');
+    map.set(key, [...(map.get(key) ?? []), i]);
+  }
+  const entries = [...map.entries()];
+  entries.sort((a, b) => {
+    if (a[0] === '中央任务') return -1;
+    if (b[0] === '中央任务') return 1;
+    return a[0].localeCompare(b[0]);
+  });
+  return entries.map(([name, rows]) => ({
+    name,
+    rows,
+    attention: rows.filter(needsAttention).length,
+  }));
+});
 
 function fmt(iso: string | null): string {
   if (!iso) return '—';
@@ -93,7 +149,19 @@ async function trigger(i: ScheduleOverviewItem): Promise<void> {
   }
 }
 
-onMounted(load);
+/**
+ * 支持从驾驶舱的断供提示带条件跳进来。
+ *
+ * `?q=breadth` 直接定位到板块宽度那一条，`?attention=1` 只看需要处理的。
+ * 没有这个，提示里说「去调度页开启」等于把人丢进 40 多条列表里自己找。
+ */
+const route = useRoute();
+onMounted(() => {
+  const q = route.query.q;
+  if (typeof q === 'string') keyword.value = q;
+  if (route.query.attention === '1') onlyAttention.value = true;
+  void load();
+});
 </script>
 
 <template>
@@ -103,9 +171,24 @@ onMounted(load);
         全部唤起 agent 的定时来源：中央任务（带 prompt / 战法 / 模型配置）+ 各模块内置流程定时。可就地开关、改 cron、立即触发。
       </div>
       <div class="head-actions">
+        <el-input
+          v-model="keyword"
+          size="small"
+          clearable
+          placeholder="搜任务名 / 模块"
+          style="width: 180px"
+        />
+        <el-checkbox v-model="onlyAttention" size="small">
+          只看需要处理<span v-if="attentionCount" class="att-n">{{ attentionCount }}</span>
+        </el-checkbox>
         <span class="head-stat">中央 {{ centralCount }} · 模块 {{ moduleCount }}</span>
         <el-button size="small" :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
       </div>
+    </div>
+    <!-- 「需要处理」= 没启用，或启用了却超过 3 天没成功过。
+         关掉的定时不会报错，只会让数据安静地停在某一天，这个筛选是唯一能主动发现它的入口 -->
+    <div class="attention-hint">
+      需要处理 = 没启用，或启用了但超过 3 天没成功过。定时关掉不会报错，只会让数据停更。
     </div>
 
     <el-skeleton v-if="loading" :rows="6" animated style="margin-top: 16px" />
@@ -120,8 +203,14 @@ onMounted(load);
         <span class="c-act">操作</span>
       </div>
 
-      <template v-for="i in items" :key="i.id">
-        <div class="row" :class="{ off: !i.enabled }">
+      <template v-for="g in groups" :key="g.name">
+        <div class="group-head">
+          <span class="g-name">{{ g.name }}</span>
+          <span class="g-count">{{ g.rows.length }} 条</span>
+          <span v-if="g.attention" class="g-att">{{ g.attention }} 条需处理</span>
+        </div>
+        <template v-for="i in g.rows" :key="i.id">
+        <div class="row" :class="{ off: !i.enabled, attention: needsAttention(i) }">
           <div class="c-name">
             <div class="name-line">
               <button
@@ -200,9 +289,14 @@ onMounted(load);
         <div v-if="i.type === 'central' && expanded[i.id]" class="prompt-box">
           <pre class="prompt-text">{{ i.prompt || '（无 prompt）' }}</pre>
         </div>
+        </template>
       </template>
 
-      <el-empty v-if="!items.length" description="暂无调度" :image-size="64" />
+      <el-empty
+        v-if="!filtered.length"
+        :description="items.length ? '没有符合条件的调度' : '暂无调度'"
+        :image-size="64"
+      />
     </div>
   </div>
 </template>
@@ -230,6 +324,46 @@ onMounted(load);
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--text-2);
+}
+.att-n {
+  margin-left: 4px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--el-color-warning);
+  color: #fff;
+  font-size: 11px;
+  font-family: var(--font-mono);
+}
+.attention-hint {
+  margin-top: 8px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.group-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 8px 12px 4px;
+  background: var(--bg-1, transparent);
+  border-top: 1px solid var(--border);
+}
+.g-name {
+  font-weight: 600;
+  font-size: 12.5px;
+}
+.g-count,
+.g-att {
+  font-size: 11.5px;
+  color: var(--text-2);
+  font-family: var(--font-mono);
+}
+.g-att {
+  color: var(--el-color-warning);
+}
+.row.attention .c-name {
+  /* 需要处理的行给一条左边线，扫一眼就能定位，不必逐行读「上次成功」 */
+  box-shadow: inset 2px 0 0 var(--el-color-warning);
+  padding-left: 6px;
 }
 
 .list {

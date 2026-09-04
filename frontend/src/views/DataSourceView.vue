@@ -211,10 +211,10 @@ onMounted(() => {
       </div>
     </div>
     <div v-if="!embedded" class="page-sub">
-      所有外部取数统一经此中枢（缓存 / 重试 / 鉴权失效判断 / 调用打点 / 行情自动调度）。点击任一数据源展开，可测试连通、配置凭据（明文）、启停与查看调用统计。
+      所有外部取数都从这里统一走（缓存 / 重试 / 鉴权失效判断 / 调用日志 / 行情自动调度）。点击任一数据源展开，可测试连通、配置凭据（明文）、启停与查看调用统计。
     </div>
     <div v-else class="embed-bar">
-      <span class="embed-sub">所有外部取数统一经此中枢（缓存 / 重试 / 鉴权失效 / 调用打点 / 行情调度）。</span>
+      <span class="embed-sub">所有外部取数都从这里统一走（缓存 / 重试 / 鉴权失效 / 调用日志 / 行情调度）。</span>
       <el-button size="small" :loading="loading" @click="load">刷新</el-button>
     </div>
 

@@ -171,11 +171,20 @@ export function formatTechnicalContext(snap: ContextSnapshotLike): string {
   return capLines(L, CONTEXT_SOFT_LIMIT, '技术上下文');
 }
 
-/** 候选目录 → 文本 */
-export function formatCandidates(catalog: CandidateCatalog, which: 'levels' | 'conditions'): string {
+/**
+ * 候选目录 → 文本。
+ * @param accuracyNote 各技术层的历史遵循率提示（断言账本给的）。只在候选价位这一份里带，
+ *   且只作参考不改评分——评分是确定性的，掺进一个会随样本漂移的数就不再可复现了。
+ */
+export function formatCandidates(
+  catalog: CandidateCatalog,
+  which: 'levels' | 'conditions',
+  accuracyNote = '',
+): string {
   const L: string[] = [];
   L.push(`【${which === 'levels' ? '候选价位' : '候选条件'}】contextId ${catalog.contextId}｜catalogHash ${catalog.catalogHash}`);
   L.push(`（提交计划时必须原样带上 contextId、candidateModelVersion=${catalog.candidateModelVersion}、catalogHash）`);
+  if (which === 'levels' && accuracyNote) L.push(accuracyNote);
 
   if (which === 'levels') {
     if (catalog.levels.length === 0) L.push('无候选价位，只能生成观察计划（不给可执行动作）');

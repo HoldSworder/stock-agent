@@ -326,9 +326,9 @@ function cnOf(name: string): string {
             </p>
           </div>
           <div class="gc">
-            <div class="gc-h">口径提醒</div>
+            <div class="gc-h">算法提醒</div>
             <p>
-              IC 衡量「排对全场」，与你单仓押龙头的回测口径不同。高 IC 的横截面因子未必跑赢你手调的
+              IC 衡量「排对全场」，与你单仓押龙头的回测算法不同。高 IC 的横截面因子未必跑赢你手调的
               <span class="mono">{{ CHAMPION }}</span>。
             </p>
           </div>

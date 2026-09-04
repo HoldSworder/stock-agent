@@ -73,7 +73,7 @@ function debateStock(code: string) {
 const verdictTip = (v: DecisionVerdictCache): string => {
   const parts = [
     `${ACTION_LABEL[v.action]} · 置信度${v.confidence} · ${v.scenario}/${v.horizon}`,
-    v.fresh ? `基准 ${v.dataAsOf.slice(0, 16).replace('T', ' ')}` : '已过期，需重跑',
+    v.fresh ? `数据截至 ${v.dataAsOf.slice(0, 16).replace('T', ' ')}` : '已过期，需重跑',
   ];
   if (v.invalidators.length) parts.push('失效条件：' + v.invalidators[0]);
   return parts.join('\n');
@@ -281,7 +281,7 @@ onMounted(load);
             <div class="disc-head">
               <span class="disc-title">纪律体检</span>
               <span class="disc-sub">
-                确定性硬规则 · 只读不下单 · 当前
+                按固定规则判断 · 只读不下单 · 当前
                 <b>{{ discipline.regimePhase ?? '震荡（无快照，按偏紧档）' }}</b> 档：单笔风险预算
                 {{ discipline.budget.singleTradeRiskPct }}% · 总仓上限
                 {{ discipline.account.totalMaxPositionPct }}% · 单票绝对上限 个股
@@ -329,7 +329,7 @@ onMounted(load);
             <div class="trend-head">
               <span class="trend-title">中线趋势体检</span>
               <span class="trend-sub">
-                确定性只读 · 对每只持仓按均线（MA20/60/250）排列判趋势 + 跟随建议（与中线雷达同口径）
+                按规则计算 · 只读 · 对每只持仓按均线（MA20/60/250）排列判趋势 + 跟随建议（算法与中线雷达相同）
               </span>
             </div>
             <el-table v-if="trends.length" :data="trends" size="small" stripe style="width: 100%">
@@ -363,7 +363,9 @@ onMounted(load);
           <div v-if="vsSim" class="vssim-panel" v-loading="vsSimLoading">
             <div class="vssim-head">
               <span class="vssim-title">真实 vs 模拟 · 纪律镜子</span>
-              <span class="vssim-sub">把「我真实操作」与「系统模拟战法」放一起照镜子 · 只读对照，不反哺调参</span>
+              <span class="vssim-sub">
+                把「我真实操作」与「系统模拟战法」放一起照镜子 · 只做对照，不会自动改战法参数
+              </span>
             </div>
             <div class="vssim-grid">
               <div class="vssim-card real">
@@ -405,7 +407,7 @@ onMounted(load);
                   <el-table-column label="胜率" align="right" min-width="68">
                     <template #default="{ row }"><span class="num">{{ row.winRate != null ? `${row.winRate}%` : '—' }}</span></template>
                   </el-table-column>
-                  <el-table-column label="选股口径" min-width="100">
+                  <el-table-column label="选股规则" min-width="100">
                     <template #default="{ row }"><span class="vssim-screen">{{ row.screenStrategyName || '—' }}</span></template>
                   </el-table-column>
                 </el-table>

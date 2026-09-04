@@ -9,9 +9,10 @@ import { cached } from '../lib/ttlCache';
 import { buildMainlineConsensus } from '../breadth/consensus';
 import { buildBreadthOverview } from '../breadth/service';
 import { fetchBoardConstituents } from '../breadth/data';
+import { getLatestSnapshotDate } from '../breadth/repo';
+import { expectedSnapshotDate, snapshotBehindDays } from '../scheduling/snapshotWindow';
 import { listWatch } from '../watchlist';
 import { fetchRealPositions } from '../realPositions';
-import { shanghaiDateStr } from '../market/calendar';
 import { nowIso } from '../util';
 
 // 持仓 / 自选 板块暴露（确定性只读，不下单）：
@@ -62,12 +63,29 @@ async function loadAnchorBoards(filterCode?: string): Promise<AnchorBoard[]> {
   return out;
 }
 
+/** 该板块判断是「退潮」 */
+const isFading = (b: AnchorBoard): boolean => b.phase === '退潮' || b.consensus === 'diverge';
+
+/** 该板块判断是「还在往上走」：三源共振且处在启动或加速段 */
+const isRising = (b: AnchorBoard): boolean =>
+  !isFading(b) && b.consensus === 'resonance' && (b.phase === '启动' || b.phase === '加速');
+
 /** 综合暴露状态：退潮/背离 > 拥挤 > 在主线 > 无关联 */
 function deriveStatus(hits: AnchorBoard[]): BoardExposureStatus {
   if (hits.length === 0) return 'none';
-  if (hits.some((b) => b.phase === '退潮' || b.consensus === 'diverge')) return 'fading';
+  if (hits.some(isFading)) return 'fading';
   if (hits.some((b) => b.crowded)) return 'crowded';
   return 'mainline';
+}
+
+/**
+ * 一只票同时命中「还在走主线」和「已退潮」的板块。
+ *
+ * `deriveStatus` 是「任一退潮即判退潮」，对单一归属的票没问题，但横跨两条线的票会被误伤：
+ * 它可能正从旧主线切到新主线，此时减仓减掉的是刚起来的那条。标出分歧交给人判断。
+ */
+function hasConflict(hits: AnchorBoard[]): boolean {
+  return hits.some(isFading) && hits.some(isRising);
 }
 
 /**
@@ -114,13 +132,30 @@ export async function computeBoardExposure(boardCodeFilter?: string): Promise<Bo
         phase: b.phase,
       })),
       status: deriveStatus(hits),
+      conflict: hasConflict(hits),
     });
   }
 
+  // 报底层 breadth 快照的真实日期，不是今天。拿三天前的板块阶段驱动减仓建议，
+  // 与拿今天的判断是两回事，消费方必须能区分。
+  //
+  // stale 的基准与驾驶舱新鲜度层共用 snapshotWindow：板块快照 15:25 才产出，
+  // 用「是不是今天」判会让盘中全程标过期。两处若各判各的，同一份数据会一处正常一处过期。
+  const snapshotDate = getLatestSnapshotDate();
+  const stale =
+    snapshotDate != null && (snapshotBehindDays(snapshotDate, expectedSnapshotDate('breadth')) ?? 0) > 0;
+
   return {
     asOf: nowIso(),
-    snapshotDate: shanghaiDateStr(new Date()),
+    snapshotDate,
+    stale,
     holdings,
-    note: '板块暴露：主线锚板块成分 ∩ 持仓/自选（懒相交，仅覆盖当前主线板块，仅研判不下单）。',
+    note:
+      '我在主线板块里的仓位：取主线板块成分股与我的持仓/自选的交集（只覆盖当前主线板块，仅研判不下单）。' +
+      (snapshotDate == null
+        ? '暂无板块快照，下面的板块判断无法给出。'
+        : stale
+          ? `板块判断出自 ${snapshotDate} 的快照，不是今天的，据此调仓前先确认还成立。`
+          : ''),
   };
 }

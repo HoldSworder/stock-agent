@@ -99,7 +99,7 @@ function replayTradesForDate(
         // 买不起就跳过并显式告警，让「口径失配」暴露出来（不留痕，重跑同日仍跳过）。
         if (amount > cash) {
           console.warn(
-            `[shadow] ${t.tradeDate} ${t.code} 现金不足（需 ${amount.toFixed(0)} / 余 ${cash.toFixed(0)}），跳过该笔买入；影子盘初始资金与镜像账户口径不一致`,
+            `[shadow] ${t.tradeDate} ${t.code} 现金不足（需 ${amount.toFixed(0)} / 余 ${cash.toFixed(0)}），跳过该笔买入；影子盘初始资金与镜像账户不一致`,
           );
           continue;
         }

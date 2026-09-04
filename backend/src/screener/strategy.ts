@@ -157,9 +157,9 @@ const STRATEGIES: ScreenStrategyDef[] = [
   },
   {
     id: 'mid_leader',
-    name: '中线龙头（赛道下钻）',
+    name: '中线龙头（从强赛道里挑）',
     description:
-      '中线趋势打法：在强赛道 ETF 成分股内选龙头——周线多头排列(月线定方向)+周线金叉(右侧确认)+主力资金持续净流入+题材走强，回避一字追涨与暴跌。配合 ETF 行业轮动下钻使用。',
+      '中线趋势打法：在强赛道 ETF 成分股内选龙头——周线多头排列(月线定方向)+周线金叉(右侧确认)+主力资金持续净流入+题材走强，回避一字追涨与暴跌。配合 ETF 行业轮动一起用。',
     horizon: 'mid',
     factorWeights: { midTrend: 0.4, fundFlow: 0.2, themeHeat: 0.2, liquidity: 0.1, momentum: 0.1 },
     hardFilters: {

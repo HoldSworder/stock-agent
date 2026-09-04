@@ -160,10 +160,10 @@ onMounted(load);
       <el-button size="small" :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
     </div>
     <div v-if="!embedded" class="page-sub">
-      SQLite 体积治理：清理累积的日志 / 历史记录并回收空间。配置 / 账本 / 战法学习闭环等表永久保留，不在此暴露。
+      清理本地数据库：删掉累积的日志 / 历史记录并回收磁盘空间。配置、交易记录、战法学习记录永久保留，这里不会碰。
     </div>
     <div v-else class="embed-bar">
-      <span class="embed-sub">SQLite 体积治理：清理累积日志 / 历史并回收空间。配置 / 账本 / 学习闭环表永久保留。</span>
+      <span class="embed-sub">清理本地数据库：删掉累积日志 / 历史并回收空间。配置、交易记录、学习记录永久保留。</span>
       <el-button size="small" :icon="Refresh" :loading="loading" @click="load">刷新</el-button>
     </div>
 

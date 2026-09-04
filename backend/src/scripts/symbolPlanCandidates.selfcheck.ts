@@ -76,6 +76,8 @@ const LEVELS: PriceLevels = {
     resistanceMa: { period: 5, value: 101 },
     supportMa: { period: 10, value: 98 },
   },
+  // 候选目录不读量价（那是阶段判定的输入），fixture 置空即可
+  volumePrice: null,
   note: 'fixture',
 };
 
@@ -510,6 +512,7 @@ assert.equal(clusterTolerance(1, null, 0.01), 0.02, 'ATR 缺失时不应把容�
       resistanceMa: { period: 5, value: 0.7 },
       supportMa: { period: 10, value: 0.63 },
     },
+    volumePrice: null,
     note: 'fixture',
   };
 

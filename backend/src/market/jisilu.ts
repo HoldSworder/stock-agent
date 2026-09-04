@@ -59,7 +59,7 @@ export async function fetchEtfPremiumMap(): Promise<Map<string, JisiluPremium>> 
 /** 健康探测：拉一次列表，rows 非空即连通 */
 export async function pingJisilu(): Promise<void> {
   const m = await fetchEtfPremiumMap();
-  if (m.size === 0) throw new JisiluError('集思录无数据（可能需配置 cookie 或已被限流）');
+  if (m.size === 0) throw new JisiluError('集思录无数据（可能需配置 cookie，或请求太频繁被拒）');
 }
 
 /** 单只 ETF 折溢价（best-effort，失败/无数据返回 null，不抛错以免影响 ETF 主流程） */

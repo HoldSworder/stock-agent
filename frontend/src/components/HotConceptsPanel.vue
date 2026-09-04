@@ -104,7 +104,7 @@ onMounted(() => void load().catch((e) => ElMessage.error(e instanceof Error ? e.
       </div>
     </div>
     <div class="block-sub">
-      细分概念（如玻璃基板/光刻胶）按<b>近{{ ov?.window ?? '5日' }}</b>综合热度排序并归纳到父级主线主题，<b>点击任一概念可展开板块全部成分股</b>（标注龙头/今日领涨），便于先锁强赛道、再赛道内下钻龙头（确定性只读，仅研判不下单）。
+      细分概念（如玻璃基板/光刻胶）按<b>近{{ ov?.window ?? '5日' }}</b>综合热度排序并归纳到父级主线主题，<b>点击任一概念可展开板块全部成分股</b>（标注龙头/今日领涨），便于先锁强赛道、再从赛道里挑出龙头（按规则计算，仅研判不下单）。
     </div>
 
     <template v-if="ov">
@@ -136,7 +136,7 @@ onMounted(() => void load().catch((e) => ElMessage.error(e instanceof Error ? e.
       </div>
       <el-empty
         v-else-if="view === 'theme'"
-        description="暂无热门细分概念数据（同花顺概念资金流取数降级，请到数据源页检查 AKShare/aktools 配置）"
+        description="暂无热门细分概念数据（同花顺概念资金流没取到，请到数据源页检查 AKShare/aktools 配置）"
       />
 
       <!-- 按热度平铺 -->
@@ -190,7 +190,7 @@ onMounted(() => void load().catch((e) => ElMessage.error(e instanceof Error ? e.
       </el-table>
       <el-empty
         v-else-if="view === 'flat'"
-        description="暂无热门细分概念数据（同花顺概念资金流取数降级，请到数据源页检查 AKShare/aktools 配置）"
+        description="暂无热门细分概念数据（同花顺概念资金流没取到，请到数据源页检查 AKShare/aktools 配置）"
       />
 
       <div class="note">

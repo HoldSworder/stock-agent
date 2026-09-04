@@ -298,7 +298,7 @@ export async function confirmBuy(
   if (!cfg.agentConfirmBuy) {
     const pass = !(cfg.minConfidence > 0 && det < cfg.minConfidence);
     const agentAction: BuyAction = pass ? '建仓' : '观察';
-    const instruction = buildInstruction(s, cfg, heldPct, pass, {}, `${TF_LABEL[s.timeframe]}金叉确定性建层`);
+    const instruction = buildInstruction(s, cfg, heldPct, pass, {}, `${TF_LABEL[s.timeframe]}金叉，按规则建层`);
     return {
       confidence: det,
       action: finalActionOf(instruction, agentAction),
@@ -348,12 +348,12 @@ export async function confirmBuy(
   if (res.status !== 'success' || !res.outputText.trim()) {
     const pass = !(cfg.minConfidence > 0 && det < cfg.minConfidence);
     const agentAction: BuyAction = pass ? '建仓' : '观察';
-    const instruction = buildInstruction(s, cfg, heldPct, pass, {}, '（agent 研判失败，按确定性子分）');
+    const instruction = buildInstruction(s, cfg, heldPct, pass, {}, '（AI 研判没跑成，按规则分处理）');
     return {
       confidence: det,
       action: finalActionOf(instruction, agentAction),
       agentAction,
-      advice: '（agent 研判失败，按确定性子分）',
+      advice: '（AI 研判没跑成，按规则分处理）',
       confirm,
       instruction,
       runId: res.runId,

@@ -615,7 +615,529 @@ export interface PriceLevels {
   pivot: PivotLevels | null;
   /** 多周期均线结构 */
   ma: MaStructure | null;
+  /**
+   * 当根量价读数，供界面判断「这次穿越算不算数」。
+   *
+   * 遵循率答的是「这类位子历史上管不管用」（回溯，摸到后 5 根内反不反向），
+   * 这里答的是「今天这次破位是不是真的」（前瞻，当日收盘即可判）。两个口径
+   * 回答不同问题，界面上必须分开写，不得互相冒充。
+   */
+  volumePrice: VolumePriceReading | null;
   note: string;
+}
+
+// ===== 波浪理论（KlineDialog 波浪图层）=====
+// 仅作展示层参考读数：不接入交易计划候选目录、不参与 SymbolTradePlan 的触发/失效判定、
+// 不进统一阶段状态机。详见 backend/src/market/elliott.ts 头部边界说明。
+
+/**
+ * 置信度低于此值的计数不给目标位。
+ *
+ * 单一来源：后端据此直接不产出 targets（图层、结论区、喂给 LLM 的底稿因此天然一致），
+ * 前端只用它决定文案措辞。早先这个门槛只写在前端，导致界面显示「置信度偏低，不给目标价」
+ * 的同时，LLM 解读把后端底稿里的目标价原样念了出来。
+ *
+ * 取 0.5：只有 1 段已完成浪时后端算出的分恰好是 0.44——此时三铁律一条都校验不到、
+ * 斐波那契比例也无从比对，等于毫无证据，必须落在门槛下方。
+ */
+export const ELLIOTT_MIN_TRUSTED_CONFIDENCE = 0.5;
+
+/** 浪标：驱动浪 1-5 / 调整浪 A-B-C */
+export type ElliottLabel = '1' | '2' | '3' | '4' | '5' | 'A' | 'B' | 'C';
+
+/**
+ * 这一浪可能停下的位置该怎么称呼——按浪的性质与行进方向定。
+ *
+ * 刻意**不带浪标**。同一个价位在「当前级别 A 浪」和「高级别读法 B 浪」两种读法下都成立，
+ * 标死字母只会让两种读法在同一条线上打架；而早先图上写的「A候选」既没说是什么的候选，
+ * 字面还容易读成「候选方案 A / 候选方案 B」。按功能命名一眼就知道这条线是干什么用的。
+ *
+ * 图、结论区、喂给 LLM 的底稿共用这一个函数，三处用词才不会各说各话。
+ */
+export function elliottLevelName(
+  label: ElliottLabel | null,
+  direction: 'up' | 'down' | null,
+): string {
+  if (!direction) return '转折位';
+  const end = direction === 'up' ? '见顶位' : '见底位';
+  if (!label) return end;
+  // 调整浪是逆着大方向走的，用「反弹 / 回调」才说得准；驱动浪是顺势推进，用「上行 / 下行」
+  const corrective = label === '2' || label === '4' || label === 'A' || label === 'B' || label === 'C';
+  if (corrective) return direction === 'up' ? `反弹${end}` : `回调${end}`;
+  return direction === 'up' ? `上行${end}` : `下行${end}`;
+}
+
+/** 价格已经走过某一档时的说法：上行叫突破、下行叫跌破，统一写「已到达」对下行浪不准确 */
+export function elliottPassedWord(direction: 'up' | 'down' | null): string {
+  return direction === 'down' ? '已跌破' : '已突破';
+}
+
+/** 一段浪：由相邻两个摆动点连成 */
+export interface ElliottLeg {
+  label: ElliottLabel;
+  fromTime: string;
+  fromPrice: number;
+  toTime: string;
+  toPrice: number;
+  /** 该浪跨越的 bar 数（据摆动点在序列中的索引差） */
+  bars: number;
+  /** 末浪仍在进行时为 false（终点是未确认摆动点或当前价） */
+  completed: boolean;
+}
+
+/** 波浪目标位：斐波那契投射出的量级参考，非预测 */
+export interface ElliottTarget {
+  /** 比例标签，如 '161.8%' */
+  ratio: string;
+  price: number;
+  /** 该目标的口径说明 */
+  note: string;
+}
+
+/**
+ * 斐波那契时间位：按「可比前浪」的 bar 数投射出的日期。
+ * 例如 B 浪比照 A 浪：A 走了 24 根，则 61.8% 时间位是 B 起点后第 15 根。
+ */
+export interface ElliottTimeProjection {
+  /** 比例标签，如 '61.8%' */
+  ratio: string;
+  /** 预计日期 YYYY-MM-DD */
+  date: string;
+  /** 距当前浪起点的 bar 数 */
+  bars: number;
+  /** 该时间位是否已经走过 */
+  reached: boolean;
+}
+
+/**
+ * 进行中那一浪的内部细分（用更细周期算出）。
+ * 子浪标号是 'Ba'/'Bb'/'Bc' 这类复合串，塞不进 ElliottLabel 联合类型，故单独定义。
+ */
+export interface ElliottSubLeg {
+  /** 形如 'Ba' / 'Bb' / 'Bc'；父浪内部呈驱动结构时为 'B1'..'B5' */
+  label: string;
+  fromTime: string;
+  fromPrice: number;
+  toTime: string;
+  toPrice: number;
+  bars: number;
+  completed: boolean;
+}
+
+/** 一段浪的内部细分结果 */
+export interface ElliottSubdivision {
+  /** 细分所用的更细周期 */
+  period: KlinePeriod;
+  /** 父浪标号，子浪标号以它为前缀 */
+  parentLabel: ElliottLabel;
+  legs: ElliottSubLeg[];
+  /** 当前处于哪一子浪，如 'Bc' */
+  currentLabel: string | null;
+  note: string;
+}
+
+/** 首选参考：下一个尚未到达的价位与时间位，给出可直接对照的单一数字 */
+export interface ElliottPrimary {
+  price: number | null;
+  /** price 对应的斐波那契比例 */
+  ratio: string | null;
+  /** 预计到达日期 YYYY-MM-DD */
+  date: string | null;
+  note: string;
+}
+
+/** 单一周期上的一套浪序计数 */
+export interface ElliottWaveCount {
+  period: KlinePeriod;
+  /** 级别中文名，如 '周线级' / '日线级'；高一度重标读法为 '日线级·高一度' */
+  degreeLabel: string;
+  /** impulse=驱动浪 / corrective=调整浪 / unclear=无法给出可信计数 */
+  state: 'impulse' | 'corrective' | 'unclear';
+  /** 当前正在走的浪；unclear 时为 null */
+  currentLabel: ElliottLabel | null;
+  /** 当前浪的方向：up=向上推进 / down=向下 */
+  currentDirection: 'up' | 'down' | null;
+  legs: ElliottLeg[];
+  /**
+   * 当前浪的目标位（按理论斐波那契比例投射）。
+   * 置信度低于 ELLIOTT_MIN_TRUSTED_CONFIDENCE、或目标越过失效价时为空数组。
+   */
+  targets: ElliottTarget[];
+  /** 失效价：跌破/涨破此价则本计数作废 */
+  invalidationPrice: number | null;
+  /** 当前浪预计走完的时间窗（按已完成同级浪的 bar 数外推） */
+  timeWindow: { fromDate: string; toDate: string; bars: number } | null;
+  /** 斐波那契时间位（按可比前浪的 bar 数投射）；无可比前浪时为空数组 */
+  timeProjections: ElliottTimeProjection[];
+  /** 首选价位与日期；无可用候选位（含置信度不足）时为 null */
+  primary: ElliottPrimary | null;
+  /** 进行中那一浪的内部细分；细分不出来时为 null */
+  subdivision: ElliottSubdivision | null;
+  /** 置信度 0~1，由铁律满足度(0.5) + 结构完整度(0.2，已完成浪数/5) + 斐波那契贴合度(0.3) 合成 */
+  confidence: number;
+  /** 逐条判定过程，供界面展开查看 */
+  rationale: string[];
+}
+
+/** 波浪分析结果：两层独立计数（大级别 + 当前级别）+ 备选计数 + 高一度重标读法 */
+export interface ElliottAnalysis {
+  code: string;
+  asOf: string;
+  close: number;
+  /** 大一级周期的计数（当前周期已是 month 时为 null） */
+  major: ElliottWaveCount | null;
+  /** 当前周期的计数 */
+  minor: ElliottWaveCount | null;
+  /** minor 的备选计数（起点前移一个摆动点重算） */
+  alternate: ElliottWaveCount | null;
+  /**
+   * 高一度重标读法：把 minor 整段 5 浪视作高一级的 A 浪、进行中那段视作 B 浪。
+   *
+   * 与 minor 是同一段走势的两种称呼，价位完全相同（锚点与量度的区间一样），
+   * 分歧只在这一浪之后：minor 叫 A 浪意味着后面还有 B 跌 C 涨，
+   * 本读法叫 B 浪则意味着后面直接 C 跌创新低。minor 不是「5 浪已完成」时为 null。
+   */
+  contextual: ElliottWaveCount | null;
+  /** 模板化中文结论，不依赖 LLM */
+  summary: string;
+  note: string;
+}
+
+// ===== 技术断言账本（战绩页 /accuracy）=====
+// 每天把可证伪的技术判断冻结落库、到期机械核对，回答「哪套工具在这只票上真的有用」。
+
+/** 断言依据来源。统计按这一维切开才答得了「波浪准不准 / 斐波有没有用」 */
+export type AssertionSource = 'elliott' | 'fib' | 'pivot' | 'chan' | 'ma' | 'dow' | 'plan';
+
+/** level=某价位应产生反向反应；time=某转折应落在某窗口内 */
+export type AssertionKind = 'level' | 'time';
+
+/**
+ * 判定参数。放在 shared 而非后端私有，是因为界面必须逐字说清「遵循率」的口径——
+ * 不说清就会被读成「守住的比例」，而账本判的是「摸到后掉不掉头」。
+ * 前端抄一份常量的话，日后后端调参界面就会开始说谎。
+ *
+ * 冻结时会把这两个值快照进每条记录（见 SymbolAssertion），改这里不影响历史记录的判定。
+ */
+export const ASSERTION_REACTION_BARS = 5;
+/** 点位断言的观察窗（自然日）。到期仍未触及即判 untouched，不计入分母 */
+export const ASSERTION_HORIZON_DAYS = 20;
+/** 时间断言的容差（bar 数）。预测窗口两侧各放宽这么多根仍算命中 */
+export const ASSERTION_TOLERANCE_BARS = 3;
+
+/**
+ * 判定结局。
+ * untouched 单独成一档且**不计入分母**：价格压根没走到那个位子，说明不了判断对错，
+ * 把它算成 violated 会让「远端目标位」这类断言被系统性判差。
+ */
+export type AssertionOutcome = 'respected' | 'violated' | 'untouched' | 'unjudgeable';
+
+/** 一条冻结的技术断言 */
+export interface SymbolAssertion {
+  id: string;
+  code: string;
+  secid: string | null;
+  asOf: string;
+  period: KlinePeriod;
+  kind: AssertionKind;
+  source: AssertionSource;
+  /** 人话陈述，下钻时直接展示 */
+  statement: string;
+  price: number | null;
+  priceHigh: number | null;
+  windowFrom: string | null;
+  windowTo: string | null;
+  /** 期望的反应方向：up=触及后向上反弹，down=触及后向下受阻 */
+  direction: 'up' | 'down' | null;
+  /** 判定参数，落库即冻结，日后调参不改写历史 */
+  atrSnapshot: number | null;
+  reactionBars: number | null;
+  toleranceBars: number | null;
+  dueDate: string;
+  outcome: AssertionOutcome | null;
+  settledAt: string | null;
+  settleNote: string | null;
+  evidenceRef: string | null;
+  createdAt: string;
+}
+
+/**
+ * 一组断言的遵循率统计。
+ *
+ * 同时给点估计与 Wilson 95% 下界：小样本下点估计极不可靠（10 笔 7 胜的下界只有约 40%），
+ * 只报点估计会让人把噪声当本事。界面必须两个都显示。
+ */
+export interface AssertionAccuracy {
+  /** 分组标识，含义随切片维度而定 */
+  key: string;
+  label: string;
+  /** 已冻结总数（含未判、未触及） */
+  recorded: number;
+  /** 计入分母的已判定数（respected + violated，不含 untouched/unjudgeable） */
+  settled: number;
+  respected: number;
+  violated: number;
+  untouched: number;
+  /** 遵循率点估计 0~1；settled 为 0 时为 null */
+  rate: number | null;
+  /** Wilson 95% 置信下界 0~1；样本不足时为 null */
+  lowerBound: number | null;
+}
+
+/** 战绩页的切片维度 */
+export type AssertionSliceDim = 'source' | 'kind' | 'code' | 'period';
+
+/** 战绩页总览 */
+export interface AssertionAccuracyReport {
+  /** 统计覆盖的冻结日范围 */
+  fromDate: string | null;
+  toDate: string | null;
+  /** 全量汇总 */
+  overall: AssertionAccuracy;
+  /** 各维度切片 */
+  slices: Record<AssertionSliceDim, AssertionAccuracy[]>;
+  /** AI 计划情景预测的统计（来自 symbol_plan_forecasts，口径不同故单列） */
+  scenario: {
+    recorded: number;
+    settled: number;
+    hit: number;
+    rate: number | null;
+    lowerBound: number | null;
+  };
+  note: string;
+}
+
+// ===== 转折日历（驾驶舱「未来转折」卡片 + /calendar 页）=====
+// 波浪时间投射早就在算，但从来没有出口——它只被冻结进账本，没有任何页面展示。
+// 本组 DTO 就是那个出口：把未来若干交易日内的时间断言按日期摊开。
+
+/** 预期的转折类型。由当前浪方向推出：向上推进的浪走完即见高，向下即见低 */
+export type TurningExpect = 'high' | 'low' | 'unknown';
+
+/** 一组「说准了几次」的统计 */
+export interface TurningHitRate {
+  /** 已经能判对错的样本数 */
+  settled: number;
+  /** 其中说准的次数 */
+  hit: number;
+  rate: number | null;
+  /** 考虑样本误差后，真实水平可能低到多少（Wilson 95% 下界） */
+  lowerBound: number | null;
+}
+
+/** 转折日历里的一条来源明细 */
+export interface TurningPointItem {
+  code: string;
+  /**
+   * 大盘指数的显式 secid，个股为 null。
+   *
+   * 必须带着走：指数 6 位码与个股撞码，只给 code 的话点开「上证指数」会打开平安银行的
+   * K 线（000001 两边都占）。实测就是这么翻的车——标题写着上证指数，现价显示 11.74。
+   */
+  secid: string | null;
+  /** 该预测出自哪个周期的分析。日线与周线的时间尺度差一个数量级，界面必须分得清 */
+  period: KlinePeriod;
+  /** 中文名，取不到时回退代码 */
+  label: string;
+  /** 最近一次冻结日 */
+  asOf: string;
+  statement: string;
+  expect: TurningExpect;
+  /**
+   * 该标的连续多少个冻结日都指向这个窗口。
+   *
+   * 这是本页最有价值的一列。实测 159516 在 8/17–8/20 四次冻结里，浪标在 A 与 2
+   * 之间反复横跳、比例档也在换，**日期却始终锁在 8/24–8/26**，而 8/25 正是实际低点。
+   * 日期比浪标稳，连续指向就是可信度。
+   */
+  streak: number;
+  /**
+   * 最新一次分析已经不再提这个日期。
+   *
+   * 口径是「没被重申」而不是「被新预测顶掉」：系统改了口，和系统这阵子算不出结果，
+   * 对读者来说没有区别——都不该再当成活跃判断。实测两种都出现过：
+   * 159516 同时挂在 8/26 与 9/1（前者被当天的分析取代），
+   * 证券ETF天弘有一条最后更新停在 7/23、周线分析此后一直给不出结果。
+   *
+   * 不删只标记：这个过程本身有信息量，能看出系统是在犹豫还是在坚持。
+   * 但它绝不能再顶着「已连续 N 天没改口」当活跃预测。
+   */
+  superseded: boolean;
+  /**
+   * 该转折点附近已知的价位，按距当时收盘价由近及远。
+   *
+   * 上下两侧都给，**不按预测方向只挑一侧**——方向本身还没通过基线检验，
+   * 拿它决定只显示哪一边，等于把一个未验证的判断放大成唯一信息。
+   * 界面可以把方向对应的那一侧排在前面，但另一侧必须同时可见。
+   *
+   * 只有日线级条目有：这些价位的观察窗只有 20 天，绑不到一两个月后的周线日期上。
+   */
+  above: TurningLevel[];
+  below: TurningLevel[];
+}
+
+/** 某个预测日的转折汇总 */
+export interface TurningPointEntry {
+  /** 预测中心日 */
+  date: string;
+  /** 按 ASSERTION_TOLERANCE_BARS 展开的交易日区间，与 judgeTime 判定口径一致 */
+  from: string;
+  to: string;
+  /** 距今几个交易日，0=今天 */
+  inDays: number;
+  /** 多数派预期；各标的分歧时取占多数的那个，明细里保留各自的判断 */
+  expect: TurningExpect;
+  /** 指向该日的不同标的数，即共振度 */
+  resonance: number;
+  /** 明细里最大的连续指向天数。只统计未被取代的条目，被取代的不该抬高整条的可信度 */
+  maxStreak: number;
+  /** 这一天下面的每一条都没被最新分析重申，整条只作留档 */
+  superseded: boolean;
+  items: TurningPointItem[];
+}
+
+/** 转折点附近的一档已知价位 */
+export interface TurningLevel {
+  price: number;
+  /** 来源中文名，如「黄金分割」「枢轴」 */
+  source: string;
+  /** 该档的具体说法，如「78.6% 回撤位」 */
+  detail: string;
+  /** 该来源在本标的上的历史成绩：价格摸到这类位子后掉头的比例。样本不足为 null */
+  rate: number | null;
+  settled: number;
+}
+
+/** 一个周期档的转折清单。日线与周线必须分开，两者的时间尺度差一个数量级 */
+export interface TurningSection {
+  /** 展示用标题，如「短期观察（日线）」 */
+  title: string;
+  /** 一句话说清这一档看的是什么尺度 */
+  scope: string;
+  /** 覆盖到哪一天 */
+  toDate: string;
+  entries: TurningPointEntry[];
+  reliability: TurningCalendar['reliability'];
+  /** 该档样本还不够时为真，界面须写明「尚无成绩可言」而不是显示一个百分比 */
+  tooFewSamples: boolean;
+}
+
+/** 转折日历 */
+export interface TurningCalendar {
+  asOf: string;
+  /** 短期观察：日线级，未来 20 天 */
+  daily: TurningSection;
+  /** 中期探索：周线级，时间尺度以月计 */
+  weekly: TurningSection;
+  /** 两档共用的整体成绩。分档成绩见各 section */
+  /**
+   * 到目前为止「说准了几次」的实测成绩（已剔除停产的 161.8% 档）。
+   *
+   * 必须跟日历一起给出来。一张排得整整齐齐的日历天然让人觉得可信，
+   * 不把这个数摆在同一屏，就是拿排版冒充胜率。
+   */
+  reliability: {
+    /**
+     * 按**独立预测**算：同一标的对同一天的预测，连着记录多少天都只算一次。
+     * 这才是真实的证据量，界面应该用它。
+     */
+    events: TurningHitRate;
+    /**
+     * 按**记录条数**算：每天记一条，同一个预测连记 9 天就是 9 条。
+     *
+     * 实测 141 条记录只对应 55 个独立预测（平均每个重复 2.56 次，最多一个重复 9 次）。
+     * 拿它当样本量会把证据夸大两倍多，误差区间也会显得过窄。留着只为对照，别拿它示人。
+     */
+    records: TurningHitRate;
+  };
+  note: string;
+}
+
+/**
+ * 连续给出同一日期少于这么多天的预测，实测命中率明显更低，界面必须警告。
+ *
+ * 依据（141 笔已判定时间断言，剔除停产档后按连续天数拆）：
+ * - 只出现 1 天：4/20 = 20%，95% 区间 [8%, 42%]，**上界够不到 50%**
+ * - 连续 ≥2 天：20/35 = 57%，95% 区间 [41%, 72%]
+ *
+ * 对照组说明为什么门槛只看连续天数、不看共振：按「几只标的同时指向」拆开是
+ * 单标的 47%（15 笔）对多标的 43%（40 笔），区间几乎完全重叠，分不出任何东西。
+ * 共振因此只作为「有哪些标的」的信息展示，不参与可信度判定。
+ */
+export const TURNING_MIN_STREAK = 2;
+
+/**
+ * 上面那组分档成绩的快照值，供界面引用。
+ *
+ * 与 TURNING_DIRECTION_HIT 同理：**是快照不是实时值**，必须连 asOf 一起显示，
+ * 否则样本长到几百笔后页面还在念这组旧数字。重跑 assertions.livecheck.ts 的
+ * 「时间断言分档」后连同这里一起更新。
+ */
+export const TURNING_STREAK_STATS = {
+  /** 连续 ≥ TURNING_MIN_STREAK 天的命中率（百分数） */
+  strong: 57,
+  /** 只出现 1 天的命中率（百分数） */
+  weak: 20,
+  asOf: '2026-08-27',
+} as const;
+
+/**
+ * 方向判断到底有没有用——**必须跟基线一起看**的那组数。
+ *
+ * 回算过程见 `backend/src/scripts/timeDirection.livecheck.ts`。口径是事件级：
+ * 同一标的对同一天的预测，连着记多少天都只算一次（不去重会把证据量夸大两倍多，
+ * 而且重复次数与「连续几天没改口」正相关，等于让强信号自己给自己加权）。
+ *
+ * 为什么一定要有基线：曾经只看到「预测见高时命中 63%」就以为方向可用，
+ * 可同期实际出现的转折本来就有 66% 是高点——无脑全说见高就能拿 66%，系统反而更低。
+ * 脱离基线的准确率什么都说明不了。
+ *
+ * 根因是判定口径本身不含方向：`judgeTime` 只看窗口内有没有出现转折，
+ * 不看那个转折是高点还是低点。所以日期命中率从来就不能为方向背书。
+ */
+export const TURNING_DIRECTION_HIT = {
+  /** 独立预测个数 */
+  events: 24,
+  /** 其中方向也说对的次数 */
+  hit: 12,
+  /** 无脑全猜多数类能拿到的次数（事后基线，只能用来否定、不能用来肯定） */
+  baseline: 14,
+  /** 多数类是哪一边 */
+  baselineSide: 'high' as TurningExpect,
+  /**
+   * 统计截止日。这几个数是**快照不是实时值**，界面必须连日期一起显示——
+   * 否则样本涨上去之后页面还在念旧数字，读的人会当成当前成绩。
+   * 重跑 timeDirection.livecheck.ts 后连同这里一起更新。
+   */
+  asOf: '2026-08-27',
+} as const;
+
+/** 方向判断是否已经跑赢基线。没跑赢时界面不得给买卖方向建议 */
+export const TURNING_DIRECTION_BEATS_BASELINE =
+  TURNING_DIRECTION_HIT.hit > TURNING_DIRECTION_HIT.baseline;
+
+/**
+ * 转折日的提示文案。确定性文案，不走 LLM。
+ *
+ * 刻意**不给方向性操作建议**（不说「接回」「减仓」）。曾经给过，回算后撤掉：
+ * 方向根本没被验证过，实测 43%、说反的比说对的还多，端到端只有 18%。
+ * 拿一个非方向性的统计去背书方向性的操作，比不给建议糟得多。
+ *
+ * 驾驶舱卡片与日历页共用一份：同一条预测在两个页面读到不同措辞，比措辞不好更糟。
+ *
+ * @param streak 已连续多少天给出同一日期
+ * @param superseded 该预测是否已被同标的更新的一次预测取代
+ */
+export function turningActionText(streak: number, superseded: boolean): string {
+  if (superseded) {
+    return '最新一次分析没有再提它，留档参考，不要再据此行动';
+  }
+  if (streak < TURNING_MIN_STREAK) {
+    return `今天才第一次给出，这类历史说准的比例只有约 ${TURNING_STREAK_STATS.weak}%，先只做个记号`;
+  }
+  return TURNING_DIRECTION_BEATS_BASELINE
+    ? '这几天可能出现转折，注意波动放大'
+    : '这几天可能出现转折，注意波动放大。往哪边转还没验证出准头，别据此决定买卖';
 }
 
 /** S8 筹码分布：单日筹码快照（东财 stock_cyq_em，比例字段为 0-1） */
@@ -680,20 +1202,88 @@ export interface IndexFundFlowDay {
   pct: number;
 }
 
-/** 股指主力资金流：单个指数的多日序列（升序 旧→新，取数失败 days 为空数组） */
+/** 资金强弱档位：按「最近 5 日累计」在自身历史中的相对位置分档，与金额正负无关 */
+export type IndexFlowLevel = 'strong' | 'neutral' | 'weak' | 'unknown';
+
+/** 样本档：记录天数决定结论能说到多满，unknown=不足 20 日不给档位 */
+export type IndexFlowSampleTier = 'full' | 'tentative' | 'insufficient';
+
+/** 股指主力资金流：单个指数由连续已收盘序列算出的统计量 */
+export interface IndexFundFlowStats {
+  /** 最近一个已收盘交易日的主力净流入（亿） */
+  latest: number;
+  /** 最近 5 日累计净流入（亿）；不足 5 日为 null */
+  sum5: number | null;
+  /** 最近 20 日累计净流入（亿）；不足 20 日为 null */
+  sum20: number | null;
+  /** 有效「连续且已收盘」交易日数，断档即止 */
+  days: number;
+  /** 可比较的滚动 5 日区间个数（= days - 4，不足 5 日为 0） */
+  windows: number;
+  /**
+   * 最近 5 日累计值在全部可比较 5 日区间中的相对位置 0-100（中位排名法处理并列）。
+   * 样本不足 20 日时为 null。
+   */
+  rank5: number | null;
+  /** 强弱档位（由 rank5 分档：>=70 强 / <=30 弱 / 其余中性） */
+  level: IndexFlowLevel;
+  /** 样本档：full>=40 日 / tentative 20-39 日 / insufficient<20 日 */
+  tier: IndexFlowSampleTier;
+  /** 连续净流入(正)或净流出(负)的天数，0 表示最近一日为零 */
+  streak: number;
+}
+
+/** 股指主力资金流：单个指数的多日序列（升序 旧→新，无记录时 days 为空数组） */
 export interface IndexFundFlow {
   code: string;
   name: string;
   /** 东财 secid（市场前缀.代码），用于开 K 线 */
   secid: string;
+  /** 分组归属：大盘蓝筹 / 中小盘 / 不参与分组（仅展示） */
+  group: IndexFlowGroup | null;
   days: IndexFundFlowDay[];
+  /** 由连续已收盘序列算出的统计量；无记录时为 null */
+  stats: IndexFundFlowStats | null;
 }
 
-/** 股指主力资金流：大盘页面板数据（7 个主要股指近 N 日主力净流入趋势） */
+/** 资金流分组：仅这两组参与「哪边资金更强」的比较，其余指数只展示 */
+export type IndexFlowGroup = 'large' | 'small';
+
+/** 分组投票结果：中性不计票，方向票不足 2 张即判为方向不明 */
+export interface IndexFlowGroupVerdict {
+  group: IndexFlowGroup;
+  /** 组内偏强票数 */
+  strong: number;
+  /** 组内偏弱票数 */
+  weak: number;
+  /** 组内有档位的有效指数个数 */
+  rated: number;
+  /** 组内结论；unknown = 数据不全或方向不明 */
+  level: IndexFlowLevel;
+  /** 组级样本档，继承参与投票指数中最低的一档 */
+  tier: IndexFlowSampleTier;
+}
+
+/** 股指主力资金流：按规则拼出的一句话结论（不经大模型） */
+export interface IndexFundFlowSummary {
+  /** 驾驶舱常驻那一行的正文 */
+  text: string;
+  /** 两组各自的投票结果 */
+  groups: IndexFlowGroupVerdict[];
+  /** 全部指数里最长的一段连续记录天数，用于「已连续记录 N 个交易日」 */
+  maxDays: number;
+  /** 是否已达到可以给方向的门槛（任一组判出方向） */
+  actionable: boolean;
+}
+
+/** 股指主力资金流：面板数据（10 个宽基指数 + 按规则结论） */
 export interface IndexFundFlowResult {
-  /** 数据时间 ISO */
-  asOf: string;
+  /** 数据所属交易日 YYYY-MM-DD；一条记录都没有时为 null */
+  dataDate: string | null;
+  /** 数据实际抓取时间 ISO（取自记录本身，不是本次请求时间）；无记录为 null */
+  fetchedAt: string | null;
   items: IndexFundFlow[];
+  summary: IndexFundFlowSummary;
 }
 
 // ===== 宏观·资金面底稿（低频全局指标：日频/EOD，与实时盘面分离）=====
@@ -3004,8 +3594,19 @@ export interface MainlineConsensus {
 // 不新造板块判断源：阶段/强度/趋势/ETF/共识直接投影自 MainlineConsensusItem；
 // actionTag / cycleFit / riskTags 为派生操盘标签；以 boardCode 为跨源/跨页稳定键。
 
-/** 统一操盘动作标签（首页作战台 / 板块卡片 / 持仓暴露共用） */
+/** 统一操盘动作标签（首页作战台 / 板块卡片 / 板块持仓共用） */
 export type BoardActionTag = '观察' | '试错' | '持有' | '加仓候选' | '减仓' | '回避' | '等待';
+
+/** 操盘动作标签的界面显示名。「试错」在这里指用极小仓位先买一点验证判断 */
+export const BOARD_ACTION_TAG_LABELS: Record<BoardActionTag, string> = {
+  观察: '观察',
+  试错: '小仓试单',
+  持有: '持有',
+  加仓候选: '加仓候选',
+  减仓: '减仓',
+  回避: '回避',
+  等待: '等待',
+};
 
 /** 周期视角适配（板块更适合的交易周期，与生命周期阶段 ThemePhase 正交，是两个维度） */
 export type BoardCycleFit = '超短' | '短线' | '波段' | '中线' | '长线';
@@ -3104,13 +3705,28 @@ export interface BoardExposureHolding {
   }>;
   /** 综合暴露状态 */
   status: BoardExposureStatus;
+  /**
+   * 命中的板块里同时存在「还在走主线」和「已退潮」两种判断。
+   *
+   * 这种票不能因为「有一个板块退潮」就直接建议减仓——它可能正在从旧主线切到新主线，
+   * 减掉的恰好是刚起来的那条线。此时只提示判断有分歧，让人自己看，不给减仓动作。
+   */
+  conflict: boolean;
 }
 
 /** 板块暴露总览 */
 export interface BoardExposure {
   asOf: string;
-  /** 数据快照日 YYYY-MM-DD（对齐 breadth 快照） */
-  snapshotDate: string;
+  /**
+   * 数据快照日 YYYY-MM-DD，取自 breadth 快照的**真实日期**。
+   *
+   * 早先这里直接写今天，于是一份三天前的板块判断会被读成「今天的结论」。
+   * 驾驶舱要拿板块阶段驱动减仓建议，用过期快照等于拿旧证据让人动仓位，
+   * 所以必须报底层数据实际是哪天的。取不到快照时为 null，调用方据此判定不可用。
+   */
+  snapshotDate: string | null;
+  /** 快照不是当日产出。为真时消费方必须显式标注时效，不得当作今天的依据 */
+  stale: boolean;
   holdings: BoardExposureHolding[];
   note: string;
 }
@@ -3692,11 +4308,39 @@ export type EtfWatchLayer = 1 | 2 | 3;
 /** 信号去向（确定性管道落点，纯展示） */
 export type EtfWatchDisposition = 'cooldown' | 'low_confidence' | 'to_ai' | 'emitted';
 
-/** 最终裁决（买点由 AI 裁决，卖点/硬止损为确定性动作） */
+/** 最终裁决（买点由 AI 裁决，卖点/硬止损按规则直接给出） */
 export type EtfWatchVerdict = '建仓' | '观察' | '放弃' | '撤层' | '硬止损';
 
-/** 趋势阶段（确定性合成：均线排列 + MACD 零轴 + 收盘相对 MA60 位置） */
+/**
+ * 裁决的界面显示名。
+ *
+ * 枚举值本身是 DB 存值与业务判断依据（见 backend/src/etfwatch/store.ts 的 REPUSH_VERDICTS
+ * 与 dispatcher.ts 的直发分支），改字面量会破坏补发逻辑，所以只换显示层的说法。
+ * 「撤层」是本系统自造词，用户看不懂它指的是把分层建仓里的某一层减掉。
+ *
+ * 用法边界：DB / API / 条件判断一律用枚举原值，浏览器与 Telegram 一律用本表。
+ * 必须穷尽所有成员，不要写 `LABELS[v] ?? v` ——漏一个就会把原词漏给用户。
+ */
+export const ETF_WATCH_VERDICT_LABELS: Record<EtfWatchVerdict, string> = {
+  建仓: '建仓',
+  观察: '观察',
+  放弃: '放弃',
+  撤层: '减一层仓',
+  硬止损: '硬止损',
+};
+
+/** 趋势阶段（按规则合成：均线排列 + MACD 零轴 + 收盘相对 MA60 位置） */
 export type EtfTrendStage = '趋势初期' | '主升中' | '高位钝化' | '震荡' | '趋势破坏' | '未知';
+
+/** 趋势阶段的界面显示名。「高位钝化」指指标在高位横住、不再指示方向 */
+export const ETF_TREND_STAGE_LABELS: Record<EtfTrendStage, string> = {
+  趋势初期: '趋势初期',
+  主升中: '主升中',
+  高位钝化: '高位横住',
+  震荡: '震荡',
+  趋势破坏: '趋势破坏',
+  未知: '未知',
+};
 
 /** 资金/量价确认读数（确定性证据：量价健康度 + 份额趋势 + 量比/换手/主力净流入） */
 export interface EtfConfirm {
@@ -4131,6 +4775,44 @@ export interface PlanTrigger {
   note?: string;
 }
 
+/** 计划项的四个触发器分别是哪一个 */
+export type PlanTriggerKind = 'buy' | 'sell' | 'stop_loss' | 'take_profit';
+
+export const PLAN_TRIGGER_KIND_LABELS: Record<PlanTriggerKind, string> = {
+  buy: '买点',
+  sell: '卖点',
+  stop_loss: '止损',
+  take_profit: '止盈',
+};
+
+/**
+ * `trigger_hit` 事件的结构化载荷。
+ *
+ * 为什么必须记：`DailyPlanItem` 有 buyTrigger/sellTrigger/stopLoss/takeProfit 四个触发器，
+ * 却只有一个 `status: 'triggered'`。事后只知道「触发了」，不知道触发的是买点还是止损——
+ * 这两件事在动作清单里一个是机会、一个是风险，排序天差地别。
+ *
+ * 为什么不靠现价反推：买点与止损可能在同一天被先后穿越，用现价比对四个 value 会有二义，
+ * 猜错方向就会凭空生成一条卖出建议。宁可承认「原因未记录」，也不猜。
+ *
+ * 落在既有的 `daily_plan_events.payload` 自由 JSON 字段里，不改表结构。
+ */
+export interface PlanTriggerHitPayload {
+  code: string;
+  /** 触发的是哪个触发器。**null 表示当时没记，禁止据此推断为任何一种** */
+  triggerKind: PlanTriggerKind | null;
+  /** 该触发器设定的价位 */
+  triggerValue: number | null;
+  /** 触发发生的时刻 */
+  triggeredAt: string;
+  /** 触发那一刻观察到的价格 */
+  observedPrice: number | null;
+  note: string | null;
+}
+
+/** 触发原因缺失时的统一说法。不得替换成任何具体触发类型 */
+export const PLAN_TRIGGER_UNKNOWN_TEXT = '已触发，具体原因未记录';
+
 /** 今日择时档位：进攻 / 均衡 / 防守（大盘走势+资金+情绪+外盘综合定档，约束个股与 ETF 的方向与仓位） */
 export type TimingLevel = 'attack' | 'balanced' | 'defense';
 
@@ -4452,6 +5134,224 @@ export interface SafetyUpdate {
   autoLocalSimEnabled?: boolean;
   autoExternalSimEnabled?: boolean;
   allowManualForceTrade?: boolean;
+}
+
+// ===== 驾驶舱数据新鲜度 =====
+// 取数成功不等于数据可用：板块快照可能是三天前的、持仓可能是昨天收盘的，接口都正常返回。
+// 拿过期数据驱动减仓建议比取数失败更危险——失败看得见，过期看不见。故判定为三态。
+
+/** 动作清单依赖的数据来源 */
+export type ActionDataSource =
+  | 'positions'
+  | 'quote'
+  | 'discipline'
+  | 'plan'
+  | 'rotation'
+  | 'boards';
+
+export const ACTION_DATA_SOURCE_LABELS: Record<ActionDataSource, string> = {
+  positions: '真实持仓',
+  quote: '实时行情',
+  discipline: '持仓纪律',
+  plan: '今日计划',
+  rotation: 'ETF 轮动',
+  boards: '板块判断',
+};
+
+/**
+ * 单个来源的新鲜度。
+ *
+ * `stale` = 取到了但数据过期，`outage` = 断供。这两态必须分开：
+ * 「昨天没跑」和「三周没跑」在界面上长得一样的话，真正的断供就会被当成日常黄灯忽略。
+ */
+export interface SourceFreshness {
+  source: ActionDataSource;
+  label: string;
+  state: 'ok' | 'stale' | 'outage' | 'failed' | 'missing';
+  /** 数据实际产生的时间 */
+  dataAt: string | null;
+  /**
+   * 落后预期多少个**交易日**。0 = 及时，null = 不适用（实时源或压根没数据）。
+   *
+   * 必须按交易日算：周末隔两天、长假隔一周，按自然日会天天报警，
+   * 把人训练成「黄灯是常态」，真断供时反而看不见。
+   */
+  behindDays: number | null;
+  /** 盘中的有效时长（分钟）。盘后改判「是否同一交易日」 */
+  ttlMinutes: number;
+  note: string;
+}
+
+/** 落后这么多个交易日就不再是「过期」而是「断供」，要当故障处理 */
+export const FRESHNESS_OUTAGE_DAYS = 3;
+
+export interface DataCompleteness {
+  /**
+   * 持仓 / 纪律 / 板块三源是否全部就绪。
+   *
+   * 为假时买入类动作一律不得标成「可执行」：用户看到一份看起来完整的机会清单就会照做，
+   * 而此时止损动作可能还没算出来，顺序反了会真金白银地亏。
+   */
+  riskReady: boolean;
+  sources: SourceFreshness[];
+  summary: string;
+  /**
+   * 处于断供状态的来源。非空表示有定时任务根本没在跑，
+   * 这不是「数据晚了一会儿」而是系统在拿旧结论冒充今天的判断，必须显眼且可跳转去处理。
+   */
+  outages: SourceFreshness[];
+}
+
+// ===== 驾驶舱今日动作清单 =====
+// 驾驶舱原本是「读数陈列」：情绪一句、板块一句、纪律一句，各自正确却彼此不交叉，
+// 用户面对几十个读数要自己在脑子里合成「今天先做哪件事」。这一层就是把合成做掉。
+//
+// 三条纪律，破了任意一条这层就会把人带沟里：
+//   1. 只读**原始数据**合成，不读全景面板的展示摘要——那些摘要截断到 5 条，
+//      且纪律摘要在有减仓股数时会覆盖掉「止损离场」原文，拿来排序会漏掉真实风险。
+//   2. 排序按**不做的代价**，不按收益。错过买入是机会成本，止损没执行是真金白银。
+//   3. 触发原因未记录时如实说「原因未记录」，绝不用现价反推——
+//      买点与止损可能同日先后穿越，猜错方向就会凭空生成一条卖出建议。
+
+/** 动作优先级：P0 不做会亏钱 → P3 只是记个号 */
+export type CockpitActionPriority = 'P0' | 'P1' | 'P2' | 'P3';
+
+export type CockpitActionKind =
+  /** 止损未执行 / 已破止损 */
+  | 'stop_loss'
+  /** 临近止损 */
+  | 'near_stop'
+  /** 超出仓位上限 */
+  | 'overweight'
+  /** 真实持仓落进退潮板块 */
+  | 'board_fading'
+  /** 板块在主升段，可以在里面找领涨 */
+  | 'board_leading'
+  /** 板块在酝酿段，只够小仓试 */
+  | 'board_brewing'
+  /** 买入条件已触发 */
+  | 'buy_triggered'
+  /** 临近买点 */
+  | 'near_buy'
+  /** ETF 轮动换仓 */
+  | 'rotate'
+  /** 选股候选，还要人筛 */
+  | 'candidate'
+  /** 只记个号，不进买卖 */
+  | 'observe';
+
+export const COCKPIT_ACTION_KIND_LABELS: Record<CockpitActionKind, string> = {
+  stop_loss: '止损',
+  near_stop: '临近止损',
+  overweight: '仓位超限',
+  board_fading: '板块退潮',
+  board_leading: '板块主升',
+  board_brewing: '板块酝酿',
+  buy_triggered: '买点已到',
+  near_buy: '接近买点',
+  rotate: '换仓',
+  candidate: '待筛选',
+  observe: '观察',
+};
+
+/** 现在能不能照做。风险检查没就绪时买入类一律 blocked */
+export type CockpitActionReadiness = 'actionable' | 'approaching' | 'screening' | 'blocked';
+
+export interface CockpitAction {
+  /**
+   * 稳定编号：日期+标的+动作类型+来源。
+   * v1 不落库动作状态，靠这个编号在同一天内保持身份稳定（前端做展开/定位用）
+   */
+  id: string;
+  priority: CockpitActionPriority;
+  kind: CockpitActionKind;
+  readiness: CockpitActionReadiness;
+  code: string | null;
+  name: string | null;
+  /** 做什么，要明确到股数或价位。例：「减 1200 股（上限 3000 股）」 */
+  what: string;
+  /** 什么时候做。例：「盘中触及 0.712 时」 */
+  when: string;
+  /** 一句话理由 */
+  why: string;
+  /** 被挡住的原因（readiness=blocked 时必填） */
+  blockedReason: string | null;
+  /** 下钻证据：跳哪个页面、展开证据区哪个锚点 */
+  evidence: Array<{ label: string; route: string; anchor?: string }>;
+  /**
+   * 这条动作依据的技术方法名，**仅供溯源，不带任何准确率数字**。
+   *
+   * 安慰剂对照显示六套画线方法没有一套强于同距离随机价位，
+   * 在动作卡上标「黄金分割历史 51%」会暗示它有预测力。完整统计只放证据区。
+   */
+  basisSources: string[];
+  /** 该动作依赖的数据是什么时候的 */
+  dataAt: string | null;
+  /**
+   * 实时叠加：现价与今日涨跌。
+   *
+   * 日频判断回答「今天该用什么姿态」，这一层回答「现在走到哪了」。
+   * 取不到时为 null，界面要说「行情暂时取不到」而不是拿旧价冒充——
+   * 一个不标时间的旧价会让人以为还差得远，或者以为已经破了。
+   */
+  live: { price: number; changePct: number; at: string } | null;
+  /**
+   * 现价距该动作关注价位还有多远（%）。正=还没到，负=已经越过。
+   *
+   * 计划里的触发价是盘前定死的数字，只有跟现价比才知道今天要不要盯。
+   * 注意：越过价位**只是展示**，不代表条件成立——是否真的触发由盯盘引擎按确认规则判定，
+   * 这里绝不据此改计划状态。
+   */
+  distancePct: number | null;
+  /**
+   * 参与距离计算的那个价位，写清楚是哪条线，避免「还差 2%」不知道差到哪。
+   *
+   * `cross` 是触发方向，**不能省**：止损是跌破生效，突破买点是涨过生效，
+   * 两者「已经越过」对应的价格关系正好相反。只按数值差算，
+   * 一只已经跌破止损的票会被写成「距止损线还有 13%」——这是会让人错过止损的假信号。
+   */
+  distanceTo: { label: string; price: number; cross: 'below' | 'above' } | null;
+}
+
+/**
+ * 距离说明的统一措辞。
+ *
+ * 放在 shared 是因为前后端都要显示它——同一条动作在驾驶舱与接口返回里读到不同说法，
+ * 比措辞不好更糟（实测出现过后端说「已跌破」、界面说「已越过」）。
+ * 「越过」不带方向，止损跌破和买点涨过读起来一样，必须说清是哪一种。
+ */
+export function actionDistanceText(a: CockpitAction): string {
+  if (!a.live) return '行情暂时取不到，距离未更新';
+  if (a.distancePct == null || !a.distanceTo) return '';
+  const d = a.distancePct;
+  const { label, price, cross } = a.distanceTo;
+  if (Math.abs(d) < 0.05) return `正好在${label} ${price}`;
+  if (d > 0) return `距${label} ${price} 还有 ${d.toFixed(1)}%`;
+  return `已${cross === 'below' ? '跌破' : '涨过'}${label} ${price}，${Math.abs(d).toFixed(1)}%`;
+}
+
+/** 动作清单为空时的四种原因，必须区分——「今天没事做」和「还没查完」是两回事 */
+export type CockpitActionEmptyReason =
+  | 'all_clear'
+  | 'risk_checking'
+  | 'partial_failure'
+  | 'market_closed';
+
+export const COCKPIT_ACTION_EMPTY_TEXT: Record<CockpitActionEmptyReason, string> = {
+  all_clear: '检查完成，今天确实没有需要动手的事',
+  risk_checking: '持仓风险还在检查中，先别急着操作',
+  partial_failure: '部分数据没取到，暂时不能确认今天该做什么',
+  market_closed: '非交易时段，下面是下一个交易日的计划',
+};
+
+export interface CockpitActionPlan {
+  asOf: string;
+  actions: CockpitAction[];
+  /** actions 为空时说明原因 */
+  emptyReason: CockpitActionEmptyReason | null;
+  completeness: DataCompleteness;
+  /** P0 永不截断；其余层级被折叠掉的条数 */
+  omitted: number;
 }
 
 // ===== 驾驶舱「今日全景」统一读模型 =====
@@ -4779,7 +5679,7 @@ export interface PromotionGateResult {
   winRate: number | null;
   /** Wilson 95% 胜率下界 % */
   wilsonLowerPct: number | null;
-  /** 日期(×板块)聚类后的有效簇数（Herfindahl 口径，同日批量交易不重复计数） */
+  /** 独立样本数：按日期(×板块)归并后的有效簇数（Herfindahl 算法，同日批量交易不重复计数）。界面显示名见 promotionGate 的 checks.label */
   effectiveClusters: number;
   /** 簇等权胜率 % */
   clusterWinRatePct: number | null;
@@ -5522,6 +6422,15 @@ export interface NewsCatalystInput {
 }
 
 /** 驾驶舱模块总结卡：消费各模块【最新一次持久化产出】，秒开展示摘要并可跳全文 */
+/** 模块卡在驾驶舱的归宿分组 */
+export type CockpitModuleGroup = 'analysis' | 'covered' | 'research';
+
+export const COCKPIT_MODULE_GROUP_LABELS: Record<CockpitModuleGroup, string> = {
+  analysis: '今日分析摘要',
+  covered: '已并入动作清单',
+  research: '研究参考',
+};
+
 export interface CockpitModuleSummary {
   /** 模块标识：intel/market-board/review/etf/plan/screener */
   key: string;
@@ -5539,6 +6448,16 @@ export interface CockpitModuleSummary {
   createdAt: string | null;
   /** 是否非当日产出（过期需注意时效） */
   stale: boolean;
+  /**
+   * 该模块在驾驶舱的归宿。
+   *
+   * 原本 12 张卡等权铺成网格，占掉半屏却谁也不比谁重要，读完仍不知道要干什么。
+   * 现在按它回答的问题分流：
+   * - `analysis` 今日各家怎么看，合成一行一条的摘要
+   * - `covered` 已经变成动作清单里的动作了，不再重复放卡（放了等于同一件事说两遍）
+   * - `research` 研究参考，与今天做什么无关，默认折叠
+   */
+  group: CockpitModuleGroup;
 }
 
 /** 驾驶舱精简选股候选（最新一次选股运行的前若干条，供一屏速览） */
@@ -6551,6 +7470,27 @@ export type VolumeState =
   | 'clear_expand'
   | 'extreme_expand';
 
+/**
+ * 「这次穿越算不算数」的量价门槛。
+ *
+ * 单一来源：后端 volumePrice.buildVerdict 据此判 breakout_confirmed / heavy_down，
+ * 详情页速读卡片据此渲染三条件清单。两边各写一份字面量的话，调了后端阈值
+ * 界面还会照着旧数字打勾，等于骗人。
+ *
+ * 上破与下破的量能门槛**刻意不同**：向上突破取 1.2（放量确认即可），
+ * 向下杀跌沿用 mild_expand 边界 1.35（要更放量才算真崩，否则缩量回踩会被误判成破位）。
+ */
+export const BREAK_CONFIRM = {
+  /** 向上突破所需的量比（成交额优先口径）下限 */
+  upVolumeRatio: 1.2,
+  /** 向上突破所需的收盘位置下限：(close-low)/(high-low) */
+  upCloseLocation: 0.67,
+  /** 向下跌破所需的量比下限，与 VolumeState 的 mild_expand 边界同源 */
+  downVolumeRatio: 1.35,
+  /** 向下跌破所需的收盘位置上限 */
+  downCloseLocation: 0.33,
+} as const;
+
 /** 量价形态：下游据此判定，不得靠匹配 verdict 中文文案 */
 export type VolumePricePattern =
   | 'heavy_down'
@@ -6571,6 +7511,11 @@ export interface VolumeBasisReading {
 
 export interface VolumePriceReading {
   period: KlinePeriod;
+  /**
+   * 当根 K 是否已收完。未收完时 pattern 恒为 null、量比只作盘中参考。
+   * 消费方必须显式看这个标志：盘中拿半天量比整天中位数，10:00 必然显示缩量。
+   */
+  completeBar: boolean;
   /** 当根成交额 / 前 20 完整根成交额中位数（分母不含当根） */
   amountRatio20: number | null;
   volumeRatio20: number | null;
@@ -6929,6 +7874,37 @@ export type CandidateLevelSource =
   | 'fibonacci'
   | 'adapter';
 
+/**
+ * 候选价位的来源 → 判断记录里的来源。
+ *
+ * 两套枚举是各自演化出来的，名字对不上：候选目录说 `classic_pivot`，账本说 `pivot`；
+ * 候选把「摆动点」和「前高前低」分成两个来源，账本合在 `dow` 里。要拿历史成绩给候选加权，
+ * 必须先有这张对照表，否则权重会加到别的方法头上。
+ *
+ * 用 `Record` 穷尽所有成员而不是查表加兜底：新增候选来源时编译器会逼你在这里表态，
+ * 而兜底会让新来源静默拿到中性权重、没人发现。
+ *
+ * `adapter` 映射为 null 是有意的——候选目录自己的注释写着「适配器执行位，不与技术支撑压力
+ * 混淆」，它不是一条技术价位，没有对应的历史成绩可言。
+ *
+ * 账本里的 `elliott` 与 `plan` 没有对应候选（波浪不接入候选目录），其成绩不参与加权。
+ */
+export const CANDIDATE_SOURCE_TO_ASSERTION: Record<
+  CandidateLevelSource,
+  AssertionSource | null
+> = {
+  // 经典枢轴 PP/R1/S1，两边同源
+  classic_pivot: 'pivot',
+  fibonacci: 'fib',
+  ma: 'ma',
+  // 候选目录注释写明这是 detectPivots 找出的缠论中枢上下沿
+  pivot_zone: 'chan',
+  // 下面两个都出自 detectSwings 的已确认摆动点，账本统一记在 dow 名下
+  swing: 'dow',
+  prev_extreme: 'dow',
+  adapter: null,
+};
+
 export interface CandidateLevel {
   candidateId: string;
   contextId: string;
@@ -7218,6 +8194,29 @@ export type SymbolPlanOutcome =
   | 'execution_blocked'
   | 'data_degraded'
   | 'user_override';
+
+/**
+ * 归因枚举与中文标签。前后端共用一份：后端据此校验入参（拒绝自由文本），
+ * 前端据此渲染选项与统计标签。早先这八个枚举只有类型声明、全仓零引用，
+ * /review 接口收任意字符串塞进 note，于是「这些计划错在哪一类」永远统计不出来。
+ */
+export const SYMBOL_PLAN_OUTCOMES: Array<{ value: SymbolPlanOutcome; label: string; hint: string }> = [
+  { value: 'correct_wait', label: '正确观望', hint: '没给入场是对的，后续确实没机会' },
+  { value: 'valid_trigger', label: '有效触发', hint: '触发条件成立且后续按预期走' },
+  { value: 'false_breakout', label: '假突破', hint: '触发了但立刻反向，是条件设松了' },
+  { value: 'structure_invalidated', label: '结构被破坏', hint: '失效条件成立，判断的结构不成立' },
+  { value: 'time_expired', label: '时间到期', hint: '方向没错但没在计划窗口内兑现' },
+  { value: 'execution_blocked', label: '执行受阻', hint: '计划没问题，是流动性/停牌等执行侧原因' },
+  { value: 'data_degraded', label: '数据不全', hint: '当时的数据不完整，计划本就不该采信' },
+  { value: 'user_override', label: '人工推翻', hint: '用户主动否决了这份计划' },
+];
+
+/** 计划归因的统计切片 */
+export interface PlanOutcomeStat {
+  outcome: SymbolPlanOutcome;
+  label: string;
+  count: number;
+}
 
 /** 单条条件的求值状态 */
 export interface PlanConditionState {

@@ -256,7 +256,7 @@ export async function getDailyCached(
   ) {
     // 命中路径也要走同一道临时 bar 剔除：收盘回填失败时当日行会停在 provisional=1，
     // 次日开盘前 isFresh 的跨日分支判它新鲜，于是那根合成的假 bar 会从这里原样交出去。
-    return fallbackFromCache(cached);
+    return fallbackFromCache(cached, new Date(), code);
   }
   try {
     const fetched = await fetcher();
@@ -267,10 +267,10 @@ export async function getDailyCached(
     }
   } catch (e) {
     // 回源失败时，有旧缓存就先顶上（这正是本模块要消灭的整块降级），无缓存才继续抛
-    if (cached.length > 0) return fallbackFromCache(cached);
+    if (cached.length > 0) return fallbackFromCache(cached, new Date(), code);
     throw e;
   }
-  if (cached.length > 0) return fallbackFromCache(cached);
+  if (cached.length > 0) return fallbackFromCache(cached, new Date(), code);
   return [];
 }
 
@@ -312,9 +312,11 @@ function hasEnoughCached(code: string, secid: string, cachedLen: number, limit: 
  * 算出恒为 1.0 或 0.0 的「突破获量能确认」——那是一个被确定性伪造的信号。
  * 少一根完整日线远好过多一根假的；盘中读取临时 bar 的既有行为不受影响。
  */
-function fallbackFromCache(rows: CachedRow[], now = new Date()): KlineBar[] {
-  if (dropsTrailingProvisional(rows[rows.length - 1], now)) return adjustedFromCache(rows.slice(0, -1));
-  return adjustedFromCache(rows);
+function fallbackFromCache(rows: CachedRow[], now = new Date(), code?: string): KlineBar[] {
+  if (dropsTrailingProvisional(rows[rows.length - 1], now)) {
+    return adjustedFromCache(rows.slice(0, -1), code);
+  }
+  return adjustedFromCache(rows, code);
 }
 
 /** 兜底返回时末根该不该丢：非交易时段的临时 bar 一律丢（判据见 fallbackFromCache） */
@@ -334,8 +336,9 @@ export function dropsTrailingProvisional(
  * 一直持续到周六全量重刷。frontAdjustDaily 幂等（无跳空时空转），这里兜一次只花一次 O(n) 扫描。
  * 不传 label：这是每次读都会走的路径，打日志会随图表轮询刷屏。
  */
-function adjustedFromCache(rows: CachedRow[]): KlineBar[] {
-  return frontAdjustDaily(rows.map(stripMeta));
+function adjustedFromCache(rows: CachedRow[], code?: string): KlineBar[] {
+  // 带上 code：判据按板别收紧后，主板 -25% 这类跳空才认得出来（见 adjust.splitGapOf）
+  return frontAdjustDaily(rows.map(stripMeta), undefined, { code });
 }
 
 function stripMeta(r: CachedRow): KlineBar {

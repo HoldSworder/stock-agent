@@ -17,9 +17,9 @@ import { listModuleJobs } from './moduleScheduler';
 // 编排调整时在此一处维护即可。
 const MODULE_SUPERSEDED: Record<string, string> = {
   'etf.sellCheck':
-    '已并入 etfwatch 实时确定性卖点 + decision「持仓ETF卖点复核」辩论（盘中卖点去重，默认停用，开关可恢复）',
+    '已并入 etfwatch 按规则实时判定的卖点 + decision「持仓ETF卖点复核」辩论（盘中卖点去重，默认停用，开关可恢复）',
   'decision.sellcheck.intraday':
-    '盘中个股卖点由 watch 实时确定性承担；如需多 agent 辩论可按需开启此定时',
+    '盘中个股卖点由 watch 按规则实时判定；如需多 agent 辩论可按需开启此定时',
 };
 
 function supersededNote(item: ScheduleOverviewItem): string | null {

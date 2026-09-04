@@ -159,6 +159,12 @@ export function registerPositionsModule(app: FastifyInstance): void {
         id: 'positions.discipline.intraday',
         label: '持仓纪律体检（盘中 14:40）',
         defaultCron: '40 14 * * 1-5',
+        /**
+         * 纯计算不花钱，但**有副作用：会往 Telegram 推一条纪律清单**（high 必推、medium 受开关控制）。
+         * 开它的理由是驾驶舱的纪律事件时间线本来就靠它落库，不开就一直是空的；
+         * 嫌吵可以在调度页关掉这一条，或用推送开关只留 high。
+         */
+        defaultEnabled: true,
         run: async () => {
           const report = await evaluateDiscipline();
           const created = recordDisciplineEvents(report);

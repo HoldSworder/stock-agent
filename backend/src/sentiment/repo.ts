@@ -7,6 +7,7 @@ import type {
   StrengthBreakdown,
 } from '@stock-agent/shared';
 import { db, schema } from '../db/client';
+import { prevTradingDay } from '../market/calendar';
 import { nowIso } from '../util';
 
 // 情绪日快照读写：一天一行（trade_date 唯一），upsert 幂等，供方向判定与历史趋势。
@@ -74,13 +75,25 @@ export function upsertSnapshot(s: SentimentSnapshot): void {
 /** 取严格早于 tradeDate 的最近一条快照指数（判方向用，无则 null） */
 export function getPrevIndex(tradeDate: string): number | null {
   const row = db
-    .select({ indexScore: schema.sentimentSnapshots.indexScore })
+    .select({
+      indexScore: schema.sentimentSnapshots.indexScore,
+      tradeDate: schema.sentimentSnapshots.tradeDate,
+    })
     .from(schema.sentimentSnapshots)
     .where(lt(schema.sentimentSnapshots.tradeDate, tradeDate))
     .orderBy(desc(schema.sentimentSnapshots.tradeDate))
     .limit(1)
     .get();
-  return row ? row.indexScore : null;
+  if (!row) return null;
+  /**
+   * 必须确认它真的是上一交易日，不能只是「库里比今天早的最近一条」。
+   *
+   * 快照漏跑期间这一条可能是几周前的。拿它算出来的「较昨 +12」跨越三周，
+   * 而 classifyPhase 正是用这个 delta 判恢复/退潮——等于用三周前的水位
+   * 宣布今天在升温。宁可不给环比，也不能给一个假的。
+   */
+  if (row.tradeDate !== prevTradingDay(tradeDate)) return null;
+  return row.indexScore;
 }
 
 /** 取某交易日快照（无则 null） */

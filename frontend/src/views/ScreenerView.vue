@@ -333,7 +333,7 @@ onMounted(loadStatus);
       </div>
       <p v-if="currentStrategy" class="strategy-desc">{{ currentStrategy.description }}</p>
       <div v-if="isNl && currentKeyword" class="criteria">
-        <span class="crit-label">选股口径：</span>
+        <span class="crit-label">选股条件：</span>
         <span class="keyword-text">{{ currentKeyword }}</span>
       </div>
       <div v-else-if="multifactorStrategy?.criteria?.length" class="profile">
@@ -404,7 +404,7 @@ onMounted(loadStatus);
                     <span class="filter-trigger">硬筛 {{ detail.filteredCount }}</span>
                   </template>
                   <div class="crit-pop">
-                    <div class="crit-pop-title">{{ detailStrategy.name }} · 硬筛口径</div>
+                    <div class="crit-pop-title">{{ detailStrategy.name }} · 硬性条件</div>
                     <div class="crit-pop-list">
                       <span v-for="c in detailStrategy.criteria" :key="c">{{ c }}</span>
                     </div>

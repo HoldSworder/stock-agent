@@ -84,6 +84,8 @@ export async function fetchDailyAdjusted(
   // 月线漏掉月中折算只影响月线图这一个视图（PLAN_PERIODS 不含月线），代价远小于污染历史。
   return frontAdjustDaily(bars, opts.quiet ? undefined : `${lastServed.kline ?? '未知源'} ${code}`, {
     intrabar: period === 'week',
+    // 传 code 让判据按板别收紧：主板一天跌不过 10%，跌 25% 只能是除权
+    code,
   });
 }
 

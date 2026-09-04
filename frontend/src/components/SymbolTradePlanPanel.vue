@@ -564,7 +564,7 @@ function calibrationText(c: { recorded: number; settled: number; hit: number }):
 const dataStatusText: Record<SymbolTradePlan['dataStatus'], string> = {
   complete: '数据完整',
   provisional: '盘中未收盘，结论为暂定',
-  degraded: '关键数据降级，仅供观察',
+  degraded: '关键数据没取全，仅供观察',
 };
 
 // 不能直接把 load 当回调：watch 会把新值作为第一个实参传进去，
@@ -783,7 +783,7 @@ watch(() => props.code, () => void load(), { immediate: true });
             <div class="tp__kv"><span>道氏趋势</span><span>{{ plan.trendState }}</span></div>
             <div class="tp__kv"><span>缠论候选</span><span>{{ plan.chanSetup }}</span></div>
             <div class="tp__kv"><span>市场动作（不含账户）</span><span>{{ ACTION_LABEL[plan.marketAction] }}</span></div>
-            <div class="tp__kv"><span>口径版本</span>
+            <div class="tp__kv"><span>算法版本</span>
               <span class="tp__ver-note">
                 {{ plan.evidenceVersion }} / {{ plan.phaseModelVersion }} / {{ plan.candidateModelVersion }}
               </span>

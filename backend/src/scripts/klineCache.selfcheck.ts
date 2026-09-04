@@ -237,6 +237,46 @@ const bar = (
   ];
   assert.deepEqual(frontAdjustDaily(limitUp), limitUp, '+20% 涨停开盘不得被当成除权');
 
+  // 按板别收紧的判据：主板一天最多跌 10%，跌 25% 只可能是除权。
+  // 实测 000034（深市主板）2026-05-19 跳空 -25.5%，旧的一刀切阈值 0.35 漏判，
+  // 导致此前历史价格整体高出 1.4 倍——拿它算「创新高」会系统性漏报。
+  const mainBoardXr = [
+    bar('2026-05-16', 33.37, 33.5, 33, 33.37),
+    bar('2026-05-19', 24.86, 25, 24.5, 24.86),
+  ];
+  const fixedXr = frontAdjustDaily(mainBoardXr, undefined, { code: '000034' });
+  assert.ok(
+    Math.abs(fixedXr[0].close - 24.86) < 0.5,
+    `主板 -25% 跳空必须判为除权并回缩历史，实际 ${fixedXr[0].close}`,
+  );
+  // 不传 code 时保持原行为（阈值 0.35），避免既有调用点静默变敏感
+  assert.deepEqual(
+    frontAdjustDaily(mainBoardXr),
+    mainBoardXr,
+    '不传 code 时沿用全市场最宽阈值，行为不变',
+  );
+  // 板别差异：-20% 在主板不可能（要判除权），在创业板是跌停（合法行情，不得判除权）
+  const drop20 = [
+    bar('2026-05-16', 10, 10.1, 9.9, 10),
+    bar('2026-05-19', 8, 8.1, 7.9, 8),
+  ];
+  assert.notDeepEqual(
+    frontAdjustDaily(drop20, undefined, { code: '600000' }),
+    drop20,
+    '主板 -20% 超过 ±10% 上限，必须判为除权',
+  );
+  assert.deepEqual(
+    frontAdjustDaily(drop20, undefined, { code: '300750' }),
+    drop20,
+    '创业板 -20% 正好是跌停，属真实行情，不得当成除权',
+  );
+  // 主板跌停 -10% 仍不得误判（余量 2 个百分点）
+  assert.deepEqual(
+    frontAdjustDaily(limitDown, undefined, { code: '600000' }),
+    limitDown,
+    '主板 -10% 跌停不得被当成除权',
+  );
+
   // 关键方向约束：创业板/科创板新股上市前 5 日无涨跌幅限制，次日开盘可以翻倍。
   // 除权只会让价格变低，故向上的大跳空一律不得修正，否则真实暴涨会被当成除权抹掉。
   const newListing = [

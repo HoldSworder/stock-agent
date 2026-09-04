@@ -214,10 +214,17 @@ export const symbolTradePlanEvents = sqliteTable(
     kind: text('kind').notNull(),
     conditionId: text('condition_id'),
     note: text('note').notNull(),
+    /**
+     * 复盘归因（SymbolPlanOutcome 八枚举之一），仅 kind='reviewed' 时写。
+     * 单开一列而不是塞进 note：塞在自由文本里就没法按归因聚合，
+     * 而「这些计划到底错在哪一类」正是复盘唯一要回答的问题。
+     */
+    outcome: text('outcome'),
     createdAt: text('created_at').notNull(),
   },
   (t) => ({
     byPlan: index('idx_symbol_plan_events_plan').on(t.planId, t.createdAt),
+    byOutcome: index('idx_symbol_plan_events_outcome').on(t.kind, t.outcome),
   }),
 );
 
@@ -285,6 +292,112 @@ export const symbolPlanForecasts = sqliteTable(
   (t) => ({
     byPlanScenario: uniqueIndex('idx_plan_forecast_plan_scenario').on(t.planId, t.scenarioId),
     byPending: index('idx_plan_forecast_pending').on(t.outcome, t.dueDate),
+  }),
+);
+
+/**
+ * 技术断言账本：每天把「可证伪的技术判断」冻结落库，到期机械核对。
+ *
+ * 与 symbol_plan_forecasts 的分工：那张表只管 AI 计划的情景概率，且只在生成计划时才有记录；
+ * 这张表管的是每天由确定性算法算出的点位与时间窗（波浪见顶位、斐波 0.618、枢轴、中枢边界、
+ * 均线支撑压力），回答的是「哪套工具在这只票上真的有用」。两张表在统计层合并展示。
+ *
+ * 判定参数（ATR 快照、反应窗口根数、时间容差）必须随记录冻结：日后调参不能改写历史成绩，
+ * 否则统计出来的遵循率会随最后一次改参数而整体漂移，失去纵向可比性。
+ */
+export const symbolAssertions = sqliteTable(
+  'symbol_assertions',
+  {
+    id: text('id').primaryKey(),
+    code: text('code').notNull(),
+    /** 结算取 K 线必须用它，不能单凭 code 猜市场（指数与个股撞码） */
+    secid: text('secid'),
+    /** 生成日（上海交易日 YYYY-MM-DD） */
+    asOf: text('as_of').notNull(),
+    /** 断言所属周期，如 day / week */
+    period: text('period').notNull(),
+    /** level=点位断言 / time=时间断言 */
+    kind: text('kind').notNull(),
+    /** 依据来源：elliott / fib / pivot / chan / ma / dow —— 统计要按这一维切开 */
+    source: text('source').notNull(),
+    /** 人话陈述，事后下钻时直接展示，不用再从参数反推 */
+    statement: text('statement').notNull(),
+    /** 点位断言的价位；区间型用 price~priceHigh */
+    price: real('price'),
+    priceHigh: real('price_high'),
+    /** 时间断言的预测窗口 */
+    windowFrom: text('window_from'),
+    windowTo: text('window_to'),
+    /** 期望价格在触及该位后反向走的方向：up=向上反弹（支撑/见底位），down=向下受阻（压力/见顶位） */
+    direction: text('direction'),
+    /** 判定参数，落库即冻结 */
+    atrSnapshot: real('atr_snapshot'),
+    /**
+     * 记录当时的收盘价。用来判断某个价位在当时是在现价上方还是下方。
+     *
+     * 不能靠 direction 反推：道氏来源的方向是按「前高/前低」写死的，与它相对现价的位置无关。
+     * 实测 711 条道氏记录里有 115 条（16%）方向与实际位置相反——前高被跌破后仍标着压力，
+     * 可它已经在现价下方了。旧记录为空，此时不展示上下分档。
+     */
+    closeSnapshot: real('close_snapshot'),
+    reactionBars: integer('reaction_bars'),
+    toleranceBars: integer('tolerance_bars'),
+    /** 到期日（含），过了这天仍未触及即判 untouched */
+    dueDate: text('due_date').notNull(),
+    /** pending=未判 / respected=按判断走了 / violated=没按判断走 / untouched=没碰到（不计分母）/ unjudgeable=永远判不了 */
+    outcome: text('outcome'),
+    settledAt: text('settled_at'),
+    settleNote: text('settle_note'),
+    /** 溯源：具体是波浪的哪一档、斐波的哪个比例，便于下钻核对 */
+    evidenceRef: text('evidence_ref'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({
+    // 同日同标的同来源同语义只存一条，冻结任务重跑不会灌重
+    bySemantic: uniqueIndex('idx_assertion_semantic').on(
+      t.code,
+      t.asOf,
+      t.period,
+      t.source,
+      t.kind,
+      t.evidenceRef,
+    ),
+    byPending: index('idx_assertion_pending').on(t.outcome, t.dueDate),
+    byStats: index('idx_assertion_stats').on(t.source, t.kind, t.outcome),
+  }),
+);
+
+/**
+ * 各套方法的可信度权重历史。
+ *
+ * 每天算完存一条，既是审计留痕（页面要能回答「今天为什么这么排」），
+ * 也是平滑与滞回的输入（要知道昨天是多少）。权重会影响候选价位的呈现顺序，
+ * 不留痕就没法在它出错时倒查是哪天、因为什么样本被推歪的。
+ */
+export const assertionSourceWeights = sqliteTable(
+  'assertion_source_weights',
+  {
+    id: text('id').primaryKey(),
+    asOf: text('as_of').notNull(),
+    /** 算法协议版本。映射形状/钳位/平滑参数一改就升版，跨版本的权重不可比 */
+    protocolVersion: text('protocol_version').notNull(),
+    source: text('source').notNull(),
+    weight: real('weight').notNull(),
+    prevWeight: real('prev_weight'),
+    /** 比同距离随机价位强多少（点估计） */
+    edge: real('edge'),
+    /** 按日期分块 bootstrap 的 95% 下界，权重由它映射而来 */
+    edgeLower: real('edge_lower'),
+    /** 参与统计的独立日期数 */
+    blocks: integer('blocks'),
+    samples: integer('samples'),
+    /** 人话解释，直接展示 */
+    reason: text('reason').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({
+    // 同一天同一协议版本同一来源只留一条，重跑不灌重
+    byDay: uniqueIndex('idx_source_weight_day').on(t.asOf, t.protocolVersion, t.source),
   }),
 );
 
@@ -1338,6 +1451,37 @@ export const regimeSnapshots = sqliteTable(
     updatedAt: text('updated_at').notNull(),
   },
   (t) => ({ byDate: index('idx_regime_snapshots_date').on(t.tradeDate) }),
+);
+
+/**
+ * 宽基指数主力资金流日快照：每交易日每指数一行（secid + trade_date 唯一）。
+ *
+ * 为什么要落库而不是每次在线取：东财只有 push2his 提供多日历史，而它的 /api/ 路径
+ * 在本项目所在网络出口被连接重置（providers.ts 已记录 K 线同样 0% 成功，故改走通达信）。
+ * 可达的 push2delay 镜像无视 lmt 参数、永远只回当日一条。主力净流入又是东财按单笔
+ * 金额分档算出的派生指标，通达信没有等价数据。所以历史只能从今天起逐日积累——
+ * 与 sidecar 的北向资金历史同一套做法。
+ */
+export const indexFlowSnapshots = sqliteTable(
+  'index_flow_snapshots',
+  {
+    /** 东财 secid（市场前缀.代码），如 1.000300 */
+    secid: text('secid').notNull(),
+    /** 交易日 YYYY-MM-DD（Asia/Shanghai） */
+    tradeDate: text('trade_date').notNull(),
+    /** 主力净流入额（亿，正为净流入） */
+    main: real('main').notNull(),
+    /** 当日指数涨跌幅 % */
+    pct: real('pct').notNull().default(0),
+    /** 取数来源 host，便于日后分辨这条是当日镜像还是历史源回填的 */
+    source: text('source').notNull().default(''),
+    /** 实际抓取时间 ISO */
+    fetchedAt: text('fetched_at').notNull(),
+  },
+  (t) => ({
+    byKey: uniqueIndex('idx_index_flow_snapshots_key').on(t.secid, t.tradeDate),
+    byDate: index('idx_index_flow_snapshots_date').on(t.tradeDate),
+  }),
 );
 
 /** 真实持仓纪律事件流（确定性体检命中止损/止盈/超配/超期等时落库，供历史与智能推送去重） */

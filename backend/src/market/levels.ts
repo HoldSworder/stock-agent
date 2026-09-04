@@ -9,6 +9,7 @@ import type {
   MaStructure,
 } from '@stock-agent/shared';
 import { isBarUnclosed } from '../symbolPlans/sessionClock';
+import { computeVolumePrice, isVolumeComparable } from '../symbolPlans/volumePrice';
 
 // S10 点位测算库：从 K 线用确定性算法衍生「专业点位」——主导波段（摆动高低点）、
 // 斐波那契回撤/扩展、ATR(14)、经典枢轴点、多周期均线结构。喂「多周期走势研判」agent，
@@ -185,7 +186,20 @@ export function computeLevels(
     atrPct: atr == null || close <= 0 ? null : r2((atr / close) * 100),
     pivot: calcPivot(bars, period, now),
     ma: calcMaStructure(closes, close),
-    note: bars.length < MIN_ATR_BARS ? 'K 线数据不足，部分点位不可用' : '确定性点位测算（斐波那契/枢轴/均线/ATR）',
+    // 不自己算量比与收盘位置：symbolPlans/volumePrice 已经是这套口径的唯一实现，
+    // 且已被阶段判定消费。在这里复制一份会让同一个「放量」在两处得出不同结论
+    volumePrice: bars.length
+      ? computeVolumePrice({
+          period,
+          bars,
+          completeBar: !isBarUnclosed(period, last?.time, now),
+          volumeComparable: isVolumeComparable(bars),
+        })
+      : null,
+    note:
+      bars.length < MIN_ATR_BARS
+        ? 'K 线数据不足，部分点位不可用'
+        : '按规则测算的点位（斐波那契/枢轴/均线/ATR）',
   };
 }
 
@@ -200,7 +214,10 @@ export async function getPriceLevels(
 ): Promise<PriceLevels> {
   // 惰性导入：保持本模块纯算法可独立自检，取数（及其 db 依赖链）仅在实际拉线时加载
   const { getKline } = await import('./eastmoney');
-  const bars = await getKline(code, period, 260, secid).catch(() => [] as KlineBar[]);
+  // 带 secid 时**不能**把 code 一起送进取数：astockdata(mootdx) 忽略 secid、只把 code 当 symbol，
+  // 且在分钟链里排第一，填了 code 会让上证指数(1.000001) 命中同码个股平安银行(000001)。
+  // 这与 /api/kline 和 datasource/scheduler.ts 是同一条约定；code 仍保留给 DTO 做身份标识。
+  const bars = await getKline(secid ? '' : code, period, 260, secid).catch(() => [] as KlineBar[]);
   return computeLevels(code, bars, period);
 }
 

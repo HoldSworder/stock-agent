@@ -121,7 +121,7 @@ const multifactor: ScreenEngine = {
       const allow = new Set(input.universe);
       const scoped = snapshot.filter((r) => allow.has(r.code));
       if (scoped.length === 0) {
-        throw new Error('下钻 universe 与全市场快照无交集（成分股可能停牌或代码口径不符）');
+        throw new Error('指定的标的范围与全市场数据没有交集（成分股可能停牌，或代码格式对不上）');
       }
       snapshot = scoped;
     }
@@ -136,7 +136,7 @@ const multifactor: ScreenEngine = {
         runMode = `盘前模式：采用上一交易日收盘快照；${runMode}`;
       } else if (staleNote) {
         // 缓存过期时绝不能沉默降级：此刻用的是当日被置 0 的量价，硬筛会自动放宽，用户需要知道
-        runMode = `盘前模式降级：${staleNote}，改用当日退化量价；${runMode}`;
+        runMode = `盘前模式数据不全：${staleNote}，改用当日简化量价；${runMode}`;
       }
     } else {
       saveLastCloseSnapshot(snapshot);

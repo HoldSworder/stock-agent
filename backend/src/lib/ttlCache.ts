@@ -102,6 +102,19 @@ export async function cached<T>(
   return task;
 }
 
+/**
+ * 只看缓存、不触发拉取。命中且未过期才返回，否则 undefined。
+ *
+ * 给「这块数据慢，但它不重要到值得让整个响应等它」的调用方用：
+ * 驾驶舱动作清单里 ETF 轮动只贡献最不紧急的 P2 换仓候选，
+ * 却要几分钟才算得出来。让它阻塞会把 P0 止损一起拖到超时——
+ * 风险项迟到比机会项缺席危险得多。
+ */
+export function peek<T>(key: string): T | undefined {
+  const hit = store.get(key) as Entry<T> | undefined;
+  return hit && hit.expiresAt > Date.now() ? hit.value : undefined;
+}
+
 /** 缓存内部状态（仅供自检断言用，业务代码不要依赖） */
 export function inspect(): { entries: number; inflight: number; maxEntries: number } {
   return { entries: store.size, inflight: inflight.size, maxEntries: MAX_ENTRIES };

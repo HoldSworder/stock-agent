@@ -213,6 +213,34 @@ export async function computeSignal(item: EtfPoolItem): Promise<EtfSignal> {
   };
 }
 
+/**
+ * 只算指定几只 ETF 的信号，不碰全池。
+ *
+ * 给持仓纪律这类「只关心手上这几只」的调用方用。
+ * 全池 `signals()` 会对池里每只单独拉一次实时行情，实测把 `evaluateDiscipline()` 拖到 9-11 秒；
+ * 而纪律只用到每只自己的 `stopLoss` / `takeProfit`，跨池的相对动量排名它根本不看。
+ *
+ * 为什么不给全池结果加缓存：缓存会让**过期的** ETF 信号参与止损判断。
+ * 止损线算错的代价远大于多跑几次取数，宁可每次实算这几只。
+ *
+ * 不在池中的代码直接跳过——它没有池配置，调用方会退回默认纪律。
+ */
+export async function signalsFor(codes: string[]): Promise<Map<string, EtfSignal>> {
+  const want = new Set(codes);
+  const items = repo.listPool().filter((it) => want.has(it.code));
+  const list = await Promise.all(
+    items.map((it) =>
+      computeSignal(it).catch(() => null),
+    ),
+  );
+  const out = new Map<string, EtfSignal>();
+  for (const s of list) {
+    // 单只算失败就当没有信号，调用方退回默认纪律；绝不用别只的结果顶替
+    if (s) out.set(s.code, s);
+  }
+  return out;
+}
+
 /** 全池信号 + 双动量相对排名回填 */
 export async function signals(): Promise<EtfSignalsResult> {
   const pool = repo.listPool();
@@ -366,7 +394,7 @@ export const ETF_ANALYZE_PROMPT =
   '🟢 一、操作建议：最值得加仓/建仓的 ETF（附依据与挂单价）、需减仓/规避的 ETF。\n' +
   '🔄 二、中线赛道轮动：①该进攻赛道——右侧介入（≤4 条：ETF 名(代码)｜状态(上升/加速)+RS正+周线多头｜消息催化｜理由）②该等回踩（≤3 条：回踩位置｜右侧确认信号，如回踩不破关键均线后再放量/RS 重新转强）③该回避（≤3 条：过热/破位｜原因）。\n' +
   '🎯 三、一句话结论：当前中线赛道轮动方向与进攻/均衡/防守倾向，并点名当前最值得右侧介入的强势赛道。\n' +
-  '⚠️ 确定性指标研判，仅供参考，不构成投资建议。';
+  '⚠️ 基于按规则计算的指标做研判，仅供参考，不构成投资建议。';
 
 /**
  * ETF 综合研判统一执行体：跑 agent（量化信号 + 中线轮动 + 持仓消息综合），落 taskRun（taskName=ETF 综合研判）。

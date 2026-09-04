@@ -36,8 +36,19 @@ import type {
   VolumeReadout,
   SymbolPlanProjection,
   SymbolTradePlan,
+  ElliottAnalysis,
+  ElliottWaveCount,
+  AssertionAccuracy,
 } from '@stock-agent/shared';
-import { isPlanLineVisible } from '@stock-agent/shared';
+import {
+  ASSERTION_HORIZON_DAYS,
+  ASSERTION_REACTION_BARS,
+  BREAK_CONFIRM,
+  ELLIOTT_MIN_TRUSTED_CONFIDENCE,
+  elliottLevelName,
+  elliottPassedWord,
+  isPlanLineVisible,
+} from '@stock-agent/shared';
 
 /** 弹窗标签：分时 + 日/周/月 K 线 */
 type Tab = 'trend' | KlinePeriod;
@@ -256,6 +267,42 @@ registerOverlay({
   },
 });
 
+/**
+ * 波浪段：连线 + 终点浪标。
+ *
+ * 刻意不复用内置 simpleAnnotation：它只认字符串 extendData，且固定向上拉一根 50px 带箭头的杆，
+ * 画在浪的低点上时指向是反的，一段 5 浪会插出五根方向错乱的杆。
+ * 自己画则能按「终点是高点还是低点」把浪标放到线的外侧。
+ */
+registerOverlay({
+  name: 'SM_WAVE_LEG',
+  totalStep: 3,
+  needDefaultPointFigure: false,
+  needDefaultXAxisFigure: false,
+  needDefaultYAxisFigure: false,
+  createPointFigures: ({ coordinates, overlay }: OverlayCreateFiguresCallbackParams): OverlayFigure[] => {
+    const [a, b] = coordinates;
+    if (!a || !b) return [];
+    const { text } = readExtend(overlay.extendData);
+    // 终点比起点高 → 浪标画在终点上方，反之画下方，始终落在浪段外侧不压线
+    const up = b.y < a.y;
+    return [
+      { type: 'line', attrs: { coordinates: [a, b] } },
+      {
+        type: 'text',
+        ignoreEvent: true,
+        attrs: {
+          x: b.x,
+          y: up ? b.y - 4 : b.y + 4,
+          text,
+          align: 'center',
+          baseline: up ? 'bottom' : 'top',
+        },
+      },
+    ];
+  },
+});
+
 const store = useKlineStore();
 const { visible, code, name, secid } = storeToRefs(store);
 
@@ -274,6 +321,8 @@ const indicators = ref<StockIndicators | null>(null);
 const marks = ref<SymbolMark[]>([]);
 // S10 点位测算（黄金分割/枢轴/均线/ATR），点位图层与「距现价 ATR」读数的数据源，跟随当前周期
 const levels = ref<PriceLevels | null>(null);
+// 波浪计数（多周期浪序 + 目标位 + 时间窗），波浪图层与结论区的数据源，跟随当前周期
+const elliott = ref<ElliottAnalysis | null>(null);
 // 右侧页签：交易计划为默认，Agent 对话保留
 const sideTab = ref<'plan' | 'agent'>('plan');
 // 对话栏懒挂载标记：首次切到 Agent 页签才建 WS 与会话
@@ -583,6 +632,12 @@ const MARK_GROUP = 'symbol_marks';
 const DET_GROUP = 'det_levels';
 /** 走势推演（波动率锥 + 情景折线）单独一组：画在右侧留白，与实际行情严格分开 */
 const PROJ_GROUP = 'projection';
+/** 波浪（浪段连线 + 目标位 / 失效价）单独一组，图层开关各自控制 */
+const WAVE_GROUP = 'elliott_waves';
+/** 多源共振位单独一组 */
+const CONFLUENCE_GROUP = 'confluence';
+/** 共振位配色：用醒目的琥珀，与所有单源参考位（金/灰蓝/洋红）都拉开 */
+const CONFLUENCE_COLOR = '#ffd04b';
 
 /**
  * 价格文案（标注与分时盘口共用）：低价标的（ETF、低价股）两位小数分不出档位，
@@ -646,6 +701,11 @@ function defaultLayers() {
     history: false,
     // 走势推演默认关：它画在图右侧的留白里，会挤掉一块看盘面积，且是推演不是行情
     projection: false,
+    // 波浪默认关：浪段连线横跨大半张图，常态开着会盖住盘面
+    elliott: false,
+    // 共振位默认**开**：它是各技术层的交集，条数天然少（实测个位数），
+    // 且正是「先看哪几个价」这个问题的答案，是唯一值得常驻的一层
+    confluence: true,
   };
 }
 
@@ -667,7 +727,7 @@ interface DetLine {
   label: string;
   color: string;
   /** 清单分组用 */
-  group: '黄金分割' | '枢轴';
+  group: '黄金分割' | '枢轴' | '波浪';
   note: string;
 }
 
@@ -815,6 +875,735 @@ async function loadLevels(): Promise<void> {
   }
   renderOverlays();
 }
+
+// ===== 波浪计数 =====
+
+/** 与点位同理的自增 token：切标的/切周期后旧请求的结果不得画到新视图上 */
+let elliottToken = 0;
+
+/**
+ * 拉当前周期的波浪计数（失败静默）。
+ * 与点位一样无条件拉、不等图层打开：结论区常驻展示，图层只决定画不画到图上。
+ */
+async function loadElliott(): Promise<void> {
+  const token = ++elliottToken;
+  if (!code.value || tab.value === 'trend') {
+    elliott.value = null;
+    return;
+  }
+  try {
+    const data = await api.elliott(code.value, tab.value, secid.value || undefined);
+    if (token !== elliottToken) return;
+    elliott.value = data;
+  } catch {
+    if (token !== elliottToken) return;
+    elliott.value = null;
+  }
+  renderOverlays();
+}
+
+/** 浪段与目标位配色：与计划线（红/绿/蓝/橙）、分割线（金）、枢轴（灰蓝）都拉开 */
+const WAVE_COLOR = '#e06bd0';
+const WAVE_TARGET_COLOR = '#b45ba6';
+/** 已被走过的档位：褪成灰紫，读图时一眼分得出「还要去的」和「已经走过的」 */
+const WAVE_TARGET_PASSED_COLOR = '#6d5a69';
+/** 失效价用暖橙警示，与目标位区分——一个是想去的地方，一个是不能去的地方 */
+const WAVE_INVALID_COLOR = '#ff8f3f';
+
+/** 数字浪标转圈号，与 A/B/C letters 一起构成紧凑标签 */
+const CIRCLED: Record<string, string> = { '1': '①', '2': '②', '3': '③', '4': '④', '5': '⑤' };
+const waveGlyph = (label: string): string => CIRCLED[label] ?? label;
+
+/**
+ * 置信度门槛只用来决定文案措辞：后端在低于它时已经不产出 targets 了
+ * （见 shared 里该常量的注释——门槛下沉到后端才能让 LLM 底稿与界面口径一致）。
+ */
+const WAVE_MIN_CONFIDENCE = ELLIOTT_MIN_TRUSTED_CONFIDENCE;
+
+/** 当前周期是否支持波浪：分时没有 K 线时间轴，浪段无从落点 */
+const canElliott = computed(() => tab.value !== 'trend' && !!code.value);
+
+/** 主计数（当前级别）；置信度过低时视作不可用 */
+const waveMain = computed<ElliottWaveCount | null>(() => {
+  const c = elliott.value?.minor;
+  if (!c || c.state === 'unclear') return null;
+  return c;
+});
+
+/** 主计数是否可信到能报目标价 */
+const waveTrusted = computed(() => (waveMain.value?.confidence ?? 0) >= WAVE_MIN_CONFIDENCE);
+
+// ===== 多源共振（把各技术层指向同一价位的情况收敛成一条结论）=====
+
+/** 各来源在该标的上的历史遵循率，挂到共振位旁边 */
+const srcAccuracy = ref<AssertionAccuracy[]>([]);
+let accuracyToken = 0;
+
+async function loadAccuracy(): Promise<void> {
+  const token = ++accuracyToken;
+  if (!code.value || !/^\d{6}$/.test(code.value)) {
+    srcAccuracy.value = [];
+    return;
+  }
+  try {
+    const list = await api.assertions.bySource(code.value);
+    if (token !== accuracyToken) return;
+    srcAccuracy.value = list;
+  } catch {
+    if (token !== accuracyToken) return;
+    srcAccuracy.value = [];
+  }
+}
+
+/** 断言来源 → 中文名，与战绩页同一套词 */
+const SRC_NAME: Record<string, string> = {
+  elliott: '波浪',
+  fib: '黄金分割',
+  pivot: '枢轴',
+  ma: '均线',
+  chan: '缠论中枢',
+  dow: '前高前低',
+};
+
+/** 参与共振聚类的一个原始价位 */
+interface RawLevel {
+  price: number;
+  source: keyof typeof SRC_NAME;
+  detail: string;
+}
+
+/**
+ * 从**前端已经持有的数据**里收集各来源价位。
+ *
+ * 后端的 candidateCatalog 也做同样的聚类，但它长在 agent 的重上下文里（prepareContext 要
+ * 取多周期证据、广度、大盘阶段），为详情页拉一次不值。这里用的是 /levels 与 /elliott
+ * 已经返回的同一批原始数据，聚出来的共振结论一致，且零新增请求。
+ */
+const rawLevels = computed<RawLevel[]>(() => {
+  const out: RawLevel[] = [];
+  const lv = levels.value;
+  if (lv) {
+    for (const f of lv.fibRetracements) out.push({ price: f.price, source: 'fib', detail: `回撤 ${f.ratio}` });
+    for (const f of lv.fibExtensions) out.push({ price: f.price, source: 'fib', detail: `扩展 ${f.ratio}` });
+    if (lv.pivot) {
+      const p = lv.pivot;
+      for (const [k, v] of [['PP', p.pp], ['R1', p.r1], ['R2', p.r2], ['S1', p.s1], ['S2', p.s2]] as Array<[string, number]>) {
+        out.push({ price: v, source: 'pivot', detail: k });
+      }
+    }
+    if (lv.ma?.supportMa) out.push({ price: lv.ma.supportMa.value, source: 'ma', detail: `MA${lv.ma.supportMa.period} 支撑` });
+    if (lv.ma?.resistanceMa) out.push({ price: lv.ma.resistanceMa.value, source: 'ma', detail: `MA${lv.ma.resistanceMa.period} 压力` });
+    if (lv.swing) {
+      out.push({ price: lv.swing.high, source: 'dow', detail: `波段高 ${lv.swing.highTime}` });
+      out.push({ price: lv.swing.low, source: 'dow', detail: `波段低 ${lv.swing.lowTime}` });
+    }
+  }
+  const c = waveMain.value;
+  if (c && waveTrusted.value) {
+    for (const t of c.targets) out.push({ price: t.price, source: 'elliott', detail: `${c.currentLabel}浪 ${t.ratio}` });
+    if (c.invalidationPrice != null) {
+      out.push({ price: c.invalidationPrice, source: 'elliott', detail: '失效价' });
+    }
+  }
+  return out.filter((l) => Number.isFinite(l.price) && l.price > 0);
+});
+
+/** 一簇共振位 */
+interface Confluence {
+  id: string;
+  price: number;
+  /** 参与的来源（去重） */
+  sources: Array<keyof typeof SRC_NAME>;
+  /** 每个来源具体是哪一档 */
+  details: string[];
+  /** 距现价多少 ATR，判断够不够得着 */
+  atrDist: number | null;
+}
+
+/**
+ * 把彼此贴得足够近的价位聚成一簇。
+ * 容差直接复用计划线与分割线的那套（0.15% 与 0.12ATR 取大者）——
+ * 「近到画在图上分不出两条线」正是共振该用的判据，没必要另立一个阈值。
+ */
+const confluences = computed<Confluence[]>(() => {
+  const lv = levels.value;
+  const tol = Math.max((lv?.close ?? 0) * LEVEL_MATCH_PCT, (lv?.atr ?? 0) * LEVEL_MATCH_ATR);
+  const raw = [...rawLevels.value].sort((a, b) => a.price - b.price);
+  if (!(tol > 0) || raw.length === 0) return [];
+  const clusters: RawLevel[][] = [];
+  for (const l of raw) {
+    const last = clusters[clusters.length - 1];
+    if (last && l.price - last[last.length - 1].price <= tol) last.push(l);
+    else clusters.push([l]);
+  }
+  const atr = lv?.atr ?? 0;
+  const close = lv?.close ?? 0;
+  return clusters
+    .map((c, i) => {
+      const price = c.reduce((s, x) => s + x.price, 0) / c.length;
+      const sources = [...new Set(c.map((x) => x.source))];
+      return {
+        id: `cf:${i}:${price.toFixed(3)}`,
+        price,
+        sources,
+        details: c.map((x) => `${SRC_NAME[x.source]}${x.detail ? ` ${x.detail}` : ''}`),
+        atrDist: atr > 0 && close > 0 ? (price - close) / atr : null,
+      };
+    })
+    // 共振源多的排前面；同样多时离现价近的优先（先要面对的那个）
+    .sort(
+      (a, b) =>
+        b.sources.length - a.sources.length ||
+        Math.abs(a.atrDist ?? 99) - Math.abs(b.atrDist ?? 99),
+    );
+});
+
+/**
+ * 两套以上方法指向才算「强」。这个门槛只用于两件事：图上画不画、表里高不高亮。
+ *
+ * 表格本身**列全部价位**，不再过滤。早先默认只列强位时，速读卡挑出的最近阻力
+ * 若恰好是单套方法给的，它在下方表里就找不到——数据没错，但两处口径不一致，
+ * 看着像 bug。细节区已经整体折叠，多列几行不构成干扰，反倒省掉一个子开关。
+ */
+const MIN_CONFLUENCE = 2;
+/** 图上只画强位：13 条线全画上去，图就没法看了 */
+const strongConfluences = computed(() => confluences.value.filter((c) => c.sources.length >= MIN_CONFLUENCE));
+
+/** 某来源的历史遵循率文案，取不到或样本不足时返回空串（不编） */
+function srcRateText(source: string): string {
+  const a = srcAccuracy.value.find((x) => x.key === source);
+  if (!a || a.rate == null) return '';
+  return `${(a.rate * 100).toFixed(0)}%`;
+}
+
+// ===== 速读卡片：只回答「现在在哪、上面撞哪、下面撑哪」=====
+
+/** 速读卡片里的一档关键位 */
+interface LeadLevel {
+  price: string;
+  /** 距现价百分比，如 '1.9%' */
+  gapPct: string;
+  atrDist: string;
+  /** 几套方法同时指向 */
+  sourceCount: number;
+  sourceNames: string;
+  /** 历史上这类位子挡住/撑住的比例，样本不足为空串 */
+  rateText: string;
+  /** 已判定样本数，为 0 表示这个比例是空的 */
+  sampleN: number;
+  /**
+   * 历史遵循率偏低。
+   *
+   * 刻意不说「不如抛硬币」：判定口径是「摸到后 5 根内反向走出 ≥1 ATR」，
+   * 它先验并不是五五开的二分类，没做同波动率随机对照之前，说它「劣于随机」
+   * 是在编一个没验过的基线。能说的只是「历史上这类位子只有这么点比例真起了作用」。
+   */
+  weak: boolean;
+  /** 价格已贴到这一档，值得把确认清单摊开看 */
+  testing: boolean;
+  /** 三条件清单，仅 testing 档铺开；量价数据缺失时为空数组 */
+  conds: BreakCond[];
+  /** 一句话结论：已确认 / 穿越了但没确认 / 还没碰 */
+  breakVerdict: string;
+  /** 未铺开时给的一行规则摘要 */
+  ruleText: string;
+}
+
+/** 三条件里的一条：文案 + 今日实值 + 是否已满足 */
+interface BreakCond {
+  label: string;
+  actual: string;
+  ok: boolean;
+  /** 该条取不到数（不是没满足）。未知不能当成不满足，否则会把「不知道」说成「不成立」 */
+  unknown?: boolean;
+}
+
+/** 一层可达性档次：上下各一档 */
+interface LeadTier {
+  key: string;
+  label: string;
+  /** 该层的 ATR 距离范围文案 */
+  range: string;
+  resistance: LeadLevel | null;
+  support: LeadLevel | null;
+}
+
+/**
+ * 可达性分层的 ATR 边界。
+ *
+ * 用 ATR 倍数而不是百分比：同样是 ±2%，低波动标的要走一个月，
+ * 半导体设备 ETF（日均振幅 6.4%）开盘半小时就穿了。ATR 是相对量，
+ * 不同波动率的标的自动适配，不需要逐票调参。
+ */
+const TIER_BOUNDS: Array<{ key: string; label: string; range: string; max: number }> = [
+  { key: 'intraday', label: '今天就可能碰到', range: '一天常见波动之内', max: 1 },
+  { key: 'swing', label: '这几天可能碰到', range: '一到三天的波动距离', max: 3 },
+  { key: 'mid', label: '更远的位置', range: '三天以上的波动距离', max: Infinity },
+];
+
+/** 低于这个遵循率的档位仍展示（日内要看），但打上警告 */
+const WEAK_RATE = 0.5;
+
+/**
+ * 该簇的历史遵循率：各来源按**样本量加权**平均。
+ *
+ * 不用简单平均：一个只有 12 笔样本的来源和一个 600 笔的来源，简单平均会让前者
+ * 与后者等权，几笔噪声就能把整簇的可信度拉高或拉低。样本不足的来源直接不参与，
+ * 全都不足则整段不显示——宁可不给这个数，也不给一个凑出来的数。
+ */
+function clusterRate(sources: string[]): { rate: number | null; n: number } {
+  let wsum = 0;
+  let n = 0;
+  for (const s of sources) {
+    const a = srcAccuracy.value.find((x) => x.key === s);
+    if (!a || a.rate == null || a.settled <= 0) continue;
+    wsum += a.rate * a.settled;
+    n += a.settled;
+  }
+  return n > 0 ? { rate: wsum / n, n } : { rate: null, n: 0 };
+}
+
+/**
+ * 距现价多少 ATR 之内算「正在被测试」，值得把确认清单摊开。
+ *
+ * 用距离而不是「盘中是否触及」：卡片里的档位按定义就在现价上/下方，
+ * 现价永远没穿过它，拿收盘价判触及恒为假。0.5 ATR 是半天振幅，
+ * 落在这个范围内的档当天大概率会被摸到，正是需要看确认条件的时刻。
+ */
+const TESTING_ATR = 0.5;
+
+/**
+ * 这一次穿越算不算数。
+ *
+ * 与后端 symbolPlans/volumePrice 的 breakout_confirmed / heavy_down **共用同一套量能门槛**
+ * （BREAK_CONFIRM，前端不自定阈值），但**结构条件是按档位替换过的**：后端问的是
+ * 「有没有越过近 20 根最高收盘」，这里问的是「有没有越过你正在看的这一档」。
+ * 这是刻意的改写而不是照搬——两者对同一根 K 线可能给出不同结论，别把这里的判定
+ * 与后端的 pattern 字段混为一谈。
+ *
+ * 注意这与遵循率是**两个口径**：遵循率是回溯统计（摸到后 5 根内反不反向），
+ * 这里是前瞻判据（今天收盘就能判）。模板上必须分开写。
+ */
+function breakConds(price: number, close: number, up: boolean, vp: PriceLevels['volumePrice']): BreakCond[] {
+  const ratio = vp?.basis?.ratio ?? null;
+  const loc = vp?.closeLocation ?? null;
+  const minRatio = up ? BREAK_CONFIRM.upVolumeRatio : BREAK_CONFIRM.downVolumeRatio;
+  const basisName = vp?.basis?.source === 'volume' ? '成交量比' : '成交额比';
+  // 价格这一条永远算得出来，不能因为量能取不到就整份清单为空——
+  // 早先那样写会让「价格已经穿过去了」被显示成「还没站上」，正好说反
+  return [
+    {
+      label: up ? `收盘站上 ${fmtPrice(price)}` : `收盘跌破 ${fmtPrice(price)}`,
+      actual: `今收 ${fmtPrice(close)}`,
+      ok: up ? close > price : close < price,
+    },
+    {
+      label: `${basisName}放大到平时的 ${minRatio} 倍以上（比近 20 天的中间水平）`,
+      actual: ratio == null ? '数据不足' : `${ratio.toFixed(2)} 倍`,
+      ok: ratio != null && ratio >= minRatio,
+      unknown: ratio == null,
+    },
+    {
+      label: up
+        ? '收在当天波动区间的上沿附近（不是冲高回落）'
+        : '收在当天波动区间的下沿附近（不是杀低反弹）',
+      actual: loc == null ? '数据不足' : loc.toFixed(2),
+      ok:
+        loc != null &&
+        (up ? loc >= BREAK_CONFIRM.upCloseLocation : loc <= BREAK_CONFIRM.downCloseLocation),
+      unknown: loc == null,
+    },
+  ];
+}
+
+function toLeadLevel(c: Confluence, close: number, up: boolean, vp: PriceLevels['volumePrice']): LeadLevel {
+  const { rate, n } = clusterRate(c.sources);
+  const conds = breakConds(c.price, close, up, vp);
+  const crossed = conds[0]?.ok ?? false;
+  const allOk = conds.length > 0 && conds.every((x) => x.ok);
+  const word = up ? '突破' : '跌破';
+  /**
+   * 未收盘时**绝不说「已确认」**。
+   *
+   * 收盘价与收盘位置这两条在收盘前都还会变，后端 computeVolumePrice 在
+   * completeBar=false 时干脆把 pattern 置空、并写明「不构成确认」。
+   * 早先这里照样先写「已确认突破」再补一句「仅盘中参考」，等于同一行里
+   * 先下结论再撤回——盘中扫一眼只会看见前半句。
+   */
+  const closed = vp?.completeBar !== false;
+  // 未知 ≠ 未满足：量能取不到时只能说「判不了」，说成「假突破嫌疑」是把不知道当成了不成立
+  const anyUnknown = conds.some((c) => c.unknown);
+  let breakVerdict = `还没${up ? '站上' : '跌破'}`;
+  if (allOk) breakVerdict = closed ? `已确认${word}` : `盘中三条件暂时齐了，收盘不变才算数`;
+  else if (crossed && anyUnknown) breakVerdict = `价格已穿越，但量价数据不足，暂时判不了`;
+  else if (crossed) {
+    breakVerdict = closed
+      ? `穿过去了，但没获量能确认（假${word}嫌疑）`
+      : `盘中已穿过去，量能还不够；收盘前都不算数`;
+  } else if (!closed) breakVerdict += '（当日未收盘）';
+  const minRatio = up ? BREAK_CONFIRM.upVolumeRatio : BREAK_CONFIRM.downVolumeRatio;
+  return {
+    price: fmtPrice(c.price),
+    gapPct: `${(Math.abs(c.price - close) / close * 100).toFixed(1)}%`,
+    atrDist: c.atrDist == null ? '' : `${c.atrDist >= 0 ? '+' : ''}${c.atrDist.toFixed(1)}ATR`,
+    sourceCount: c.sources.length,
+    sourceNames: c.sources.map((s) => SRC_NAME[s]).join('/'),
+    rateText: rate == null ? '' : `${(rate * 100).toFixed(0)}%`,
+    sampleN: n,
+    weak: rate != null && rate < WEAK_RATE,
+    testing: c.atrDist != null && Math.abs(c.atrDist) < TESTING_ATR,
+    conds,
+    breakVerdict,
+    ruleText: `算数的${word}要三样齐：收盘穿过去、成交放大到平时 ${minRatio} 倍、收在当天${up ? '上' : '下'}沿`,
+  };
+}
+
+/**
+ * 同层内挑哪一档：先看历史遵循率，再看几套方法指向，最后才看远近。
+ *
+ * 刻意不是「离得最近的优先」。近处那一档往往是枢轴或均线给的——实测这两个来源
+ * 在 600 笔样本上只有 44%，先撞到不等于值得看。层内已经按可达性圈定了范围，
+ * 在这个范围里当然该挑最靠得住的那个。
+ */
+function pickInTier(list: Confluence[]): Confluence | null {
+  if (list.length === 0) return null;
+  return [...list].sort((a, b) => {
+    const ra = clusterRate(a.sources).rate ?? 0;
+    const rb = clusterRate(b.sources).rate ?? 0;
+    return (
+      rb - ra || b.sources.length - a.sources.length || Math.abs(a.atrDist ?? 99) - Math.abs(b.atrDist ?? 99)
+    );
+  })[0];
+}
+
+/**
+ * 速读卡片。数据全部来自已加载的 levels 与 confluences，不新增任何请求。
+ *
+ * 上下各按可达性分三层给档，而不是只给最近的一档。只给最近那档时，高波动标的上
+ * 拿到的永远是 ±0.2 ATR 的枢轴位——那是当天振幅的三分之一，必然被打破，
+ * 看着像阈值其实是噪声。分层之后「今天就会碰的」与「真正的坎」一眼分得开。
+ *
+ * 遵循率偏低的档位照样展示（日内仍要看），但打上 weak 标记由模板显著警告。
+ */
+const leadCard = computed(() => {
+  const lv = levels.value;
+  const close = lv?.close ?? 0;
+  if (!(close > 0) || tab.value === 'trend') return null;
+  const all = confluences.value;
+  const atr = lv?.atr ?? 0;
+  const vp = lv?.volumePrice ?? null;
+
+  // ATR 取不到就分不了层（距离没有量纲），退回单层「附近」，仍给上下各一档
+  const tiers: LeadTier[] = [];
+  if (atr > 0) {
+    let lower = 0;
+    for (const t of TIER_BOUNDS) {
+      const inTier = (c: Confluence): boolean => {
+        const d = Math.abs(c.atrDist ?? 0);
+        return d >= lower && d < t.max;
+      };
+      const res = pickInTier(all.filter((c) => c.price > close && inTier(c)));
+      const sup = pickInTier(all.filter((c) => c.price < close && inTier(c)));
+      lower = t.max;
+      if (!res && !sup) continue;
+      tiers.push({
+        key: t.key,
+        label: t.label,
+        range: t.range,
+        resistance: res ? toLeadLevel(res, close, true, vp) : null,
+        support: sup ? toLeadLevel(sup, close, false, vp) : null,
+      });
+    }
+  } else {
+    const res = all.filter((c) => c.price > close).sort((a, b) => a.price - b.price)[0];
+    const sup = all.filter((c) => c.price < close).sort((a, b) => b.price - a.price)[0];
+    if (res || sup) {
+      tiers.push({
+        key: 'near',
+        label: '附近',
+        range: '缺 ATR，无法分层',
+        resistance: res ? toLeadLevel(res, close, true, vp) : null,
+        support: sup ? toLeadLevel(sup, close, false, vp) : null,
+      });
+    }
+  }
+
+  // 区间位置仍按**最近的**上下一档算：它回答的是「眼下卡在哪」，与分层挑选无关
+  const nearestUp = all.filter((c) => c.price > close).sort((a, b) => a.price - b.price)[0];
+  const nearestDown = all.filter((c) => c.price < close).sort((a, b) => b.price - a.price)[0];
+  const posPct =
+    nearestUp && nearestDown && nearestUp.price > nearestDown.price
+      ? Math.round(((close - nearestDown.price) / (nearestUp.price - nearestDown.price)) * 100)
+      : null;
+
+  return {
+    close: fmtPrice(close),
+    periodLabel: TAB_LABEL[tab.value] ?? tab.value,
+    maAlignment: lv?.ma?.alignment ?? '',
+    /** 1 ATR 的绝对值与百分比，卡片要用它解释「遵循」的幅度门槛 */
+    atrText: atr > 0 ? `${fmtPrice(atr)}（${lv?.atrPct ?? '?'}%）` : '',
+    tiers,
+    nearestUp: nearestUp ? fmtPrice(nearestUp.price) : '',
+    nearestDown: nearestDown ? fmtPrice(nearestDown.price) : '',
+    posPct,
+  };
+});
+
+/** 周期中文名，速读卡片的状态行用 */
+const TAB_LABEL: Record<string, string> = {
+  trend: '分时',
+  '5m': '5分钟',
+  '15m': '15分钟',
+  '30m': '30分钟',
+  '60m': '60分钟',
+  '120m': '120分钟',
+  day: '日线',
+  week: '周线',
+  month: '月线',
+};
+
+/** 折叠开关：默认只看速读卡片，细节按需展开 */
+const showDetail = ref(false);
+
+/**
+ * 波浪派生的水平线：目标位 + 失效价。
+ * 置信度不够时只留失效价——目标价是「往哪走」的猜测，失效价是「猜错了怎么知道」的判据，
+ * 后者在结构不清晰时反而更该留着。
+ */
+const waveLines = computed<DetLine[]>(() => {
+  const c = waveMain.value;
+  if (!layers.value.elliott || !canElliott.value || !c) return [];
+  const out: DetLine[] = [];
+  if (waveTrusted.value) {
+    const close = elliott.value?.close ?? 0;
+    const up = c.currentDirection === 'up';
+    const name = elliottLevelName(c.currentLabel, c.currentDirection);
+    for (const t of c.targets) {
+      // 已被走过的档位保留但降权：它不再是「可能停下的位置」，与仍有效的那条画得一样重会看不出区别
+      const reached = close > 0 && (up ? close >= t.price : close <= t.price);
+      out.push({
+        id: `wave:t:${t.ratio}`,
+        price: t.price,
+        label:
+          `${name} ${fmtPrice(t.price)}（${t.ratio}` +
+          (reached ? `·${elliottPassedWord(c.currentDirection)}` : '') +
+          '）',
+        color: reached ? WAVE_TARGET_PASSED_COLOR : WAVE_TARGET_COLOR,
+        group: '波浪',
+        note: t.note,
+      });
+    }
+  }
+  if (c.invalidationPrice != null) {
+    out.push({
+      id: 'wave:inv',
+      price: c.invalidationPrice,
+      label: `波浪失效 ${fmtPrice(c.invalidationPrice)}`,
+      color: WAVE_INVALID_COLOR,
+      group: '波浪',
+      note: `跌破/涨破此价则当前${waveGlyph(c.currentLabel ?? '')}浪计数作废`,
+    });
+  }
+  return out.filter((l) => Number.isFinite(l.price) && l.price > 0);
+});
+
+// ===== 波浪解读（LLM，按需触发）=====
+
+const waveText = ref('');
+const waveTexting = ref(false);
+const waveTextError = ref('');
+
+/** 换标的/换周期后旧解读必须作废：它是对另一套计数说的话 */
+function resetWaveText(): void {
+  waveText.value = '';
+  waveTextError.value = '';
+}
+
+/**
+ * 请模型把计数翻成人话。后端按「标的+周期+最新 bar」缓存，
+ * 同一根 bar 内重复点不会重复计费，所以这里不再自己做防重复，只挡并发。
+ */
+async function interpretWave(): Promise<void> {
+  const reqTab = tab.value;
+  // 分时没有 K 线时间轴，浪序无从谈起；这里显式排除也让 reqTab 收窄到 KlinePeriod
+  if (waveTexting.value || !code.value || reqTab === 'trend') return;
+  waveTexting.value = true;
+  waveTextError.value = '';
+  const reqCode = code.value;
+  try {
+    const res = await api.elliottInterpret(reqCode, reqTab, secid.value || undefined);
+    // 请求期间用户可能已切标的或切周期，此时这段解读说的不是眼前这张图
+    if (reqCode !== code.value || reqTab !== tab.value) return;
+    waveText.value = res.text;
+  } catch (e) {
+    if (reqCode !== code.value || reqTab !== tab.value) return;
+    waveTextError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    waveTexting.value = false;
+  }
+}
+
+/** 结论区里一套计数的展示行 */
+interface WaveRow {
+  key: string;
+  /** 级别名，如「周线级」 */
+  degree: string;
+  /** 主计数 / 备选计数 */
+  role: string;
+  /** 当前处于第几浪的描述 */
+  position: string;
+  confidence: number;
+  /** 这一浪可能停下的位置该叫什么，如「反弹见顶位」，与图上标签同一来源 */
+  levelName: string;
+  /** 各档位；为空时看 targetsHint */
+  targets: WaveTargetCell[];
+  /** 没有档位时的说明（置信度不足 / 无理论依据 / 会自我证伪） */
+  targetsHint: string;
+  /** 首选参考（价位 + 预计日期）；给不出时为 null */
+  primary: WavePrimaryCell | null;
+  invalid: string;
+  timeWindow: string;
+  /** 进行中那一浪的子浪，如 Ba/Bb/Bc */
+  subLegs: Array<{ key: string; label: string; range: string; running: boolean }>;
+  /** 子浪口径说明 */
+  subNote: string;
+}
+
+/** 结论区里的首选参考：一个可直接对照的价位与日期 */
+interface WavePrimaryCell {
+  price: string;
+  ratio: string;
+  date: string;
+  title: string;
+}
+
+/** 结论区里的一个见顶/见底位 */
+interface WaveTargetCell {
+  key: string;
+  /** 价格文案 */
+  price: string;
+  /** 斐波那契比例 */
+  ratio: string;
+  /** 价格已经走过这一档 */
+  reached: boolean;
+  /** 已走过时的说法：上行叫已突破、下行叫已跌破 */
+  passedWord: string;
+  /** 悬浮说明，交代这个比例是怎么算出来的 */
+  title: string;
+}
+
+/**
+ * 把后端给的比例位整理成「这一浪可能停下的位置」。
+ *
+ * 两件事必须在界面上说清楚，否则「为什么有两个价」是必然的疑问：
+ * 1. 它们是**并列**的候选（浅、深两档），不是「先到 A 再到 B」的阶段目标；
+ * 2. 价格常常已经越过靠近的那一档——它不再是有效的停步位，必须标出来。
+ * 排序按当前浪的行进方向由近到远，让「下一个可能停下的位置」永远排在最后一个未走过项。
+ */
+function toTargetCells(c: ElliottWaveCount, close: number): WaveTargetCell[] {
+  const up = c.currentDirection === 'up';
+  const passedWord = elliottPassedWord(c.currentDirection);
+  return [...c.targets]
+    .sort((a, b) => (up ? a.price - b.price : b.price - a.price))
+    .map((t) => ({
+      key: t.ratio,
+      price: fmtPrice(t.price),
+      ratio: t.ratio,
+      reached: close > 0 && (up ? close >= t.price : close <= t.price),
+      passedWord,
+      title: t.note,
+    }));
+}
+
+/** 一套计数 → 展示行；unclear 的照样列出来，明说结构不清晰好过悄悄隐藏 */
+function toWaveRow(
+  c: ElliottWaveCount | null,
+  key: string,
+  role: string,
+  close: number,
+): WaveRow | null {
+  if (!c) return null;
+  const trusted = c.confidence >= WAVE_MIN_CONFIDENCE;
+  const dir = c.currentDirection === 'up' ? '上行' : '回落';
+  const position =
+    c.state === 'unclear' || !c.currentLabel
+      ? '结构不清晰'
+      : /[ABC]/.test(c.currentLabel)
+        ? `调整 ${c.currentLabel} 浪${dir}中`
+        : `第 ${c.currentLabel} 浪${dir}中`;
+  const targets = trusted ? toTargetCells(c, close) : [];
+  const p = trusted ? c.primary : null;
+  return {
+    key,
+    degree: c.degreeLabel,
+    role,
+    position,
+    confidence: c.confidence,
+    levelName: elliottLevelName(c.currentLabel, c.currentDirection),
+    targets,
+    targetsHint: !trusted ? '置信度偏低，不给参考位' : targets.length ? '' : '无可用参考位',
+    primary:
+      p && p.price != null
+        ? {
+            price: fmtPrice(p.price),
+            ratio: p.ratio ?? '',
+            date: p.date ?? '',
+            title: p.note,
+          }
+        : null,
+    invalid: c.invalidationPrice != null ? fmtPrice(c.invalidationPrice) : '—',
+    timeWindow: c.timeWindow
+      ? `${c.timeWindow.fromDate} ~ ${c.timeWindow.toDate}（约 ${c.timeWindow.bars} 根）`
+      : '—',
+    subLegs: (c.subdivision?.legs ?? []).map((l) => ({
+      key: l.label,
+      label: l.label,
+      range: `${fmtPrice(l.fromPrice)} → ${fmtPrice(l.toPrice)}`,
+      running: !l.completed,
+    })),
+    subNote: c.subdivision?.note ?? '',
+  };
+}
+
+/** 结论区行：大级别 → 当前级别 → 高一度读法 → 备选计数 */
+const waveRows = computed<WaveRow[]>(() => {
+  const a = elliott.value;
+  if (!a) return [];
+  return [
+    toWaveRow(a.major, 'major', '大级别', a.close),
+    toWaveRow(a.minor, 'minor', '当前级别', a.close),
+    toWaveRow(a.contextual, 'ctx', '高级别读法', a.close),
+    toWaveRow(a.alternate, 'alt', '备选计数', a.close),
+  ].filter((r): r is WaveRow => r !== null);
+});
+
+/**
+ * 两种读法的差异说明。只在高一度读法真的产出 B 浪时才提示——
+ * 这时它与「当前级别」指的是同一段走势、价位相同，唯一分歧在这一浪之后，
+ * 不点破的话用户会以为界面给了两个互相打架的结论。
+ */
+const waveReadingLegend = computed(() => {
+  const c = elliott.value?.contextual;
+  const m = elliott.value?.minor;
+  if (!c || c.currentLabel !== 'B' || !m?.currentLabel) return '';
+  const down = c.legs[0] ? c.legs[0].toPrice < c.legs[0].fromPrice : true;
+  // 字母浪不能套「第 X 浪」的说法，会读成「第 A 浪」
+  const minorName = /[ABC]/.test(m.currentLabel) ? `${m.currentLabel} 浪` : `第 ${m.currentLabel} 浪`;
+  const levelName = elliottLevelName(c.currentLabel, c.currentDirection);
+  return (
+    `「当前级别」与「高级别读法」说的是同一段走势，${levelName}完全相同，分歧只在这一浪之后：` +
+    `按前者（${minorName}）后面还有一跌一涨、仍有${down ? '上行' : '下行'}空间；` +
+    `按后者（B 浪）则本浪走完直接进 C 浪，有创新${down ? '低' : '高'}的含义。`
+  );
+});
+
+/** 见顶/见底位的口径说明，只在确实列出了多档时才占一行 */
+const waveTargetLegend = computed(() =>
+  waveRows.value.some((r) => r.targets.length > 1)
+    ? '见顶位／见底位 = 这一浪可能停下来的价位，按斐波那契比例算出浅、深两档，两档互为备选、不是先到一个再到另一个；' +
+      '价格通常在其中某一档附近转向。标了「已突破／已跌破」的表示价格已经走过它，那一档不再是有效的停步位。'
+    : '',
+);
 
 /**
  * 走势推演数据（计划 S5）。两层刻意分开：
@@ -1011,21 +1800,72 @@ function renderOverlays(): void {
   chart.removeOverlay({ groupId: MARK_GROUP });
   chart.removeOverlay({ groupId: DET_GROUP });
   chart.removeOverlay({ groupId: PROJ_GROUP });
+  chart.removeOverlay({ groupId: WAVE_GROUP });
+  chart.removeOverlay({ groupId: CONFLUENCE_GROUP });
   const isTrend = tab.value === 'trend';
   if (!isTrend) renderProjection();
+  if (!isTrend) renderWaves();
   const visible = marks.value.filter(isMarkVisible);
   // 与计划线重合的点位不再单独画，其用途已缀到对应计划线的标签上（见 detPlanMatch）
   const dets = isTrend ? [] : detLines.value.filter((d) => !detPlanMatch.value.byDet.has(d.id));
+  const waves = isTrend ? [] : waveLines.value;
+  const cfs = isTrend || !layers.value.confluence ? [] : strongConfluences.value;
   // 只有水平线（价位线/价格带/点位线）会因价格接近而叠标签，其余按时间轴分散，无需错位
-  // priority：计划线优先占左侧槽位，点位线是参考背景，被挤到右边可以接受
+  // priority：计划线优先占左侧槽位，点位线与波浪线是参考背景，被挤到右边可以接受。
+  // 波浪线必须与点位线一起分槽——分开算各自都以为自己在槽 0，标签正好压在一起。
   const slots = assignLabelSlots(
     [
       ...visible
         .filter((m) => m.kind === 'price_line')
         .map((m) => ({ id: m.id, price: horizontalMarkAnchor(m) ?? 0, priority: 0 })),
       ...dets.map((d) => ({ id: d.id, price: d.price, priority: 1 })),
+      ...waves.map((w) => ({ id: w.id, price: w.price, priority: 1 })),
+      // 共振位优先级与计划线同级：它是各层交集，被挤出可视区最可惜
+      ...cfs.map((c) => ({ id: c.id, price: c.price, priority: 0 })),
     ].filter((it) => it.price > 0),
   );
+  for (const c of cfs) {
+    chart.createOverlay({
+      name: 'SM_PRICE_LINE',
+      groupId: CONFLUENCE_GROUP,
+      points: [{ value: c.price }],
+      lock: true,
+      extendData: {
+        text: `${c.sources.length}源共振 ${fmtPrice(c.price)}（${c.sources.map((s) => SRC_NAME[s]).join('+')}）`,
+        slot: slots.get(c.id) ?? 0,
+      } satisfies MarkExtend,
+      styles: {
+        // 实线且略粗：它是本图上最该先看的几条线，视觉权重要压过单源的参考位
+        line: { color: CONFLUENCE_COLOR, size: 2, style: LineType.Solid },
+        text: {
+          color: CONFLUENCE_COLOR,
+          size: 11,
+          backgroundColor: 'rgba(20,24,33,0.88)',
+          paddingLeft: 4,
+          paddingRight: 4,
+        },
+      },
+    });
+  }
+  for (const w of waves) {
+    chart.createOverlay({
+      name: 'SM_PRICE_LINE',
+      groupId: WAVE_GROUP,
+      points: [{ value: w.price }],
+      lock: true,
+      extendData: { text: w.label, slot: slots.get(w.id) ?? 0 } satisfies MarkExtend,
+      styles: {
+        line: { color: w.color, size: 1, style: LineType.Dashed },
+        text: {
+          color: w.color,
+          size: 10,
+          backgroundColor: 'rgba(20,24,33,0.7)',
+          paddingLeft: 3,
+          paddingRight: 3,
+        },
+      },
+    });
+  }
   for (const d of dets) {
     chart.createOverlay({
       name: 'SM_PRICE_LINE',
@@ -1162,6 +2002,45 @@ function renderProjection(): void {
           backgroundColor: 'rgba(20,24,33,0.8)',
           paddingLeft: 3,
           paddingRight: 3,
+        },
+      },
+    });
+  }
+}
+
+/**
+ * 画浪段连线。已完成的浪用实线粗一档，进行中那一浪用虚线——
+ * 后者的终点是当前收盘价，会随行情一直动，视觉上必须和已经定格的浪区分开。
+ */
+function renderWaves(): void {
+  if (!chart) return;
+  const c = waveMain.value;
+  if (!layers.value.elliott || !canElliott.value || !c) return;
+  for (const leg of c.legs) {
+    const from = markTimestamp(leg.fromTime);
+    const to = markTimestamp(leg.toTime);
+    if (from == null || to == null) continue;
+    chart.createOverlay({
+      name: 'SM_WAVE_LEG',
+      groupId: WAVE_GROUP,
+      points: [
+        { timestamp: from, value: leg.fromPrice },
+        { timestamp: to, value: leg.toPrice },
+      ],
+      lock: true,
+      extendData: { text: waveGlyph(leg.label), slot: 0 } satisfies MarkExtend,
+      styles: {
+        line: {
+          color: WAVE_COLOR,
+          size: leg.completed ? 2 : 1,
+          style: leg.completed ? LineType.Solid : LineType.Dashed,
+        },
+        text: {
+          color: WAVE_COLOR,
+          size: 12,
+          backgroundColor: 'rgba(20,24,33,0.85)',
+          paddingLeft: 4,
+          paddingRight: 4,
         },
       },
     });
@@ -1376,6 +2255,8 @@ function setupChart() {
   applyView();
   void loadMarks();
   void loadLevels();
+  void loadElliott();
+  void loadAccuracy();
   observeResize();
 }
 
@@ -1425,6 +2306,14 @@ function onClosed() {
   projectionToken += 1;
   projection.value = null;
   projectionPlan.value = null;
+  // 波浪同理：不作废 token 的话，旧标的的计数回来后会写进下一次打开的弹窗
+  elliottToken += 1;
+  elliott.value = null;
+  resetWaveText();
+  accuracyToken += 1;
+  srcAccuracy.value = [];
+  // 不重置的话，上次展开过细节此后每次打开都是满屏，速读卡片就白做了
+  showDetail.value = false;
   layers.value = defaultLayers();
   // 停在「资金面/筹码」时关闭，重开后 setupChart 会在 display:none 的容器里初始化，
   // subPaneHeight() 拿到 0 高度退化成最小值，副图挤成一条线
@@ -1483,9 +2372,10 @@ const indicatorCells = computed<IndCell[]>(() => {
     const live = v.basis === 'realtime';
     const turnover = v.turnoverRate != null ? ` 换手 ${v.turnoverRate}%` : '';
     const HINT: Record<typeof v.basis, string> = {
-      realtime: '盘中口径：东财实时量比（当前每分钟均量 ÷ 前 5 日每分钟均量，已按时间折算）',
-      amount_median20: '收盘口径：当日成交额 ÷ 前 20 日成交额中位数（分母不含当日）',
-      volume_median20: '收盘口径：当日成交量 ÷ 前 20 日成交量中位数（当前日线源不返回成交额，已退成交量口径）',
+      realtime: '盘中算法：东财实时量比（当前每分钟均量 ÷ 前 5 日每分钟均量，已按时间折算）',
+      amount_median20: '收盘算法：当日成交额 ÷ 前 20 日成交额中位数（分母不含当日）',
+      volume_median20:
+        '收盘算法：当日成交量 ÷ 前 20 日成交量中位数（当前日线源不返回成交额，已退回用成交量算）',
     };
     cells.push({
       label: '量能',
@@ -1545,9 +2435,12 @@ const trendStats = computed<TrendStat[] | null>(() => {
 const showStats = computed(() => tab.value === 'trend' && trendStats.value !== null);
 
 // 标签切换：切换主图形态并重载数据；点位测算按周期取（日线短期波段、周线中长期波段），需重拉
+// 波浪同样按周期算（日线看日线级浪序、周线看周线级），且解读是对旧周期说的话，一并作废
 watch(tab, () => {
   applyView();
   void loadLevels();
+  resetWaveText();
+  void loadElliott();
 });
 
 // 图层开关变化只需重绘，不必重取数据（点位已随周期预先拉好）。
@@ -1570,6 +2463,14 @@ watch([code, secid], () => {
   viewMode.value = 'chart'; // 切标的回到图表视图
   marks.value = [];
   levels.value = null;
+  // 与推演同理：切标的时 tab 若本就是 day，watch(tab) 不触发，旧标的的浪形会留在图上
+  elliottToken += 1;
+  elliott.value = null;
+  resetWaveText();
+  // 遵循率是按标的统计的，换标的必须重取，否则会把上一只的成绩挂到这一只的共振位上
+  accuracyToken += 1;
+  srcAccuracy.value = [];
+  void loadAccuracy();
   // 推演也必须清：重取入口只有 watch(tab) 与图层开关，切标的时 tab 本就是 day
   // 的话两个 watch 都不触发，renderProjection 会把旧标的的 basePrice 与情景折线
   // 画到新标的的图上。清空之外还要作废在飞请求，否则旧标的的响应回来照样写进去。
@@ -1659,9 +2560,116 @@ watch([code, secid], () => {
           <div v-if="error" class="kline-error">{{ error }}</div>
         </div>
         <!--
+          速读卡片：本弹窗默认唯一要读的一块，只回答三件事——现在在哪、上面撞哪、下面撑哪。
+          其余所有区块收进下方「展开细节」，一条信息不删，但不再默认糊在脸上。
+        -->
+        <div v-if="viewMode === 'chart' && leadCard" class="lead">
+          <div class="lead__top">
+            <span class="lead__now num">现价 {{ leadCard.close }}</span>
+            <span class="lead__state">
+              {{ leadCard.periodLabel }}
+              <template v-if="leadCard.maAlignment"> · 均线{{ leadCard.maAlignment }}</template>
+              <template v-if="leadCard.atrText"> · 一天常见波动 {{ leadCard.atrText }}</template>
+            </span>
+          </div>
+
+          <!-- 现价在最近上下两档之间的位置。贴上沿说明离阻力近、上攻空间小，反之亦然 -->
+          <div class="lead__mid">
+            <span class="lead__edge num">{{ leadCard.nearestDown || '—' }}</span>
+            <div class="lead__bar">
+              <div v-if="leadCard.posPct != null" class="lead__dot" :style="{ left: `${leadCard.posPct}%` }" />
+            </div>
+            <span class="lead__edge num">{{ leadCard.nearestUp || '—' }}</span>
+            <span class="lead__pos">
+              <template v-if="leadCard.posPct != null">
+                卡在最近两档之间的 {{ leadCard.posPct }}% 处
+              </template>
+              <template v-else>上下缺一档，算不出区间位置</template>
+            </span>
+          </div>
+
+          <!--
+            按可达性分层给档。只给「最近一档」时，高波动标的上拿到的永远是
+            ±0.2 ATR 的枢轴位，那是当天振幅的三分之一，看着像阈值其实是噪声。
+          -->
+          <div v-for="t in leadCard.tiers" :key="t.key" class="lead__tier">
+            <div class="lead__tier-head">
+              <span class="lead__tier-name">{{ t.label }}</span>
+              <span class="lead__tier-range">{{ t.range }}</span>
+            </div>
+            <div v-for="side in (['res', 'sup'] as const)" :key="side" class="lead__lv" :class="`is-${side}`">
+              <span class="lead__tag">{{ side === 'res' ? '上方' : '下方' }}</span>
+              <template v-if="side === 'res' ? t.resistance : t.support">
+                <template v-for="l in [side === 'res' ? t.resistance! : t.support!]" :key="l.price">
+                  <span class="lead__price num">{{ l.price }}</span>
+                  <span class="lead__gap num">
+                    {{ side === 'res' ? '+' : '-' }}{{ l.gapPct }}
+                    <i v-if="l.atrDist">{{ l.atrDist }}</i>
+                  </span>
+                  <span class="lead__src">
+                    {{ l.sourceCount }} 套方法指向（{{ l.sourceNames }}）
+                  </span>
+                  <span
+                    v-if="l.rateText"
+                    class="lead__rate num"
+                    :class="{ 'is-weak': l.weak }"
+                    :title="`已经能判对错的有 ${l.sampleN} 次`"
+                  >
+                    <template v-if="l.weak">
+                      只拦住过 {{ l.rateText }} · 多数时候没起作用，别单凭它下手
+                    </template>
+                    <template v-else>历史上拦住过 {{ l.rateText }}（{{ l.sampleN }} 次）</template>
+                  </span>
+                  <!--
+                    价格贴到这一档才铺开三条件，其余只给一行规则。
+                    六档全铺开就是十八行，反而没人看。
+                  -->
+                  <div v-if="l.testing && l.conds.length" class="lead__conds">
+                    <div class="lead__conds-title">{{ l.breakVerdict }}</div>
+                    <div
+                      v-for="c in l.conds"
+                      :key="c.label"
+                      class="lead__cond"
+                      :class="{ 'is-ok': c.ok, 'is-unknown': c.unknown }"
+                    >
+                      <span class="lead__cond-mark">{{ c.unknown ? '?' : c.ok ? '✓' : '✗' }}</span>
+                      <span class="lead__cond-label">{{ c.label }}</span>
+                      <span class="lead__cond-actual num">{{ c.actual }}</span>
+                    </div>
+                  </div>
+                  <div v-else class="lead__rule">{{ l.ruleText }}</div>
+                </template>
+              </template>
+              <span v-else class="lead__none">这个距离上没有价位</span>
+            </div>
+          </div>
+
+          <!--
+            必须写清口径。不写的话「遵循 84%」会被读成「守住了 84%」，
+            而账本判的是「摸到后掉不掉头」，是两个完全不同的意思。
+          -->
+          <div class="lead__note">
+            <b>「拦住过百分之多少」</b>说的是这类位子历史上管不管用：价格摸到它之后，
+            {{ ASSERTION_REACTION_BARS }} 根 K 线内往回走的幅度够不够大<template
+              v-if="leadCard.atrText"
+            >（本标的要走够 {{ leadCard.atrText }}）</template>，够了才算它起了作用，
+            观察 {{ ASSERTION_HORIZON_DAYS }} 天，只统计这只标的自己的历史。
+            <b>下面那三个勾</b>答的是另一件事——今天这一次穿过去算不算数，当天收盘就能判，
+            跟上面那个百分比没有关系。
+          </div>
+        </div>
+
+        <div v-if="viewMode === 'chart'" class="lead-toggle">
+          <el-button link size="small" @click="showDetail = !showDetail">
+            {{ showDetail ? '收起细节' : '展开细节（图层开关 / 全部价位 / 波浪走势 / 标注清单）' }}
+          </el-button>
+        </div>
+
+        <!--
           图层开关。计划相关的几档只在有标注时才有意义，故按 marks.length 显示；
           黄金分割/枢轴是算出来的，与有没有计划无关，只要在图表视图就常驻可选。
         -->
+        <div v-show="showDetail" class="kline-detail">
         <div v-if="viewMode === 'chart' && tab !== 'trend'" class="kline-layers">
           <span class="kline-layers__label">图层</span>
           <template v-if="marks.length">
@@ -1675,13 +2683,111 @@ watch([code, secid], () => {
           <el-checkbox v-model="layers.projection" :disabled="!canProject" size="small">
             走势推演
           </el-checkbox>
+          <el-checkbox v-model="layers.elliott" :disabled="!canElliott" size="small">
+            波浪
+          </el-checkbox>
+          <el-checkbox v-model="layers.confluence" size="small">共振位</el-checkbox>
         </div>
         <!-- 推演口径说明。措辞刻意不写「95% 概率落在」：锥是按历史波动外推的量级参考，不是置信区间 -->
         <div v-if="viewMode === 'chart' && layers.projection && projectionNote" class="kline-det-sum">
           {{ projectionNote }}
         </div>
+        <!--
+          多源共振区：各技术层指向同一价位时收敛成一条结论。
+          放在所有单层读数之上——它回答的是「这么多线先看哪几个」，是本弹窗最该先读的一块。
+        -->
+        <div v-if="viewMode === 'chart' && tab !== 'trend' && confluences.length" class="kline-cf">
+          <div class="kline-cf__head">
+            <span class="kline-cf__title">关键价位</span>
+            <span class="kline-cf__meta">
+              同一个价位被越多套方法同时算出来，越可能是真的坎；方法名后的百分比是它在本标的历史上说准的比例。
+              只有两套以上的会画到图上
+            </span>
+          </div>
+          <div v-for="c in confluences" :key="c.id" class="kline-cf__row">
+            <span class="kline-cf__n" :class="{ 'is-strong': c.sources.length >= MIN_CONFLUENCE }">
+              {{ c.sources.length }} 套
+            </span>
+            <span class="kline-cf__price num">{{ fmtPrice(c.price) }}</span>
+            <span v-if="c.atrDist != null" class="kline-cf__dist num">
+              {{ c.atrDist >= 0 ? '+' : '' }}{{ c.atrDist.toFixed(1) }}ATR
+            </span>
+            <span class="kline-cf__srcs">
+              <i v-for="s in c.sources" :key="s" class="kline-cf__src">
+                {{ SRC_NAME[s] }}<em v-if="srcRateText(s)">{{ srcRateText(s) }}</em>
+              </i>
+            </span>
+            <span class="kline-cf__detail" :title="c.details.join(' / ')">{{ c.details.join(' / ') }}</span>
+          </div>
+        </div>
         <!-- 点位测算说明：波段锚点 + 均线支撑压力 + ATR（均线只给读数，不上图） -->
         <div v-if="viewMode === 'chart' && detSummary" class="kline-det-sum">{{ detSummary }}</div>
+        <!--
+          波浪结论区。与图层开关无关，常驻展示——图层只决定画不画到图上，
+          「当前处于第几浪」这个结论本身是打开弹窗就该看到的。
+        -->
+        <div v-if="viewMode === 'chart' && canElliott && elliott" class="kline-wave">
+          <div class="kline-wave__head">
+            <span class="kline-wave__title">波浪</span>
+            <span class="kline-wave__summary">{{ elliott.summary }}</span>
+            <el-button
+              link
+              type="primary"
+              size="small"
+              :loading="waveTexting"
+              class="kline-wave__btn"
+              @click="interpretWave"
+            >
+              {{ waveText ? '重新解读' : '解读' }}
+            </el-button>
+          </div>
+          <div v-for="r in waveRows" :key="r.key" class="kline-wave__row">
+            <span class="kline-wave__role">{{ r.role }}</span>
+            <span class="kline-wave__degree">{{ r.degree }}</span>
+            <span class="kline-wave__pos">{{ r.position }}</span>
+            <span class="kline-wave__conf num" :class="{ 'is-weak': r.confidence < WAVE_MIN_CONFIDENCE }">
+              置信 {{ r.confidence.toFixed(2) }}
+            </span>
+            <span v-if="r.primary" class="kline-wave__primary num" :title="r.primary.title">
+              首选 {{ r.primary.price }}
+              <em>{{ r.primary.ratio }}</em>
+              <template v-if="r.primary.date"> · 预计 {{ r.primary.date }} 前后</template>
+            </span>
+            <span class="kline-wave__kv">
+              {{ r.levelName }}
+              <template v-if="r.targets.length">
+                <i
+                  v-for="t in r.targets"
+                  :key="t.key"
+                  class="num kline-wave__tgt"
+                  :class="{ 'is-reached': t.reached }"
+                  :title="t.title"
+                >{{ t.price }}<em>{{ t.ratio }}{{ t.reached ? `·${t.passedWord}` : '' }}</em></i>
+              </template>
+              <i v-else class="num">{{ r.targetsHint }}</i>
+            </span>
+            <span class="kline-wave__kv" title="跌破/涨破此价则本套计数作废">
+              失效 <i class="num">{{ r.invalid }}</i>
+            </span>
+            <span class="kline-wave__kv" title="按已完成同级浪的 bar 数中位数外推，是估算区间">
+              时间窗 <i class="num">{{ r.timeWindow }}</i>
+            </span>
+            <span v-if="r.subLegs.length" class="kline-wave__kv kline-wave__sub" :title="r.subNote">
+              子浪
+              <i
+                v-for="s in r.subLegs"
+                :key="s.key"
+                class="num kline-wave__subleg"
+                :class="{ 'is-running': s.running }"
+              >{{ s.label }}<em>{{ s.range }}</em></i>
+            </span>
+          </div>
+          <div v-if="waveReadingLegend" class="kline-wave__legend">{{ waveReadingLegend }}</div>
+          <div v-if="waveTargetLegend" class="kline-wave__legend">{{ waveTargetLegend }}</div>
+          <div v-if="waveText" class="kline-wave__text">{{ waveText }}</div>
+          <div v-if="waveTextError" class="kline-wave__err">解读失败：{{ waveTextError }}</div>
+          <div class="kline-wave__note">{{ elliott.note }}</div>
+        </div>
         <!-- 只读清单：上半是计划标注（增删改由对话中的 agent 完成），下半是确定性点位 -->
         <div v-if="viewMode === 'chart' && allRows.length" class="kline-marks">
           <div v-for="m in allRows" :key="m.id" class="kline-marks__row">
@@ -1693,6 +2799,7 @@ watch([code, secid], () => {
             <span v-if="m.dist" class="kline-marks__dist num">{{ m.dist }}</span>
             <span v-if="m.note" class="kline-marks__note">{{ m.note }}</span>
           </div>
+        </div>
         </div>
         <CapitalPanel v-if="viewMode === 'capital'" :code="code" class="kline-capital" />
         <ChipPanel v-if="viewMode === 'chip'" :code="code" class="kline-capital" />
@@ -1987,6 +3094,464 @@ watch([code, secid], () => {
   flex-shrink: 0;
   color: var(--text-2);
   opacity: 0.85;
+}
+/* 速读卡片：默认视图里唯一要读的一块，视觉权重压过其余所有读数 */
+.lead {
+  margin-top: 10px;
+  padding: 10px 14px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.lead__top {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.lead__now {
+  font-size: 20px;
+  font-weight: 600;
+  color: #cfd3dc;
+}
+.lead__state {
+  color: var(--text-2);
+  font-size: 12px;
+}
+/* 阻力行与支撑行 */
+.lead__lv {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 5px 0;
+  font-size: 13px;
+}
+.lead__tag {
+  flex-shrink: 0;
+  min-width: 56px;
+  font-size: 11px;
+}
+/* A股红涨绿跌：阻力在上方用红、支撑在下方用绿 */
+.lead__lv.is-res .lead__tag,
+.lead__lv.is-res .lead__price {
+  color: #f0454a;
+}
+.lead__lv.is-sup .lead__tag,
+.lead__lv.is-sup .lead__price {
+  color: #12b886;
+}
+.lead__price {
+  flex-shrink: 0;
+  min-width: 62px;
+  font-size: 17px;
+  font-weight: 600;
+}
+.lead__gap {
+  flex-shrink: 0;
+  color: var(--text-2);
+  font-size: 12px;
+}
+.lead__gap i {
+  margin-left: 4px;
+  font-style: normal;
+  opacity: 0.75;
+}
+.lead__src {
+  color: var(--text-2);
+  font-size: 12px;
+}
+.lead__rate {
+  margin-left: auto;
+  flex-shrink: 0;
+  color: #ffd04b;
+  font-size: 12px;
+}
+/* 遵循率偏低的档位：不隐藏（日内仍要看），但必须一眼看出它不能单独当依据 */
+.lead__rate.is-weak {
+  padding: 0 6px;
+  border: 1px solid rgba(240, 69, 74, 0.45);
+  border-radius: 3px;
+  background: rgba(240, 69, 74, 0.1);
+  color: #ff8a8d;
+}
+.lead__none {
+  color: var(--text-2);
+  font-size: 12px;
+}
+/* 三条件清单：只有价格贴上来的那一档才铺开，占满整行另起 */
+.lead__conds {
+  flex-basis: 100%;
+  margin: 3px 0 2px 56px;
+  padding: 5px 8px;
+  border-left: 2px solid rgba(255, 208, 75, 0.4);
+  background: rgba(255, 255, 255, 0.03);
+}
+.lead__conds-title {
+  margin-bottom: 3px;
+  color: #ffd04b;
+  font-size: 12px;
+}
+.lead__cond {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 1.7;
+}
+.lead__cond-mark {
+  width: 10px;
+  flex-shrink: 0;
+  color: #f0454a;
+}
+.lead__cond.is-ok .lead__cond-mark {
+  color: #12b886;
+}
+/* 取不到数的条目用中性色：它既不是满足也不是不满足 */
+.lead__cond.is-unknown .lead__cond-mark {
+  color: var(--text-2);
+}
+.lead__cond-actual {
+  margin-left: auto;
+  opacity: 0.9;
+}
+/* 未铺开时的一行规则摘要 */
+.lead__rule {
+  flex-basis: 100%;
+  margin-left: 56px;
+  color: var(--text-2);
+  font-size: 11px;
+  opacity: 0.7;
+}
+/* 可达性分层：把「今天就会碰的」与「真正的坎」在视觉上分开 */
+.lead__tier {
+  margin-top: 6px;
+  padding-top: 5px;
+  border-top: 1px dashed rgba(255, 255, 255, 0.08);
+}
+.lead__tier-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.lead__tier-name {
+  color: #cfd3dc;
+  font-size: 12px;
+  font-weight: 600;
+}
+.lead__tier-range {
+  color: var(--text-2);
+  font-size: 11px;
+  opacity: 0.8;
+}
+/* 口径说明：不写清「遵循」的定义，百分比就会被读成「守住的比例」 */
+.lead__note {
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 1.6;
+  opacity: 0.85;
+}
+/* 中间那条：现价卡在最近两档之间的哪个位置 */
+.lead__mid {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 2px 0 4px;
+}
+.lead__edge {
+  flex-shrink: 0;
+  color: var(--text-2);
+  font-size: 11px;
+}
+.lead__bar {
+  position: relative;
+  flex: 1;
+  height: 3px;
+  border-radius: 2px;
+  /* 下绿上红，与两侧标签同一套语义 */
+  background: linear-gradient(90deg, rgba(18, 184, 134, 0.5), rgba(240, 69, 74, 0.5));
+}
+.lead__dot {
+  position: absolute;
+  top: -3px;
+  width: 9px;
+  height: 9px;
+  margin-left: -4.5px;
+  border-radius: 50%;
+  background: #cfd3dc;
+  box-shadow: 0 0 0 2px rgba(20, 24, 33, 0.9);
+}
+.lead__pos {
+  flex-shrink: 0;
+  color: var(--text-2);
+  font-size: 11px;
+}
+.lead-toggle {
+  margin-top: 6px;
+}
+/* 折叠区：展开后原样显示全部细节，一条不删 */
+.kline-detail {
+  margin-top: 2px;
+}
+/* 共振位：本弹窗最该先读的一块，边框与底色都比其余读数重一档 */
+.kline-cf {
+  margin-top: 10px;
+  padding: 6px 10px 8px;
+  border: 1px solid rgba(255, 208, 75, 0.28);
+  border-radius: 6px;
+  background: rgba(255, 208, 75, 0.04);
+}
+.kline-cf__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-bottom: 4px;
+}
+.kline-cf__title {
+  flex-shrink: 0;
+  padding: 1px 5px;
+  border: 1px solid #ffd04b;
+  border-radius: 3px;
+  color: #ffd04b;
+  font-size: 10px;
+  line-height: 1.5;
+}
+.kline-cf__meta {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-2);
+  font-size: 11px;
+}
+.kline-cf__row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 5px 0;
+  font-size: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+.kline-cf__n {
+  flex-shrink: 0;
+  min-width: 30px;
+  color: var(--text-2);
+  font-size: 11px;
+}
+.kline-cf__n.is-strong {
+  color: #ffd04b;
+  font-weight: 600;
+}
+.kline-cf__price {
+  flex-shrink: 0;
+  min-width: 56px;
+  color: #cfd3dc;
+  font-weight: 600;
+}
+.kline-cf__dist {
+  flex-shrink: 0;
+  color: var(--text-2);
+  font-size: 11px;
+}
+.kline-cf__srcs {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  flex-shrink: 0;
+}
+.kline-cf__src {
+  padding: 0 5px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 3px;
+  font-style: normal;
+  font-size: 11px;
+  color: var(--text-2);
+}
+/* 历史遵循率紧跟来源名，一眼看出这个来源在本标的上靠不靠谱 */
+.kline-cf__src em {
+  margin-left: 3px;
+  font-style: normal;
+  font-size: 10px;
+  color: #ffd04b;
+}
+.kline-cf__detail {
+  flex: 1;
+  min-width: 0;
+  color: var(--text-2);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.kline-cf__empty {
+  padding: 6px 0 2px;
+  color: var(--text-2);
+  font-size: 11px;
+}
+/* 波浪结论区：与标注清单同密度，限高内滚，避免多套计数把弹窗撑出视口。
+   限高要容得下四套计数（大级别/当前/高一度/备选）各自带子浪那一行，200px 会把最后一套挤进滚动区 */
+.kline-wave {
+  margin-top: 10px;
+  padding: 6px 10px 8px;
+  border: 1px solid rgba(224, 107, 208, 0.22);
+  border-radius: 6px;
+  max-height: 340px;
+  overflow-y: auto;
+}
+.kline-wave__head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-bottom: 4px;
+}
+.kline-wave__title {
+  flex-shrink: 0;
+  padding: 1px 5px;
+  border: 1px solid #e06bd0;
+  border-radius: 3px;
+  color: #e06bd0;
+  font-size: 10px;
+  line-height: 1.5;
+}
+.kline-wave__summary {
+  flex: 1;
+  min-width: 0;
+  color: #cfd3dc;
+  font-size: 12px;
+  font-weight: 600;
+}
+.kline-wave__btn {
+  flex-shrink: 0;
+}
+.kline-wave__row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  padding: 5px 0;
+  font-size: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+.kline-wave__role {
+  flex-shrink: 0;
+  min-width: 52px;
+  color: var(--text-2);
+  font-size: 11px;
+}
+.kline-wave__degree {
+  flex-shrink: 0;
+  color: #cfd3dc;
+  font-weight: 600;
+}
+.kline-wave__pos {
+  flex-shrink: 0;
+  color: #e06bd0;
+}
+.kline-wave__conf {
+  flex-shrink: 0;
+  color: var(--text-2);
+}
+/* 置信度不足时标红，提醒下方目标价已被抑制 */
+.kline-wave__conf.is-weak {
+  color: #ffb000;
+}
+.kline-wave__kv {
+  color: var(--text-2);
+  font-size: 11px;
+}
+.kline-wave__kv i {
+  font-style: normal;
+  color: #cfd3dc;
+}
+/* 候选转折位：价格为主、比例为辅，多档并列排开以体现「互为备选」而非先后 */
+.kline-wave__tgt {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid rgba(180, 91, 166, 0.45);
+  border-radius: 3px;
+}
+.kline-wave__tgt em {
+  font-style: normal;
+  font-size: 10px;
+  color: var(--text-2);
+}
+/* 已到达的档位降为灰色：它已经不是「还要去的地方」了 */
+.kline-wave__tgt.is-reached {
+  border-color: rgba(255, 255, 255, 0.12);
+  color: var(--text-2);
+  opacity: 0.7;
+}
+/* 首选：整块里唯一需要一眼抓到的数字，给底色强调 */
+.kline-wave__primary {
+  flex-shrink: 0;
+  padding: 1px 7px;
+  border-radius: 3px;
+  background: rgba(224, 107, 208, 0.16);
+  border: 1px solid rgba(224, 107, 208, 0.5);
+  color: #f0a8e4;
+  font-weight: 600;
+}
+.kline-wave__primary em {
+  font-style: normal;
+  font-weight: 400;
+  font-size: 10px;
+  opacity: 0.8;
+}
+/* 子浪：整行占满另起一行，避免与上面的键值对挤在一起 */
+.kline-wave__sub {
+  flex-basis: 100%;
+}
+.kline-wave__subleg {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+.kline-wave__subleg em {
+  font-style: normal;
+  font-size: 10px;
+  color: var(--text-2);
+}
+/* 进行中的子浪就是「现在所处的位置」，必须比已走完的显眼 */
+.kline-wave__subleg.is-running {
+  border-color: rgba(224, 107, 208, 0.55);
+  color: #f0a8e4;
+}
+.kline-wave__legend {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 1.6;
+}
+.kline-wave__text {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  color: #cfd3dc;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.kline-wave__err {
+  margin-top: 6px;
+  color: var(--el-color-danger);
+  font-size: 11px;
+}
+.kline-wave__note {
+  margin-top: 6px;
+  color: var(--text-2);
+  font-size: 11px;
+  line-height: 1.6;
 }
 /* 点位测算说明行：比清单更轻，作为图层的一句话交代 */
 .kline-det-sum {

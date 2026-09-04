@@ -66,6 +66,28 @@ export function prevTradingDay(dateStr: string): string {
 }
 
 /**
+ * 从给定日期按**交易日**平移 n 天（n 可正可负，0 返回自身）。
+ *
+ * 时间断言的容差是「几根 K 线」而不是「几个自然日」：跨长假时自然日会凭空多出好几天，
+ * 而一根日 K 就是一个交易日。展示预测窗口时必须按这个量纲展开，否则国庆前后
+ * 「±3 根」会被画成横跨十天的区间。
+ *
+ * @param dateStr 基准日 YYYY-MM-DD（自身不必是交易日）
+ */
+export function shiftTradingDays(dateStr: string, n: number): string {
+  if (n === 0) return dateStr;
+  const step = n > 0 ? 1 : -1;
+  let left = Math.abs(n);
+  const d = new Date(`${dateStr}T00:00:00+08:00`);
+  // 上限防呆：正常几天内走完，遇到脏输入也不至于死循环
+  for (let guard = 0; guard < 400 && left > 0; guard += 1) {
+    d.setUTCDate(d.getUTCDate() + step);
+    if (isTradingDay(d)) left -= 1;
+  }
+  return shanghaiDateStr(d);
+}
+
+/**
  * 定时任务节假日 gate：是否应因节假日跳过。
  * 仅对「工作日触发」的任务生效——周一至五但当天为法定节假日时跳过；
  * 周末触发的任务（如周日周度扫描）不受影响，照常运行。

@@ -37,6 +37,34 @@ function dateOf(time: string): string {
 export const SPLIT_GAP = 0.35;
 
 /**
+ * 按板别收紧除权判据。
+ *
+ * SPLIT_GAP=0.35 是按「全市场最宽的板」（北交所 ±30%）定的一刀切下限，
+ * 对主板股票太松：实测 000034（深市主板，±10%）在 2026-05-19 跳空 -25.5%，
+ * 主板一天根本跌不了这么多，只可能是除权，却因为没到 -35% 被漏判——
+ * 于是那之前的历史价格全部高出 1.4 倍，用它算「创新高」会系统性漏报。
+ *
+ * 判据回到物理约束本身：**跌幅超过本板涨跌幅上限就不可能是真实行情**。
+ * 各板上限 + 两个百分点余量（价格离散、开盘集合竞价可能贴着限价）：
+ *   主板与多数 ETF ±10% → 跌破 12% 判除权
+ *   创业板 300 / 科创板 688 ±20% → 跌破 23%
+ *   北交所 ±30% → 跌破 33%（与原 SPLIT_GAP 基本一致）
+ *
+ * 取不到代码时退回 SPLIT_GAP，保持既有行为不回退。
+ *
+ * ponytail: 不区分 ST（±5%）与新股前 5 日（无限制）。
+ * 前者只是少抓几个小额除权，属保守；后者理论上会把 300/688 新股上市初期的
+ * 真实暴跌（>23%）误判为除权，但那时序列只有两三根 bar，影响面很小。
+ * 要彻底解决得接除权公告数据源按公告因子复权。
+ */
+function splitGapOf(code?: string): number {
+  if (!code) return SPLIT_GAP;
+  if (/^(300|301|688|689)/.test(code)) return 0.23;
+  if (/^(43|83|87|88|92)/.test(code)) return 0.33;
+  return 0.12;
+}
+
+/**
  * bar 内除权的判定幅度（`close_t / open_t`），只用于周/月线。
  *
  * 周线的 bar 横跨整周，除权发生在周中时（159516 是 2026-07-10 周五折算），
@@ -74,9 +102,11 @@ const INTRABAR_SPLIT_GAP = 0.45;
 export function frontAdjustDaily(
   bars: KlineBar[],
   label?: string,
-  opts: { intrabar?: boolean } = {},
+  opts: { intrabar?: boolean; code?: string } = {},
 ): KlineBar[] {
   if (bars.length < 2) return bars;
+  // 判据按板别收紧：跌幅超过本板涨跌幅上限就不可能是真实行情（见 splitGapOf）
+  const gap = splitGapOf(opts.code);
 
   // 每根 bar 各自的累乘因子：除权点之前的 bar 要把它之后所有除权因子都乘上
   const factors = new Array<number>(bars.length).fill(1);
@@ -100,7 +130,7 @@ export function frontAdjustDaily(
     if (prev.close > 0 && cur.open > 0) {
       const r = cur.open / prev.close;
       // 只修向下跳空，见 SPLIT_GAP 注释：向上的大跳空可能是新股上市初期的真实暴涨
-      if (r < 1 - SPLIT_GAP) {
+      if (r < 1 - gap) {
         acc *= r;
         hits.push({ time: cur.time, ratio: r });
       }

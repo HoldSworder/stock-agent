@@ -99,7 +99,7 @@ onMounted(() => void load().catch((e) => ElMessage.error(msg(e))));
         来源：{{ curSource }}快讯
       </el-tag>
       <span v-if="degraded" class="muted degraded-hint">
-        财联社电报源暂不可用，已降级显示{{ curSource }}快讯（升级群晖 aktools 的 akshare 后自动恢复）
+        财联社电报源暂不可用，已改用{{ curSource }}快讯顶上（升级群晖 aktools 的 akshare 后自动恢复）
       </span>
     </div>
 
@@ -124,7 +124,7 @@ onMounted(() => void load().catch((e) => ElMessage.error(msg(e))));
       </div>
       <el-empty
         v-else-if="!loading && symbol === '重点' && degraded"
-        description="重点筛选依赖财联社源，当前为降级源，暂无加红重点"
+        description="重点筛选依赖财联社源，当前用的是备用源，暂无加红重点"
         :image-size="80"
       />
       <el-empty

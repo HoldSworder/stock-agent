@@ -587,7 +587,7 @@ async function buildRotation(): Promise<PanoramaBlock<PanoramaRotationItem[]>> {
       score: i.score,
       rs: i.rs,
     }));
-    if (items.length === 0) return empty('ETF 轮动榜为空（跟踪池未配置或取数降级）');
+    if (items.length === 0) return empty('ETF 轮动榜为空（跟踪池没配，或数据没取到）');
     return ok(items);
   } catch (e) {
     return failed(e, 'ETF轮动');

@@ -111,7 +111,7 @@ export function modeProtocolOf(
     `未计最低佣金 ${costs.minCommission} 元（归一化回放无名义本金）`,
   ];
   if (nonFund.length) {
-    notes.push(`混合口径：池中含非场内基金 ${nonFund.join('、')}，成本档已按个股计`);
+    notes.push(`标的池混了两类：含非场内基金 ${nonFund.join('、')}，费用按个股标准计`);
   }
   if (sameAsResearchPool === false) {
     notes.push('与该模式研究基准池不同源：站内跟踪结果不可与回测留档直接对比');

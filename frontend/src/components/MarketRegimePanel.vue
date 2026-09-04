@@ -181,7 +181,7 @@ const chart = computed(() => {
 
           <!-- 全A等权 vs 权重 背离 -->
           <div v-if="ov.equalWeight" class="rp-eqw">
-            <span class="rp-tag">等权口径 · {{ ov.equalWeight.name }}</span>
+            <span class="rp-tag">全A等权指数 · {{ ov.equalWeight.name }}</span>
             <span :class="ov.equalWeight.aboveMa60 ? 'up' : 'down'">{{ ov.equalWeight.aboveMa60 ? '站上MA60' : '失守MA60' }}</span>
             <span class="num" :class="ov.equalWeight.trendPct20 >= 0 ? 'up' : 'down'">20日{{ ov.equalWeight.trendPct20 >= 0 ? '+' : '' }}{{ ov.equalWeight.trendPct20 }}%</span>
             <span v-if="ov.equalWeight.upRatio != null" class="num">涨占比{{ ov.equalWeight.upRatio }}%</span>

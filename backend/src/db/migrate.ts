@@ -148,6 +148,55 @@ CREATE TABLE IF NOT EXISTS symbol_trade_plan_events (
 );
 CREATE INDEX IF NOT EXISTS idx_symbol_plan_events_plan ON symbol_trade_plan_events(plan_id, created_at);
 
+CREATE TABLE IF NOT EXISTS symbol_assertions (
+  id TEXT PRIMARY KEY,
+  code TEXT NOT NULL,
+  secid TEXT,
+  as_of TEXT NOT NULL,
+  period TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  source TEXT NOT NULL,
+  statement TEXT NOT NULL,
+  price REAL,
+  price_high REAL,
+  window_from TEXT,
+  window_to TEXT,
+  direction TEXT,
+  atr_snapshot REAL,
+  close_snapshot REAL,
+  reaction_bars INTEGER,
+  tolerance_bars INTEGER,
+  due_date TEXT NOT NULL,
+  outcome TEXT,
+  settled_at TEXT,
+  settle_note TEXT,
+  evidence_ref TEXT,
+  created_at TEXT NOT NULL
+);
+-- 同日同标的同来源同语义只留一条：冻结任务重跑（或回补与定时撞车）不会灌重
+CREATE UNIQUE INDEX IF NOT EXISTS idx_assertion_semantic
+  ON symbol_assertions(code, as_of, period, source, kind, evidence_ref);
+CREATE INDEX IF NOT EXISTS idx_assertion_pending ON symbol_assertions(outcome, due_date);
+CREATE INDEX IF NOT EXISTS idx_assertion_stats ON symbol_assertions(source, kind, outcome);
+
+CREATE TABLE IF NOT EXISTS assertion_source_weights (
+  id TEXT PRIMARY KEY,
+  as_of TEXT NOT NULL,
+  protocol_version TEXT NOT NULL,
+  source TEXT NOT NULL,
+  weight REAL NOT NULL,
+  prev_weight REAL,
+  edge REAL,
+  edge_lower REAL,
+  blocks INTEGER,
+  samples INTEGER,
+  reason TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+-- 同一天同一协议版本同一来源只留一条，重跑不灌重
+CREATE UNIQUE INDEX IF NOT EXISTS idx_source_weight_day
+  ON assertion_source_weights(as_of, protocol_version, source);
+
 CREATE TABLE IF NOT EXISTS symbol_plan_condition_latches (
   id TEXT PRIMARY KEY,
   plan_id TEXT NOT NULL,
@@ -682,6 +731,17 @@ CREATE TABLE IF NOT EXISTS regime_snapshots (
 );
 CREATE INDEX IF NOT EXISTS idx_regime_snapshots_date ON regime_snapshots(trade_date);
 
+CREATE TABLE IF NOT EXISTS index_flow_snapshots (
+  secid TEXT NOT NULL,
+  trade_date TEXT NOT NULL,
+  main REAL NOT NULL,
+  pct REAL NOT NULL DEFAULT 0,
+  source TEXT NOT NULL DEFAULT '',
+  fetched_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_index_flow_snapshots_key ON index_flow_snapshots(secid, trade_date);
+CREATE INDEX IF NOT EXISTS idx_index_flow_snapshots_date ON index_flow_snapshots(trade_date);
+
 CREATE TABLE IF NOT EXISTS position_attributions (
   id TEXT PRIMARY KEY,
   account TEXT NOT NULL DEFAULT 'real',
@@ -1073,6 +1133,11 @@ export function ensureSchema(): void {
     'ALTER TABLE symbol_trade_plan_events ADD COLUMN plan_version INTEGER NOT NULL DEFAULT 0',
     'ALTER TABLE symbol_trade_plan_events ADD COLUMN condition_id TEXT',
     "ALTER TABLE symbol_trade_plan_events ADD COLUMN note TEXT NOT NULL DEFAULT ''",
+    // 计划复盘归因：旧行留 NULL 表示「当时没记归因」，不能默认成某一类，
+    // 否则历史事件会凭空多出一批看似有结论的归因
+    'ALTER TABLE symbol_trade_plan_events ADD COLUMN outcome TEXT',
+    // 记录当时收盘价，用来分辨某价位在当时是压力还是支撑；旧行留 NULL，不展示分档
+    'ALTER TABLE symbol_assertions ADD COLUMN close_snapshot REAL',
     "ALTER TABLE playbook_backtests ADD COLUMN source TEXT NOT NULL DEFAULT 'system'",
     'ALTER TABLE playbook_backtests ADD COLUMN range TEXT',
     'ALTER TABLE playbook_backtests ADD COLUMN pool_size INTEGER',
@@ -1098,6 +1163,8 @@ export function ensureSchema(): void {
     // 标的专属会话按 ref_code find-or-create，靠唯一索引挡住并发建重（NULL 不参与唯一约束，
     // 普通会话不受影响）。历史上已产生重复行的库会建索引失败，此时只告警，由用户手工合并会话。
     'CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_sessions_ref_code ON chat_sessions(ref_code)',
+    // outcome 是后补列，索引只能放这儿；与 schema.ts 的 byOutcome 对齐，复盘归因按 (kind, outcome) 聚合
+    'CREATE INDEX IF NOT EXISTS idx_symbol_plan_events_outcome ON symbol_trade_plan_events(kind, outcome)',
   ];
   for (const sql of lateIndexes) {
     try {

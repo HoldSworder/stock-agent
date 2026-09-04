@@ -2,6 +2,7 @@ import type { FastifyInstance } from 'fastify';
 import type { CockpitFocusInput, CockpitFocusItem, StockQuote } from '@stock-agent/shared';
 import { buildCockpitOverview, buildTimeline } from './service';
 import { buildPanorama, buildPanoramaLive } from './panorama';
+import { buildActionPlan } from './actions';
 import { addFocus, listFocus, removeFocus, updateFocus } from './focus';
 import { getQuotes } from '../market/eastmoney';
 
@@ -16,6 +17,10 @@ export function registerCockpitModule(app: FastifyInstance): void {
 
   // 今日全景·实时层：真实账户 / 纪律 / ETF 轮动 / 涨停梯队，需外部取数，前端并行请求后补位
   app.get('/api/cockpit/panorama/live', async () => ({ ok: true, data: await buildPanoramaLive() }));
+
+  // 今日动作清单：把各模块结论合成「按顺序做这几件事」。需外部取数（持仓/纪律/板块/轮动），
+  // 与实时层同级，前端并行请求；风险三源未就绪时清单里的买入类会自带 blocked 标记
+  app.get('/api/cockpit/actions', async () => ({ ok: true, data: await buildActionPlan() }));
 
   // 关注标的：用户自维护的小清单，点击进标的详情弹窗。行情取数失败只降级 quote，不整块失败
   app.get('/api/cockpit/focus', async () => {

@@ -57,7 +57,7 @@ onMounted(() => void load().catch((e) => ElMessage.error(e instanceof Error ? e.
     <div class="block-head">
       <div class="block-title">
         行业 / 概念中线强弱
-        <MetricScaleHint name="中线趋势强度" note="均线排列(20/60/250)+动量口径，与当日涨幅无关。" />
+        <MetricScaleHint name="中线趋势强度" note="由均线排列(20/60/250)+动量算出，与当日涨幅无关。" />
         <span v-if="data" class="as-of">扫描于 {{ dayjs(data.asOf).format('MM-DD HH:mm') }}</span>
       </div>
       <div class="block-actions">

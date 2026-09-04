@@ -161,23 +161,32 @@ function toRows(json: Record<string, unknown>): Array<Record<string, unknown>> {
   return Object.values(diff as Record<string, Record<string, unknown>>);
 }
 
-/** 大盘指数（逐个 qt/get，f43 点位 / f170 涨跌幅%） */
+/**
+ * 大盘指数（逐个 qt/get，f43 点位 / f170 涨跌幅%）。
+ *
+ * 单个指数取数失败只跳过它自己，不能拖垮整条行情条——原先这里是裸 Promise.all，
+ * 任一 secid 抛错整个数组就没了，用户看到的是指数区一片空白而不是少一个指数。
+ */
 export async function getIndices(): Promise<MarketIndex[]> {
   const results = await Promise.all(
-    INDEX_SECIDS.map(async (secid) => {
-      const url = `${PUSH2}/stock/get?fltt=2&fields=f43,f57,f58,f170&secid=${secid}`;
-      const json = await getJson(url);
-      const d = (json.data ?? {}) as Record<string, unknown>;
-      return {
-        code: String(d.f57 ?? ''),
-        name: String(d.f58 ?? ''),
-        point: num(d.f43),
-        pct: num(d.f170),
-        secid,
-      } satisfies MarketIndex;
+    INDEX_SECIDS.map(async (secid): Promise<MarketIndex | null> => {
+      try {
+        const url = `${PUSH2}/stock/get?fltt=2&fields=f43,f57,f58,f170&secid=${secid}`;
+        const json = await getJson(url);
+        const d = (json.data ?? {}) as Record<string, unknown>;
+        return {
+          code: String(d.f57 ?? ''),
+          name: String(d.f58 ?? ''),
+          point: num(d.f43),
+          pct: num(d.f170),
+          secid,
+        } satisfies MarketIndex;
+      } catch {
+        return null;
+      }
     }),
   );
-  return results.filter((x) => x.name);
+  return results.filter((x): x is MarketIndex => x != null && x.name !== '');
 }
 
 /**
@@ -708,16 +717,20 @@ export interface FundFlowDay {
  * f57 主力占比 / f58-61 各单占比 / f62 收盘价 / f63 涨跌幅。返回升序（旧→新），失败返回空 rows。
  * @param secid 东财 secid（市场前缀.代码），如 1.000001（上证）/ 1.600519（个股）
  */
-async function getFundFlowBySecid(secid: string, days: number): Promise<{ name: string; rows: string[] }> {
+async function getFundFlowBySecid(
+  secid: string,
+  days: number,
+): Promise<{ name: string; rows: string[]; host: string }> {
   const qs =
     `stock/fflow/daykline/get?secid=${secid}&klt=101&lmt=${days}` +
     `&fields1=f1,f2,f3,f7&fields2=f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61,f62,f63`;
-  // push2his 有完整日线历史但对部分出口 IP 的 /fflow/ 路径做连接封禁（ECONNRESET）；
-  // push2delay 延迟镜像可达但通常只回当日一根。故优先 push2his 取全量历史，失败回退 push2delay 保底当日。
-  const fetchFrom = async (host: string): Promise<{ name: string; rows: string[] }> => {
+  // push2his 有完整日线历史但对部分出口 IP 的 /api/ 路径做连接封禁（ECONNRESET，
+  // 实测普通 kline 一并被封，见 datasource/providers.ts 的记录）；
+  // push2delay 延迟镜像可达但无视 lmt、只回当日一根。故优先 push2his 取全量历史，失败回退保底当日。
+  const fetchFrom = async (host: string): Promise<{ name: string; rows: string[]; host: string }> => {
     const json = await getJson(`https://${host}/api/qt/${qs}`);
     const data = json.data as { name?: string; klines?: string[] } | null;
-    return { name: String(data?.name ?? ''), rows: data?.klines ?? [] };
+    return { name: String(data?.name ?? ''), rows: data?.klines ?? [], host };
   };
   try {
     const primary = await fetchFrom('push2his.eastmoney.com');
@@ -726,6 +739,44 @@ async function getFundFlowBySecid(secid: string, days: number): Promise<{ name: 
     /* push2his 不可达：回退延迟镜像 */
   }
   return fetchFrom('push2delay.eastmoney.com');
+}
+
+/** 单个指数的资金流原始读数（主力净流入已由元换算为「亿」） */
+export interface IndexFlowFetched {
+  secid: string;
+  name: string;
+  /** 取数来源 host，用于分辨这批是历史源还是只有当日的镜像 */
+  host: string;
+  rows: { date: string; main: number; pct: number }[];
+}
+
+/**
+ * 按 secid 逐个取资金流日线，供快照任务落库。
+ *
+ * 返回几行取决于上游给几行：历史源通的时候是整段，只有延迟镜像可达时就一行。
+ * 这里不做任何裁剪或补齐，**由调用方按交易日逐行判断能不能写**——
+ * 把「取到什么」和「能不能当定盘值」分开，才不会让一行当日数据冒充历史。
+ * 单个指数失败返回空 rows，不阻断其余指数。
+ */
+export async function fetchIndexFlows(secids: readonly string[], days = 60): Promise<IndexFlowFetched[]> {
+  return Promise.all(
+    secids.map(async (secid) => {
+      try {
+        const { name, rows, host } = await getFundFlowBySecid(secid, days);
+        return {
+          secid,
+          name,
+          host,
+          rows: rows.map((row) => {
+            const c = row.split(',');
+            return { date: String(c[0] ?? ''), main: num(c[1]) / 1e8, pct: num(c[12]) };
+          }),
+        };
+      } catch {
+        return { secid, name: '', host: '', rows: [] };
+      }
+    }),
+  );
 }
 
 /**
@@ -745,28 +796,6 @@ export async function getStockFundFlow(code: string, days = 6): Promise<FundFlow
       pct: num(c[12]),
     };
   });
-}
-
-/**
- * 主要股指近 N 日主力净流入趋势（遍历 INDEX_SECIDS，逐个 best-effort 取 fflow）。
- * 单指数取数失败 → days 置空、不阻断整体；主力净流入由元换算为「亿」。返回升序（旧→新）。
- */
-export async function getIndexFundFlows(days = 10): Promise<IndexFundFlow[]> {
-  return Promise.all(
-    INDEX_SECIDS.map(async (secid) => {
-      const code = secid.split('.')[1] ?? secid;
-      try {
-        const { name, rows } = await getFundFlowBySecid(secid, days);
-        const daysArr = rows.map((row) => {
-          const c = row.split(',');
-          return { date: String(c[0] ?? ''), main: num(c[1]) / 1e8, pct: num(c[12]) };
-        });
-        return { code, name, secid, days: daysArr } satisfies IndexFundFlow;
-      } catch {
-        return { code, name: '', secid, days: [] } satisfies IndexFundFlow;
-      }
-    }),
-  );
 }
 
 /** 两市成交额（上证+深成，今日 + 昨日 best-effort 来自日K） */
@@ -1001,7 +1030,7 @@ export async function getDragonRanking(): Promise<DragonOverview> {
     topDragon,
     tiers,
     note:
-      '连板梯队龙头辨识（确定性规则：连板高度+封板时间+封单额+换手），仅供参考，不构成投资建议。',
+      '连板梯队龙头辨识（固定规则：连板高度+封板时间+封单额+换手），仅供参考，不构成投资建议。',
   };
 }
 

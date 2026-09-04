@@ -137,7 +137,7 @@ export function evaluatePromotionGate(trades: GateTrade[], variantCount = 0): Pr
     },
     {
       key: 'clusters',
-      label: '日期×板块有效簇数',
+      label: '独立样本数（按日期×板块归并）',
       actual: String(effClusters),
       required: `≥ ${MIN_CLUSTERS}`,
       passed: effClusters >= MIN_CLUSTERS,
@@ -175,7 +175,7 @@ export function evaluatePromotionGate(trades: GateTrade[], variantCount = 0): Pr
     requiredWinLowerPct,
     checks,
     note:
-      '晋级门只做体检，永不自动晋级：即便全部通过，是否开启自动模拟 / 上真实仓位仍由人决定。' +
-      '任何因参数敏感性分析产生的规则改动，都必须换协议号并重新累积前向样本。',
+      '达标检验只做体检，永不自动放行：即便全部通过，是否开启自动模拟 / 上真实仓位仍由人决定。' +
+      '任何因参数敏感性分析产生的规则改动，都必须换一个规则版本号，并重新攒够改动之后的新样本。',
   };
 }

@@ -96,7 +96,7 @@ const deltaText = computed(() => {
           </div>
 
           <div v-if="rg.equalWeight" class="rb-eqw">
-            <span class="rb-block-title">等权口径 · {{ rg.equalWeight.name }}</span>
+            <span class="rb-block-title">全A等权指数 · {{ rg.equalWeight.name }}</span>
             <span :class="rg.equalWeight.aboveMa60 ? 'up' : 'down'">{{ rg.equalWeight.aboveMa60 ? '站上MA60' : '失守MA60' }}</span>
             <span class="num" :class="rg.equalWeight.trendPct20 >= 0 ? 'up' : 'down'">20日{{ rg.equalWeight.trendPct20 >= 0 ? '+' : '' }}{{ rg.equalWeight.trendPct20 }}%</span>
             <span v-if="rg.equalWeight.upRatio != null" class="num">涨占比{{ rg.equalWeight.upRatio }}%</span>

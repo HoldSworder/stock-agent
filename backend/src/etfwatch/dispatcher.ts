@@ -1,10 +1,11 @@
-import type {
-  EtfExecInstruction,
-  EtfTrendStage,
-  EtfWatchAlert,
-  EtfWatchConfig,
-  EtfWatchDisposition,
-  EtfWatchSignal,
+import {
+  ETF_WATCH_VERDICT_LABELS,
+  type EtfExecInstruction,
+  type EtfTrendStage,
+  type EtfWatchAlert,
+  type EtfWatchConfig,
+  type EtfWatchDisposition,
+  type EtfWatchSignal,
 } from '@stock-agent/shared';
 import { sendTelegram } from '../notify/telegram';
 import { broadcastEtfWatch } from './bus';
@@ -34,13 +35,19 @@ const TF_LABEL: Record<EtfWatchSignal['timeframe'], string> = {
   day: '日线',
 };
 
+/**
+ * Telegram 推送标题。
+ *
+ * 卖点与硬止损的说法一律取自 `ETF_WATCH_VERDICT_LABELS`，不在这里另写一份：
+ * 同一条告警在浏览器里显示的裁决就是这张表，两处各写各的迟早会漂成两种说法。
+ */
 function signalTitle(s: EtfWatchSignal): string {
   if (s.type === 'buy_layer') return `建第${s.layer}层买点`;
-  if (s.type === 'sell_layer') return `撤第${s.layer}层卖点`;
-  return '硬止损';
+  if (s.type === 'sell_layer') return `${ETF_WATCH_VERDICT_LABELS.撤层}（第${s.layer}层）`;
+  return ETF_WATCH_VERDICT_LABELS.硬止损;
 }
 
-/** 卖点/硬止损的确定性执行指令（直接照做，无 agent） */
+/** 卖点/硬止损按规则直接给出的执行指令（直接照做，无 agent） */
 function deterministicSellInstruction(s: EtfWatchSignal): EtfExecInstruction {
   return {
     action: s.type === 'hard_stop' ? '清仓' : '减仓',

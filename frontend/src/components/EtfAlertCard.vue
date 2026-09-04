@@ -5,7 +5,13 @@ import { ElMessage } from 'element-plus';
 import { ArrowDown, ArrowUp, CopyDocument, View, Promotion } from '@element-plus/icons-vue';
 import StockLink from '@/components/StockLink.vue';
 import MarkdownView from '@/components/MarkdownView.vue';
-import type { EtfWatchAlert, EtfWatchTimeframe, EtfWatchVerdict } from '@stock-agent/shared';
+import {
+  ETF_TREND_STAGE_LABELS,
+  ETF_WATCH_VERDICT_LABELS,
+  type EtfWatchAlert,
+  type EtfWatchTimeframe,
+  type EtfWatchVerdict,
+} from '@stock-agent/shared';
 
 // ETF 告警卡片：三层信息层级（裁决 / 置信度 / 证据），AI 长建议默认折叠，
 // 提供 Telegram 推送状态、复制、查看关联 agent 运行等交互。
@@ -100,7 +106,7 @@ async function copy() {
         effect="dark"
         class="verdict"
       >
-        {{ alert.verdict }}
+        {{ ETF_WATCH_VERDICT_LABELS[alert.verdict] }}
       </el-tag>
       <StockLink :code="alert.code" :name="alert.name" class="name" />
       <span class="pos num">{{ layerLabel(alert.layer) }} · {{ alert.positionPct }}%</span>
@@ -154,7 +160,9 @@ async function copy() {
     <div class="t3">
       <span class="ev">{{ TF_LABEL[alert.timeframe] }}·{{ layerLabel(alert.layer) }}</span>
       <span class="ev">@ {{ alert.triggerPrice ? alert.triggerPrice.toFixed(3) : '—' }}</span>
-      <span v-if="trendStage" class="chip" :class="trendCls">{{ trendStage }}</span>
+      <span v-if="trendStage" class="chip" :class="trendCls">
+        {{ ETF_TREND_STAGE_LABELS[trendStage] }}
+      </span>
       <span v-if="confirm" class="chip" :class="confirmCls">
         资金{{ confirm.label }} {{ confirm.score }}
       </span>

@@ -110,7 +110,7 @@ const chartOption = computed<echarts.EChartsCoreOption>(() => {
 
       <EChart :option="chartOption" height="240px" />
 
-      <p class="me-note">{{ ov.note }}<span v-if="ov.stale"> ⚠️ 数据降级</span></p>
+      <p class="me-note">{{ ov.note }}<span v-if="ov.stale"> ⚠️ 数据没取全</span></p>
     </template>
     <p v-else-if="loadError" class="me-fail">
       ⚠ 883994 取数失败：{{ loadError }}（数据未到，不是功能下线）

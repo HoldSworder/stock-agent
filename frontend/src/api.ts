@@ -72,6 +72,12 @@ import type {
   KlineCacheStats,
   KlinePeriod,
   PriceLevels,
+  ElliottAnalysis,
+  AssertionAccuracy,
+  AssertionAccuracyReport,
+  SymbolAssertion,
+  TurningCalendar,
+  PlanOutcomeStat,
   BacktestRun,
   BacktestRunInput,
   BacktestRunListItem,
@@ -96,6 +102,7 @@ import type {
   RetentionConfig,
   CockpitEvent,
   CockpitOverview,
+  CockpitActionPlan,
   CockpitFocusInput,
   CockpitFocusItem,
   CockpitPanorama,
@@ -786,6 +793,56 @@ export const api = {
       http.get(`/stock/${code}/levels`, { params: { period, secid }, timeout: 30000 }),
     ),
 
+  // 波浪计数（多周期浪序 + 斐波那契目标位 + 时间窗）。确定性算法，零 token。
+  elliott: (code: string, period: KlinePeriod, secid?: string) =>
+    unwrap<ElliottAnalysis>(
+      http.get(`/stock/${code}/elliott`, { params: { period, secid }, timeout: 40000 }),
+    ),
+
+  // 波浪解读（LLM 把上面的计数翻成人话）。按需触发，后端按最新 bar 缓存，重复点不重复计费。
+  elliottInterpret: (code: string, period: KlinePeriod, secid?: string) =>
+    unwrap<{ text: string; asOf: string }>(
+      http.post(`/stock/${code}/elliott/interpret`, {}, { params: { period, secid }, timeout: 120000 }),
+    ),
+
+  // 技术断言账本（每日冻结的技术判断 + 到期核对 + 遵循率统计）
+  assertions: {
+    report: (days?: number) =>
+      unwrap<AssertionAccuracyReport>(
+        http.get('/assertions/report', { params: { days }, timeout: 30000 }),
+      ),
+    bySource: (code?: string) =>
+      unwrap<AssertionAccuracy[]>(http.get('/assertions/by-source', { params: { code } })),
+    // 转折日历：未来若干天内各标的的波浪时间位。asOf 可回放历史交易日
+    calendar: (params: { days?: number; asOf?: string } = {}) =>
+      unwrap<TurningCalendar>(http.get('/assertions/calendar', { params, timeout: 30000 })),
+    list: (params: {
+      code?: string;
+      source?: string;
+      kind?: string;
+      period?: string;
+      outcome?: string;
+      limit?: number;
+    }) => unwrap<SymbolAssertion[]>(http.get('/assertions/list', { params })),
+    freeze: (body: { code?: string; asOf?: string } = {}) =>
+      unwrap<{ codes: number; written: number; failed: number }>(
+        http.post('/assertions/freeze', body, { timeout: 180000 }),
+      ),
+    settle: () =>
+      unwrap<{ checked: number; settled: Record<string, number> }>(
+        http.post('/assertions/settle', {}, { timeout: 180000 }),
+      ),
+  },
+
+  // 计划复盘归因（八枚举 + 分布统计）
+  planOutcomes: {
+    options: () =>
+      unwrap<Array<{ value: string; label: string; hint: string }>>(
+        http.get('/symbol-plans/outcomes'),
+      ),
+    stats: () => unwrap<PlanOutcomeStat[]>(http.get('/symbol-plans/outcome-stats')),
+  },
+
   // 数据源中心（统一管理外部取数：健康/配置/启停/统计）
   datasource: {
     list: () => unwrap<DataSourceInfo[]>(http.get('/datasource/list', { timeout: 20000 })),
@@ -842,6 +899,9 @@ export const api = {
     // 今日全景·实时层：账户/纪律/ETF轮动/涨停梯队，需外部取数，到达后补位
     panoramaLive: () =>
       unwrap<CockpitPanoramaLive>(http.get('/cockpit/panorama/live', { timeout: 45000 })),
+    // 今日动作清单：与实时层同级（要取持仓/纪律/板块/轮动），并行请求
+    actions: () =>
+      unwrap<CockpitActionPlan>(http.get('/cockpit/actions', { timeout: 45000 })),
     // 关注标的：用户自维护小清单（列表带实时行情，行情失败降级为 null）
     listFocus: () =>
       unwrap<CockpitFocusItem[]>(http.get('/cockpit/focus', { timeout: 20000 })),

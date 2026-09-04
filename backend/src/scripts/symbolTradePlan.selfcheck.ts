@@ -41,6 +41,17 @@ ensureSchema();
 const dayAt = (i: number): string =>
   new Date(Date.UTC(2026, 0, 5) + i * 86_400_000).toISOString().slice(0, 10);
 
+/**
+ * 相对今天的日期。
+ *
+ * 广度快照的 fixture **必须**用它而不是 dayAt 那种固定纪元：adapters.ts 是拿
+ * `Date.now()` 跟 tradeDate 比、超过 5 个自然日就判过期并写 warning。
+ * 写死日期的话自检只在写它的那几天是绿的，之后永久变红——实测就发生过，
+ * 硬编码的 2026-08-04 到 8/26 已经 22 天，「取到板块时不应写未覆盖说明」这条挂了。
+ */
+const daysAgo = (n: number): string =>
+  new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
+
 function zigzag(pivots: number[], perLeg = 8): KlineBar[] {
   const bars: KlineBar[] = [];
   let idx = 0;
@@ -88,6 +99,7 @@ const LEVELS: PriceLevels = {
     resistanceMa: null,
     supportMa: { period: 20, value: CLOSE * 0.98 },
   },
+  volumePrice: null,
   note: 'fixture',
 };
 
@@ -710,8 +722,9 @@ assert.ok(ev1.some((e) => e.kind === 'activated'), '应写 activated 事件');
   // 造一个「曾居首、今日新高数腰斩且跌出榜首」的板块 → 退幕（exit_only）
   const BOARD = 'BK9999';
   breadthRepo.upsertSnapshots([
-    { tradeDate: '2026-08-03', boardCode: BOARD, boardName: '自检板块', kind: 'concept', newHighCount: 30, consTotal: 100, ratio: 30, rank: 1, coreCodes: ['600519'] },
-    { tradeDate: '2026-08-04', boardCode: BOARD, boardName: '自检板块', kind: 'concept', newHighCount: 2, consTotal: 100, ratio: 2, rank: 9, coreCodes: ['600519'] },
+    // 日期必须相对今天：快照超过 5 个自然日会被判过期，写死日期的自检过几天就永久变红
+    { tradeDate: daysAgo(2), boardCode: BOARD, boardName: '自检板块', kind: 'concept', newHighCount: 30, consTotal: 100, ratio: 30, rank: 1, coreCodes: ['600519'] },
+    { tradeDate: daysAgo(1), boardCode: BOARD, boardName: '自检板块', kind: 'concept', newHighCount: 2, consTotal: 100, ratio: 2, rank: 9, coreCodes: ['600519'] },
   ]);
   const hit = breadth.boardStageActionOf(BOARD);
   assert.equal(hit?.action, 'exit_only', `退幕板块的阶段动作应为 exit_only，实际 ${hit?.action}`);

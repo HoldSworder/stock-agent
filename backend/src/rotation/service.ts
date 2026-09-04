@@ -228,7 +228,7 @@ export async function buildRotationOverview(): Promise<EtfRotationOverview> {
     asOf: nowIso(),
     items: list,
     note:
-      'ETF 行业轮动（中线赛道层，相对强弱+趋势+资金流确定性研判，仅供参考，不构成下单建议）' +
+      'ETF 行业轮动（中线赛道层，按相对强弱+趋势+资金流规则研判，仅供参考，不构成下单建议）' +
       (dropped > 0 ? `；${dropped} 只因行情数据不足未纳入榜单（非破位）` : ''),
   };
 }
@@ -356,4 +356,4 @@ export const ETF_ROTATION_PROMPT =
   '二、该等回踩（≤3 条）：ETF 名(代码) ｜回踩位置 ｜确认信号\n' +
   '三、该回避（≤3 条）：ETF 名(代码) ｜过热/破位 ｜原因\n' +
   '四、一句话结论：当前中线赛道轮动方向与进攻/均衡/防守倾向。\n' +
-  '⚠️ 确定性指标研判，仅供参考，不构成投资建议。';
+  '⚠️ 基于按规则计算的指标做研判，仅供参考，不构成投资建议。';

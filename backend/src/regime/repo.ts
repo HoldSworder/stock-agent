@@ -7,6 +7,7 @@ import type {
   StrengthBreakdown,
 } from '@stock-agent/shared';
 import { db, schema } from '../db/client';
+import { prevTradingDay } from '../market/calendar';
 import { nowIso } from '../util';
 
 // 大盘阶段日快照读写：一天一行（trade_date 唯一），upsert 幂等，
@@ -63,31 +64,50 @@ export function upsertSnapshot(s: RegimeSnapshot): void {
 /** 取严格早于 tradeDate 的最近一条快照（判方向/连续用，无则 null） */
 export function getPrevSnapshot(tradeDate: string): { phase: MarketRegimePhase; score: number } | null {
   const row = db
-    .select({ phase: schema.regimeSnapshots.phase, score: schema.regimeSnapshots.score })
+    .select({
+      phase: schema.regimeSnapshots.phase,
+      score: schema.regimeSnapshots.score,
+      tradeDate: schema.regimeSnapshots.tradeDate,
+    })
     .from(schema.regimeSnapshots)
     .where(lt(schema.regimeSnapshots.tradeDate, tradeDate))
     .orderBy(desc(schema.regimeSnapshots.tradeDate))
     .limit(1)
     .get();
-  return row ? { phase: row.phase as MarketRegimePhase, score: row.score } : null;
+  if (!row) return null;
+  // 与情绪同一口径：不是上一交易日的行不当「昨天」用，否则会算出跨越数周的假环比
+  if (row.tradeDate !== prevTradingDay(tradeDate)) return null;
+  return { phase: row.phase as MarketRegimePhase, score: row.score };
 }
 
 /**
- * 统计「当前阶段已连续几个交易日」：从早于 tradeDate 的最近快照往前数连续同阶段的行数，+1 计入今日。
+ * 统计「当前阶段已连续几个交易日」。
+ *
+ * 必须按**连续交易日**逐日回溯，不能数数据库行数。
+ * 快照漏跑时表里是断续的（实测存在 8-28 / 8-20 / 8-18 / 8-07 这种间隔），
+ * 数行数会把跨越三周的四条记录报成「已连续 4 天」，
+ * 而这个数字直接用于判断趋势是否稳固。遇到缺口即停，是唯一诚实的做法。
+ *
  * 无历史返回 1（今日为该阶段第 1 天）。
  */
 export function countConsecutivePhase(tradeDate: string, phase: MarketRegimePhase, look = 40): number {
+  const limit = Math.min(Math.max(look, 1), 250);
   const rows = db
-    .select({ phase: schema.regimeSnapshots.phase })
+    .select({ phase: schema.regimeSnapshots.phase, tradeDate: schema.regimeSnapshots.tradeDate })
     .from(schema.regimeSnapshots)
     .where(lt(schema.regimeSnapshots.tradeDate, tradeDate))
     .orderBy(desc(schema.regimeSnapshots.tradeDate))
-    .limit(Math.min(Math.max(look, 1), 250))
+    .limit(limit)
     .all();
+  const phaseByDate = new Map(rows.map((r) => [r.tradeDate, r.phase as MarketRegimePhase]));
   let count = 1;
-  for (const r of rows) {
-    if ((r.phase as MarketRegimePhase) === phase) count += 1;
-    else break;
+  let cursor = tradeDate;
+  for (let i = 0; i < limit; i += 1) {
+    cursor = prevTradingDay(cursor);
+    // 那天压根没有快照 → 链条断了，不能跳过缺口继续往前接
+    const p = phaseByDate.get(cursor);
+    if (p == null || p !== phase) break;
+    count += 1;
   }
   return count;
 }

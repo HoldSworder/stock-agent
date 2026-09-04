@@ -19,6 +19,7 @@
     "build": "pnpm --filter ./frontend build",
     "factor:export": "python3 mode/etf-mainline-factor-sweep/factor_export.py",
     "typecheck": "pnpm --filter ./backend typecheck && pnpm --filter ./frontend typecheck",
+    "glossary:check": "pnpm --filter ./backend glossary:check",
     "fix:native": "pnpm --filter ./backend rebuild better-sqlite3",
     "db:push": "pnpm --filter ./backend db:push",
     "ext:vendor-klinecharts": "node -e \"const fs=require('fs');const p=require.resolve('klinecharts/dist/index.esm.js',{paths:['./frontend','.']});fs.mkdirSync('extension/vendor',{recursive:true});let s=fs.readFileSync(p,'utf8').replace(/process\\.env\\.NODE_ENV === 'development'/g,'false');fs.writeFileSync('extension/vendor/klinecharts.esm.js',s);console.log('vendored (process shimmed) from',p)\""

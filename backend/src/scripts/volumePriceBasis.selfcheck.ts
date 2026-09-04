@@ -52,14 +52,19 @@ const heavyDown = (volume: number, amount: number): KlineBar => ({
   assert.equal(vp.basis?.ratio, 2, '成交量比 = 2000 / 1000');
   assert.equal(vp.pattern, 'heavy_down', '成交量口径下四条形态判据必须照常生效，不得恒为 null');
   assert.ok(vp.verdict.includes('成交量比'), '文案必须写「成交量比」而不是冒充成交额');
-  assert.ok(vp.verdict.includes('本源无成交额'), '必须显式标注口径来源，避免使用者误读');
+  // 钉的是「有没有讲清楚这个数是拿什么算的」，不是某一句固定措辞——
+  // 文案会随去术语化调整，钉死原句只会让自检在改文案时误报
+  assert.ok(
+    vp.verdict.includes('没有成交额') || vp.verdict.includes('本源无成交额'),
+    '必须显式标注口径来源，避免使用者误读',
+  );
   assert.ok(!vp.verdict.includes('成交额比'), '不得同时出现「成交额比」字样造成歧义');
 
   // warnings 必须随读数一起交给消费方，不能在 buildVolumeReadout 里被丢弃
   const readout = buildVolumeReadout(series(heavyDown(2000, 0), false), { completeBar: true });
   assert.equal(readout?.basis, 'volume_median20');
   assert.ok(
-    readout?.warnings?.some((w) => w.includes('回退')),
+    readout?.warnings?.some((w) => w.includes('改用成交量') || w.includes('回退')),
     '口径回退提示必须进入 VolumeReadout.warnings',
   );
 }

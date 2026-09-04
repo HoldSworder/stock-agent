@@ -8,6 +8,7 @@ import type {
 } from '@stock-agent/shared';
 import { nowIso, shanghaiToday } from '../util';
 import { isTradingDay } from '../market/calendar';
+import { canPersistSnapshot } from '../scheduling/snapshotWindow';
 import { fetchSentimentComponents } from './data';
 import { getPrevIndex, upsertSnapshot } from './repo';
 
@@ -130,7 +131,17 @@ export async function buildSentimentOverview(persist = false): Promise<Sentiment
   const phase = classifyPhase(index, delta);
   const advice = buildAdvice(phase);
 
-  if (persist && isTradingDay()) {
+  // 落盘 = 宣布「这是当日定盘值」，两道门都得过：
+  // 时刻不到存的是半天数据（盘中随手触发一次就会污染当日行），
+  // stale 意味着上游没取全，存进去之后没人分得出它是估算值。
+  if (persist) {
+    const gate = canPersistSnapshot('sentiment');
+    if (!gate.ok) throw new Error(gate.reason);
+    if (stale) {
+      throw new Error('情绪数据没取全，本次不写快照，保留上一份（避免把不完整估算当成当日定盘值）');
+    }
+  }
+  if (persist) {
     upsertSnapshot({
       tradeDate,
       index,
@@ -155,8 +166,8 @@ export async function buildSentimentOverview(persist = false): Promise<Sentiment
     components,
     advice,
     note:
-      '市场情绪周期（S1 短线择时总开关，确定性合成，仅供参考，不构成投资建议）。' +
-      (stale ? '⚠️ 部分数据源降级，指数为不完整估计。' : ''),
+      '市场情绪周期（短线择时总开关，按规则合成，仅供参考，不构成投资建议）。' +
+      (stale ? '⚠️ 部分数据没取全，指数为不完整估计。' : ''),
     stale,
   };
 }
@@ -170,7 +181,7 @@ export function formatForAgent(ov: SentimentOverview): string {
     .map((p) => `${p.label} ${p.value}`)
     .join('｜');
   return (
-    `市场情绪周期（${ov.tradeDate}${ov.stale ? '·数据降级' : ''}）\n` +
+    `市场情绪周期（${ov.tradeDate}${ov.stale ? '·数据没取全' : ''}）\n` +
     `情绪指数 ${ov.index}/100 ｜水位【${ov.level}】｜周期【${ov.phase}】｜较上一交易日 ${dir}\n` +
     `构成：${parts}\n` +
     `原始：上涨${c.up ?? '—'}/下跌${c.down ?? '—'}｜真实涨停${c.realLimitUp ?? c.limitUp ?? '—'}｜` +

@@ -86,7 +86,7 @@ export function composeMoneyEffectOverview(
     delta: prevClose > 0 ? r2((close / prevClose - 1) * 100) : null,
     series: series.slice(-60).map((b) => ({ date: b.date, close: r2(b.close) })),
     stale: isStaleTradeDate(tradeDate, now),
-    note: '首板赚钱效应(同花顺883994·昨日打首板表现)，确定性指标，仅供参考，不构成投资建议。',
+    note: '首板赚钱效应(同花顺·昨日打首板表现)，按规则计算的指标，仅供参考，不构成投资建议。',
   };
   return overview;
 }
@@ -128,7 +128,7 @@ export function getMoneyEffectSummary(): MoneyEffectOverview | null {
 export function formatMoneyEffectForAgent(ov: MoneyEffectOverview): string {
   const d = ov.delta == null ? '—' : `${ov.delta >= 0 ? '+' : ''}${ov.delta}%`;
   return (
-    `首板赚钱效应（883994·昨日打首板表现，${ov.tradeDate}${ov.stale ? '·数据降级' : ''}）\n` +
+    `首板赚钱效应（昨日打首板表现，${ov.tradeDate}${ov.stale ? '·数据没取全' : ''}）\n` +
     `收盘 ${ov.close}｜MA5 ${ov.ma5}(${ov.ma5SlopeUp ? '向上' : '走平/向下'})｜MA10 ${ov.ma10}｜较昨 ${d}\n` +
     `信号【${ov.signal}】（${ov.aboveMa5 ? '站上' : '跌破'}MA5 且 MA5${ov.ma5SlopeUp ? '向上' : '未向上'}）——` +
     `升温=打板追涨赚钱效应转强、题材短线情绪回暖；退潮=首板隔日溢价走弱、短线宜降频降仓。作短线情绪择时参考，非唯一买卖依据。`

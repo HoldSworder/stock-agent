@@ -22,7 +22,7 @@ const SWING_LOOKBACK = 3;
  * 若小于窗口宽度，右窗口还没填满就标 confirmed，次日补进一根更极端的 bar 会让该点整个消失，
  * 而计划正是拿最近确认摆动点当结构止损锚（candidateCatalog 的 guaranteed 保底候选）。
  */
-const SWING_CONFIRM_BARS = SWING_LOOKBACK;
+export const SWING_CONFIRM_BARS = SWING_LOOKBACK;
 
 /** 结构算法版本，随参数调整递增，供历史计划绑定口径 */
 export const STRUCTURE_MODEL_VERSION = 'structure-v1';
@@ -72,8 +72,9 @@ function mkSwing(
 /**
  * 相邻同类摆动点只保留更极端的一个，保证高低交替。
  * 不交替的序列无法做道氏「更高高点 + 更高低点」判断。
+ * 导出供波浪计数（market/elliott.ts）复用：按 confirmed 过滤会打断交替，过滤后必须重新去重。
  */
-function dedupeAlternating(points: SwingPoint[]): SwingPoint[] {
+export function dedupeAlternating(points: SwingPoint[]): SwingPoint[] {
   const out: SwingPoint[] = [];
   for (const p of points) {
     const prev = out[out.length - 1];

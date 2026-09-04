@@ -325,7 +325,11 @@ const ZERO = DATES.map(() => 0);
     5,
     'A8h 混入个股后卖出侧必须多扣 5bps 印花税',
   );
-  assert.ok(mixed.note.includes('混合口径'), 'A8h 混合口径必须在 note 里标明');
+  // 钉「有没有说清楚池子混了非场内基金」，不钉某一句固定措辞
+  assert.ok(
+    mixed.note.includes('非场内基金'),
+    'A8h 池中混入非场内基金必须在 note 里标明（费用档会因此不同）',
+  );
 }
 
 // A8i H1：跟踪侧的调仓相位必须与回测一致，非调仓日不得记换手成本。
@@ -444,7 +448,11 @@ const ZERO = DATES.map(() => 0);
     Math.abs(seg.totalNetPnl - -0.1) < 1e-9,
     `A11 统计的应是 v2 区段那笔 -10%，实际 ${seg.totalNetPnl}`,
   );
-  assert.ok(seg.note.includes('不混算'), 'A11 必须在结论里说明有多少旧口径样本被排除');
+  // 钉「有没有交代被排除的样本数」，不钉措辞——文案会随去术语化调整
+  assert.ok(
+    /(\d+)\s*个交易日/.test(seg.note) && seg.note.includes('最新规则版本'),
+    'A11 必须在结论里说明有多少旧口径样本被排除',
+  );
 
   // 全程同协议时不得误切：整段都算
   const same = evaluateModeGateFromDaily(

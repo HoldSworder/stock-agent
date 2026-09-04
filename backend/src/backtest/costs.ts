@@ -53,10 +53,10 @@ export function toTradelabCosts(c: BacktestCosts): ExecutionCostOptions {
   };
 }
 
-/** 成本口径说明（写入回测结果 notes，前端透明展示） */
+/** 费用怎么算的说明（写入回测结果 notes，前端透明展示） */
 export function costNote(c: BacktestCosts): string {
   return (
-    `成本口径：佣金双边 ${c.commissionBps}bps（最低 ${c.minCommission} 元）` +
+    `费用怎么算：佣金双边 ${c.commissionBps}bps（最低 ${c.minCommission} 元）` +
     ` + 过户费双边 ${c.transferFeeBps}bps + 印花税卖出 ${c.stampDutyBps}bps（折半摊双边近似）` +
     ` + 滑点 ${c.slippageBps}bps`
   );

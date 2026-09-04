@@ -684,7 +684,7 @@ export function saveDraftObservationPlan(input: {
       planId: plan.id,
       planVersion: plan.version,
       kind: 'created',
-      note: `降级为观察计划：${input.reason}`,
+      note: `降为观察计划：${input.reason}`,
     });
     for (const old of superseded) {
       repo.appendEvent({

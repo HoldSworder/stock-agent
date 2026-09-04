@@ -55,10 +55,10 @@ import {
   searchBoard,
   getKline,
   getTrends,
-  getIndexFundFlows,
 } from './market/eastmoney';
 import { getStockIndicators } from './market/indicators';
 import { getPriceLevels } from './market/levels';
+import { formatElliottForPrompt, getElliottAnalysis } from './market/elliott';
 import { getChipDistribution } from './market/chip';
 import {
   buildOverview,
@@ -167,12 +167,14 @@ import { seedResearchModesIfEmpty } from './seeds/researchModes';
 import { registerSentimentModule } from './sentiment';
 import { registerMoneyEffectModule } from './moneyeffect';
 import { registerRegimeModule } from './regime';
+import { registerIndexFlowModule } from './indexflow';
 import { registerBreadthModule } from './breadth';
 import { registerBoardsModule } from './boards';
 import { registerConceptsModule } from './concepts';
 import { registerDragonModule } from './dragon';
 import { registerCapitalModule } from './capital';
 import { registerCockpitModule } from './cockpit';
+import { registerAssertionsModule } from './assertions';
 import { catchUpModuleMissedRuns } from './scheduling/moduleScheduler';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -210,6 +212,54 @@ function redactTokenFromUrl(url: string): string {
     return url.replace(/([?&]token=)[^&]*/gi, '$1[REDACTED]');
   }
 }
+
+/**
+ * 校验「标的身份」：指数须显式 secid（其 code 与个股撞码），其余按 code（个股 6 位 / 板块 BKxxxx）。
+ * /levels 与 /elliott 共用同一判据（/kline、/trends 因各自另有 secid 取数注意事项，仍保留内联副本）。
+ *
+ * 注意：这里返回的 code 只是**身份标识**，带 secid 时不得原样送进取数参数——
+ * 该约定由取数侧的 getPriceLevels / getElliottAnalysis 负责落实，原因见那两处注释。
+ */
+function parseSymbolTarget(
+  rawCode: unknown,
+  rawSecid: unknown,
+): { code: string; secid?: string } | { error: string } {
+  const code = String(rawCode || '').trim();
+  const secid = typeof rawSecid === 'string' && rawSecid ? rawSecid : undefined;
+  if (secid) {
+    if (!/^\d+\.[A-Za-z0-9]+$/.test(secid)) return { error: '非法 secid' };
+    return { code, secid };
+  }
+  if (!/^(\d{6}|BK\d+)$/i.test(code)) return { error: '非法标的代码' };
+  return { code };
+}
+
+/** K 线周期入参归一，非法值退回日线 */
+function parseKlinePeriod(value: unknown): KlinePeriod {
+  const allowed: KlinePeriod[] = ['day', 'week', 'month', '5m', '15m', '30m', '60m', '120m'];
+  return allowed.includes(value as KlinePeriod) ? (value as KlinePeriod) : 'day';
+}
+
+/** 波浪解读的系统提示：模型只负责把确定性计数翻成人话，不得改浪、不得给买卖指令 */
+const ELLIOTT_INTERPRET_SYSTEM = [
+  '你是一名技术分析师，负责把后端已经算好的波浪计数结果翻译成通俗中文。',
+  '硬性约束：',
+  '1. 只解释底稿里已给出的浪序、见顶位／见底位、失效价与时间窗，不得自行改动浪的标号或起止点；',
+  '2. 不得编造底稿中没有的价格、日期或指标；',
+  '3. 不得给出买入/卖出/加减仓指令，也不得说「因此应该买/卖」；',
+  '4. 必须说明这套计数的不确定性——若底稿给了备选计数，要一并交代它意味着什么；',
+  '5. 若某一级别的状态是 unclear，直接说该级别结构不清晰，不要强行解释；',
+  '6. 见顶位／见底位是同一浪可能停下来的几个价位、互为备选，不得说成「先到 A 再到 B」的阶段目标；',
+  '   标了「已突破／已跌破」的档位价格已经走过，只能作为「浅档已破、看更深一档」来讲，不得说成还要涨/跌到那里；',
+  '   讲这些价位时请沿用底稿里的名称（如「反弹见顶位」「回调见底位」），与用户界面上的用词保持一致；',
+  '7. 底稿若同时给出「当前级别」与「高一度读法」，必须说明两者是同一段走势的两种称呼、候选位相同，',
+  '   并讲清分歧在本浪之后（一种是后面还有一跌一涨、另一种是本浪走完直接进 C 浪），不得只挑其中一种讲；',
+  '8. 底稿给了「首选参考」时要把它当作最直接的对照数字讲出来（价位 + 预计日期），',
+  '   但须说明它是「下一个尚未到达的档位」，不是最可能的结果；',
+  '9. 子浪细分级别更低、更容易被后续走势改写，只能用来说明「当前处在这一浪的哪个阶段」，不得据此下结论。',
+  '输出 220 字以内的中文段落，先说当前处于什么位置（含子浪阶段），再说首选价位与日期、什么价位证伪，',
+  '最后交代两种读法的分歧。不要用 Markdown 标题。',
+].join('\n');
 
 /** 把查询 limit 归一为有限整数并钳制到安全范围 */
 function parseLimit(
@@ -550,22 +600,6 @@ async function main() {
     ok: true,
     data: await cached('market:usmapping', 600_000, buildUsMapping),
   }));
-
-  // 股指主力资金流趋势（7 个主要股指近 N 日主力净流入）：独立于 3s 大盘轮询，120s TTL 慢刷不加压。
-  // fetcher 全空时 throw，使 cached 不落缓存（东财 fflow 偶发软失败不至于卡死 120s），路由 catch 后回空。
-  app.get('/api/market/index-fundflow', async () => {
-    let items: Awaited<ReturnType<typeof getIndexFundFlows>> = [];
-    try {
-      items = await cached('market:index-fundflow', 120_000, async () => {
-        const r = await getIndexFundFlows();
-        if (!r.some((it) => it.days.length > 0)) throw new Error('股指资金流全空，跳过缓存');
-        return r;
-      });
-    } catch {
-      /* 全空/取数失败：回空数组，前端下次轮询自愈 */
-    }
-    return { ok: true, data: { asOf: new Date().toISOString(), items } };
-  });
 
   // 复盘历史（成功的「一键复盘」运行）
   app.get<{ Querystring: { limit?: string } }>('/api/reviews', (req) => ({
@@ -956,21 +990,65 @@ async function main() {
   app.get<{ Params: { code: string }; Querystring: { period?: string; secid?: string } }>(
     '/api/stock/:code/levels',
     async (req, reply) => {
-      const code = String(req.params.code || '').trim();
-      const secid = req.query?.secid;
-      if (secid) {
-        if (!/^\d+\.[A-Za-z0-9]+$/.test(secid)) {
-          return reply.code(400).send({ ok: false, error: '非法 secid' });
-        }
-      } else if (!/^(\d{6}|BK\d+)$/i.test(code)) {
-        return reply.code(400).send({ ok: false, error: '非法标的代码' });
-      }
-      const allowed: KlinePeriod[] = ['day', 'week', 'month', '5m', '15m', '30m', '60m', '120m'];
-      const period = allowed.includes(req.query?.period as KlinePeriod)
-        ? (req.query!.period as KlinePeriod)
-        : 'day';
+      const target = parseSymbolTarget(req.params.code, req.query?.secid);
+      if ('error' in target) return reply.code(400).send({ ok: false, error: target.error });
+      const period = parseKlinePeriod(req.query?.period);
       try {
-        return { ok: true, data: await getPriceLevels(code, period, secid) };
+        return { ok: true, data: await getPriceLevels(target.code, period, target.secid) };
+      } catch (e) {
+        return reply.code(502).send({ ok: false, error: e instanceof Error ? e.message : String(e) });
+      }
+    },
+  );
+
+  // ===== 波浪计数：多周期浪序 + 目标位 + 时间窗（KlineDialog 波浪图层）=====
+  // 与 /levels 同一套身份校验。计数是纯确定性的、零 token，打开弹窗即取；
+  // 人话解读另走 /elliott/interpret，按需触发。
+  app.get<{ Params: { code: string }; Querystring: { period?: string; secid?: string } }>(
+    '/api/stock/:code/elliott',
+    async (req, reply) => {
+      const target = parseSymbolTarget(req.params.code, req.query?.secid);
+      if ('error' in target) return reply.code(400).send({ ok: false, error: target.error });
+      const period = parseKlinePeriod(req.query?.period);
+      try {
+        return { ok: true, data: await getElliottAnalysis(target.code, period, target.secid) };
+      } catch (e) {
+        return reply.code(502).send({ ok: false, error: e instanceof Error ? e.message : String(e) });
+      }
+    },
+  );
+
+  // 波浪解读：把确定性计数当只读底稿喂给模型，只要它把结论翻成人话。
+  // 按 code|period|asOf 缓存——asOf 是最新 bar 时间，同一根 bar 内重复打开弹窗不重复烧 token，
+  // 出新 bar 自动失效。缓存 TTL 给足 12 小时，真正的失效判据是 key 里的 asOf。
+  app.post<{ Params: { code: string }; Querystring: { period?: string; secid?: string } }>(
+    '/api/stock/:code/elliott/interpret',
+    async (req, reply) => {
+      const target = parseSymbolTarget(req.params.code, req.query?.secid);
+      if ('error' in target) return reply.code(400).send({ ok: false, error: target.error });
+      const period = parseKlinePeriod(req.query?.period);
+      try {
+        const analysis = await getElliottAnalysis(target.code, period, target.secid);
+        if (!analysis.asOf) {
+          return reply.code(502).send({ ok: false, error: '取不到 K 线，无法解读' });
+        }
+        // 身份优先取 secid：指数的 code 与个股撞码，只用 code 会让上证指数与平安银行共用缓存
+        const key = `elliott:interpret:${target.secid ?? target.code}:${period}:${analysis.asOf}`;
+        const text = await cached(key, 12 * 3600_000, async () => {
+          const r = await gateway.call({
+            mode: 'oneshot',
+            purpose: 'elliott',
+            trigger: 'manual',
+            taskName: `波浪结构解读 ${target.code}`,
+            systemPrompt: ELLIOTT_INTERPRET_SYSTEM,
+            prompt: formatElliottForPrompt(analysis),
+            temperature: 0.3,
+          });
+          // 抛错让 cached 不写入，下次点「解读」可以重试；失败结果不该被缓存 12 小时
+          if (r.status !== 'success') throw new Error(r.error || '解读失败');
+          return r.outputText.trim() || '（模型无输出）';
+        });
+        return { ok: true, data: { text, asOf: analysis.asOf } };
       } catch (e) {
         return reply.code(502).send({ ok: false, error: e instanceof Error ? e.message : String(e) });
       }
@@ -1376,6 +1454,9 @@ async function main() {
   // 大盘阶段研判模块（确定性：多指数均线/趋势 + 全A等权失真校正 + 宽度/情绪/量能 → 主升/反弹/退潮/震荡，删除此行整模块下线）
   registerRegimeModule(app);
 
+  // 宽基指数资金流模块（10 个宽基指数主力净流入，收盘后落日快照、逐日累积历史，删除此行整模块下线）
+  registerIndexFlowModule(app);
+
   // 首板赚钱效应模块（同花顺 883994「昨日打首板表现」：站上MA5且向上→升温/否则退潮，删除此行整模块下线）
   registerMoneyEffectModule(app);
 
@@ -1397,6 +1478,10 @@ async function main() {
 
   // 驾驶舱（一屏概览 + 跨模块事件时间线，纯只读聚合，删除此行整模块下线）
   registerCockpitModule(app);
+
+  // 技术断言账本（每日冻结波浪/斐波/枢轴/中枢/均线的可证伪判断，到期核对并统计遵循率，
+  // 只写自己的表、不回写任何决策链路，删除此行整模块下线）
+  registerAssertionsModule(app);
 
   // 实时盯盘模块（独立，可删除以下两行整模块下线）
   registerWatchModule(app);
