@@ -234,6 +234,48 @@ export interface StockQuote {
   turnoverRate?: number;
   /** 量比（best-effort，缺失为 undefined） */
   volumeRatio?: number;
+  /** 今开（best-effort，缺失为 undefined） */
+  open?: number;
+  /**
+   * 当日最高价（best-effort，缺失为 undefined）。
+   * 有这个字段就不要再在各模块内存里自己累加当日高点——那种累加进程一重启就归零，
+   * 会把移动止盈的回撤基准算低。
+   */
+  high?: number;
+  /** 当日最低价（best-effort，缺失为 undefined） */
+  low?: number;
+  /** 五档买卖盘口（best-effort，仅通达信源提供，缺失为 undefined） */
+  orderBook?: OrderBook;
+}
+
+/** 盘口中的一档委托 */
+export interface OrderBookLevel {
+  /** 委托价 */
+  price: number;
+  /** 委托量（手） */
+  volume: number;
+}
+
+/** 五档买卖盘口 */
+export interface OrderBook {
+  /** 买一至买五，买一在前；停牌或档位不足时可短于 5 档 */
+  bids: OrderBookLevel[];
+  /** 卖一至卖五，卖一在前；停牌或档位不足时可短于 5 档 */
+  asks: OrderBookLevel[];
+}
+
+/**
+ * 买卖一档的价差占中间价的百分比，用于判断这笔交易的隐性成本。
+ *
+ * 缺盘口、任一档缺失、或买一高于卖一（跨价的脏数据）时返回 null。
+ * 宁可让调用方显式标缺失，也不给一个看起来能用的假数。
+ */
+export function spreadPctOf(book: OrderBook | null | undefined): number | null {
+  // bids/asks 用可选链取：这个对象可能来自反序列化的历史快照，那时字段未必齐全
+  const bid = book?.bids?.[0]?.price ?? 0;
+  const ask = book?.asks?.[0]?.price ?? 0;
+  if (!(bid > 0) || !(ask > 0) || ask < bid) return null;
+  return ((ask - bid) / ((bid + ask) / 2)) * 100;
 }
 
 /** 关注标的（持久化条目） */
@@ -2251,6 +2293,11 @@ export interface SimPosition {
   positionRate: number;
   /** 当前可卖股数（T+1：扣除当日买入） */
   sellableQty: number;
+  /**
+   * 当日最高价（来自报价源，交易所口径；报价源不提供时为 undefined）。
+   * 盯盘类模块据此算冲高回落，不必再在各自进程内存里累加高点。
+   */
+  dayHigh?: number;
   /** 持有逻辑（如金属钨涨价；position 级，跨同步留存） */
   thesis?: string | null;
   /**

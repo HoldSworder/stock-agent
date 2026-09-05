@@ -4,8 +4,10 @@ import type {
   SymbolAssetType,
   SymbolBenchmark,
 } from '@stock-agent/shared';
+import { spreadPctOf } from '@stock-agent/shared';
 import { desc, eq } from 'drizzle-orm';
 import { db, schema } from '../db/client';
+import { getQuotes } from '../market/eastmoney';
 import { capabilityOf, trackingIndexOf } from './capability';
 
 // 资产适配层（计划 9.1）。纪律：technicalEvidence / structure 里不得出现
@@ -173,8 +175,26 @@ function readBoardBreadthSnapshot(boardCode: string, boardName: string): Breadth
   };
 }
 
-/** 通用执行质量：日均成交额与数据完整性，个股/ETF 共用 */
-function commonExecutionQuality(bars: KlineBar[]): ExecutionQualityItem[] {
+/**
+ * 实时买卖价差（%）。取不到盘口就返回 null，由调用方标缺失。
+ *
+ * 非交易时段拿到的是上一个交易日收盘那一刻的档位，仍能反映这只标的的常态价差，
+ * 对「值不值得拆单」这个判断够用，故不因休市而丢弃。
+ */
+async function liveSpreadPct(code: string): Promise<number | null> {
+  try {
+    const [q] = await getQuotes([code]);
+    return spreadPctOf(q?.orderBook);
+  } catch {
+    return null;
+  }
+}
+
+/** 通用执行质量：日均成交额、买卖价差与数据完整性，个股/ETF 共用 */
+async function commonExecutionQuality(
+  id: SymbolIdentity,
+  bars: KlineBar[],
+): Promise<ExecutionQualityItem[]> {
   const out: ExecutionQualityItem[] = [];
   const win = bars.slice(-20);
   if (win.length >= 5) {
@@ -187,13 +207,14 @@ function commonExecutionQuality(bars: KlineBar[]): ExecutionQualityItem[] {
   } else {
     out.push({ key: '近20日日均成交额', value: '样本不足', missing: true });
   }
-  // 五档实测不可用，显式标缺失而不是给个假数
-  const spread = capabilityOf('orderBookL2');
-  out.push({
-    key: '盘口价差/冲击成本',
-    value: spread.verdict === 'available' ? '待接入' : spread.note,
-    missing: spread.verdict !== 'available',
-  });
+  const cap = capabilityOf('orderBookL2');
+  const spread = cap.verdict === 'available' ? await liveSpreadPct(id.code) : null;
+  // 三种情形分开写：有实测值 / 有数据源但这次没取到 / 压根没数据源。
+  // 后两种都算缺失，但给用户的解释不一样，不能合并成一句
+  let spreadText = cap.note;
+  if (spread !== null) spreadText = `${spread.toFixed(3)}%（买一卖一，占中间价）`;
+  else if (cap.verdict === 'available') spreadText = '本次未取到盘口';
+  out.push({ key: '盘口价差', value: spreadText, missing: spread === null });
   return out;
 }
 
@@ -330,7 +351,7 @@ export const stockAdapter: SymbolAnalysisAdapter = {
   },
 
   async loadExecutionQuality(id, bars) {
-    const out = commonExecutionQuality(bars);
+    const out = await commonExecutionQuality(id, bars);
     const uncertain = limitPctUncertainOf(id);
     out.push({
       key: '涨跌幅上限',
@@ -439,11 +460,18 @@ export const etfAdapter: SymbolAnalysisAdapter = {
   },
 
   async loadExecutionQuality(id, bars) {
-    const out = commonExecutionQuality(bars);
-    // IOPV / 折溢价实测可用，直接复用 etf/data 的取数，不重复实现
-    try {
-      const { fetchEtfQuote } = await import('../etf/data');
-      const q = await fetchEtfQuote(id.code);
+    // 通用项（含盘口价差）与 ETF 折溢价各要打一次网络，彼此不依赖，必须并发：
+    // 本方法跑在 technicalEvidence 的 ADAPTER_DEADLINE_MS 之内，串起来容易整项超时被丢，
+    // 那样连「涨跌幅上限」这种本地就能算的条目都会跟着没
+    const [out, etfQuote] = await Promise.all([
+      commonExecutionQuality(id, bars),
+      // IOPV / 折溢价实测可用，直接复用 etf/data 的取数，不重复实现
+      import('../etf/data')
+        .then((m) => m.fetchEtfQuote(id.code))
+        .catch(() => null),
+    ]);
+    if (etfQuote) {
+      const q = etfQuote;
       const premium =
         q.premiumPct ??
         (q.iopv != null && q.iopv > 0 && q.price != null && q.price > 0
@@ -459,7 +487,7 @@ export const etfAdapter: SymbolAnalysisAdapter = {
           ? { key: 'IOPV', value: q.iopv.toFixed(4), missing: false }
           : { key: 'IOPV', value: '取数失败', missing: true },
       );
-    } catch {
+    } else {
       out.push({ key: '折溢价', value: '取数失败', missing: true });
     }
     // 跟踪误差实测不可用
@@ -507,8 +535,8 @@ export const indexAdapter: SymbolAnalysisAdapter = {
   async loadBreadthEvidence() {
     return null;
   },
-  async loadExecutionQuality(_id, bars) {
-    return commonExecutionQuality(bars);
+  async loadExecutionQuality(id, bars) {
+    return commonExecutionQuality(id, bars);
   },
   async loadEventRisks() {
     return [{ kind: '不可直接交易', date: null, note: '指数只作市场参考，动作须落到对应 ETF 或个股' }];

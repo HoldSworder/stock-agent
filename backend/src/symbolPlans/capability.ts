@@ -12,7 +12,7 @@ export interface CapabilityEntry {
 }
 
 /** 实测日期，用于判断结论是否需要复测 */
-export const CAPABILITY_PROBED_AT = '2026-08-03';
+export const CAPABILITY_PROBED_AT = '2026-09-05';
 
 export const CAPABILITIES: Record<string, CapabilityEntry> = {
   /** 分钟线深度：60m/15m 各 320 根均实得 320（407ms / 201ms），4.1 目标上限达成 */
@@ -20,10 +20,16 @@ export const CAPABILITIES: Record<string, CapabilityEntry> = {
     verdict: 'available',
     note: '60m 覆盖约 4 个月、15m 覆盖约 1 个月',
   },
-  /** 五档盘口：a-stock-data sidecar 无 quotes/quote/l2_quotes/snapshot 端点（全 404） */
+  /**
+   * 五档盘口：a-stock-data sidecar 的 mootdx_quote 端点返回完整五档（含各档挂单量）。
+   *
+   * 2026-08-03 首轮探测判为「不可用」是误判：当时脚本猜了 quotes/quote/l2_quotes/snapshot
+   * 四个端点名，真名 mootdx_quote 一个都没试到，于是把 404 当成了没有数据源。
+   * 期间盘口价差闸门一直是 null，等于这道风控从未生效过。
+   */
   orderBookL2: {
-    verdict: 'unavailable',
-    note: '无五档数据源，盘口价差与冲击成本不可计算',
+    verdict: 'available',
+    note: '经 a-stock-data 的 mootdx_quote 取五档，可算买卖价差',
   },
   /** 指数成分股（含权重）：index_stock_cons_weight_csindex 可用，沪深300 返回 300 行 */
   indexConstituentsWithWeight: {

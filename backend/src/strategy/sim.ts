@@ -669,6 +669,7 @@ export async function getStrategySnapshot(
       holdRate: p.avgCost > 0 ? (price - p.avgCost) / p.avgCost : 0,
       positionRate: totalAsset > 0 ? marketValue / totalAsset : 0,
       sellableQty: Math.max(0, p.qty - lockedToday),
+      dayHigh: q?.high && q.high > 0 ? q.high : undefined,
       thesis: thesisMap.get(p.code) ?? null,
       priceStale: stale || undefined,
     };

@@ -1,5 +1,12 @@
-import { SHARES_PER_LOT, type KlineBar, type KlinePeriod, type StockQuote } from '@stock-agent/shared';
+import {
+  SHARES_PER_LOT,
+  type KlineBar,
+  type KlinePeriod,
+  type OrderBookLevel,
+  type StockQuote,
+} from '@stock-agent/shared';
 import { callAstock } from './client';
+import { mapLimit } from '../datasource/klineCache';
 
 // a-stock-data sidecar 的行情适配：把 mootdx 返回映射为系统统一的 KlineBar / StockQuote，
 // 接入 datasource/providers 的 K线/报价多源调度。mootdx 走通达信 TCP（不封 IP），作 K线首选源。
@@ -122,25 +129,100 @@ export async function getKlineAstock(
 }
 
 /**
- * mootdx 实时报价 → StockQuote[]（末位兜底源：无名称/换手，仅价/涨跌，东财等全失败时用）。
- * mootdx quotes 无个股名称，name 回退为代码；pct 由 price/last_close 现算。
+ * mootdx 盘口一侧（买或卖）的档位数组。
+ *
+ * 字段形如 bid1..bid5 / bid_vol1..bid_vol5。遇到价为 0 的档就截断：停牌或冷门标的
+ * 常常只有前一两档有真实挂单，把 0 价当成一档会让价差算成 100%。
  */
-export async function getQuotesAstock(codes: string[]): Promise<StockQuote[]> {
-  if (!codes.length) return [];
+function mapOrderBookSide(row: Record<string, unknown>, side: 'bid' | 'ask'): OrderBookLevel[] {
+  const out: OrderBookLevel[] = [];
+  for (let i = 1; i <= 5; i += 1) {
+    const price = num(row[`${side}${i}`]);
+    if (!(price > 0)) break;
+    out.push({ price, volume: num(row[`${side}_vol${i}`]) });
+  }
+  return out;
+}
+
+/**
+ * 单次 mootdx 批量报价的最大标的数。
+ *
+ * 通达信协议一包最多 80 只，**超了不报错、直接只返回前 80 只**
+ * （2026-09-05 用真实沪市代码实测：81 只请求回 80 行，90 只、100 只同样都是 80 行）。
+ * 本源在报价链里排首位，而盯盘池、日K缓存盘中增量都是几十上百只一批，
+ * 不分片就会静默漏掉后面的标的——漏掉的标的不产报价也不产信号，界面上看不出任何异常。
+ */
+const MOOTDX_QUOTE_BATCH = 80;
+
+/** 取一批（≤80 只）的原始报价行 */
+async function fetchQuoteRows(symbols: string[]): Promise<Array<Record<string, unknown>>> {
   const rows = (await callAstock(
     'mootdx_quote',
-    { symbols: codes },
+    { symbols },
     undefined,
     'astockdata',
     12_000,
     1,
   )) as Array<Record<string, unknown>>;
-  if (!Array.isArray(rows) || rows.length === 0) throw new Error('a-stock-data(mootdx) 报价为空');
-  return rows.map((r) => {
+  return Array.isArray(rows) ? rows : [];
+}
+
+/**
+ * mootdx 实时报价 → StockQuote[]。
+ *
+ * 这是唯一带**五档盘口与当日最高/最低**的报价源（mootdx_quote 共 46 字段），
+ * 且走通达信 TCP 不封 IP，故在报价链里排首位。代价是不返回个股名称，
+ * name 先回退为代码，由 scheduler 统一回填（见 datasource/scheduler.ts 的名称回填）。
+ * pct 由 price/last_close 现算。
+ *
+ * 超过单包上限时分片并发取：各片之间互不依赖，串行会把盯盘一轮拖成 N 倍耗时。
+ * 并发压到 3，避免几百只的池子一次性打爆 sidecar 背后的通达信节点。
+ */
+export async function getQuotesAstock(codes: string[]): Promise<StockQuote[]> {
+  if (!codes.length) return [];
+  const batches: string[][] = [];
+  for (let i = 0; i < codes.length; i += MOOTDX_QUOTE_BATCH) {
+    batches.push(codes.slice(i, i + MOOTDX_QUOTE_BATCH));
+  }
+  const collected: Array<Record<string, unknown>> = [];
+  const failures: string[] = [];
+  await mapLimit(batches, 3, async (batch) => {
+    try {
+      collected.push(...(await fetchQuoteRows(batch)));
+    } catch (e) {
+      failures.push(e instanceof Error ? e.message : String(e));
+    }
+  });
+  // 全军覆没才算本源失败转下一源；部分分片失败时先把拿到的给出去，
+  // 但要留痕——静默的少数据比整源失败更难查
+  if (collected.length === 0) {
+    throw new Error(`a-stock-data(mootdx) 报价为空${failures.length ? `：${failures[0]}` : ''}`);
+  }
+  if (failures.length > 0) {
+    console.warn(
+      `[astock] 报价分片 ${failures.length}/${batches.length} 失败，本轮结果不完整：${failures[0]}`,
+    );
+  }
+  // mootdx 会对同一代码返回重复行（2026-09-05 实测：请求 60 只回 60 行、只有 58 个唯一代码）。
+  // 不去重的话盯盘循环会把同一只标的评估两遍，可能重复推同一条信号。
+  // 保留有报价的那一行：重复行里常有一条是价格全 0 的占位。
+  const byCode = new Map<string, Record<string, unknown>>();
+  for (const r of collected) {
+    const key = String(r.code ?? r.symbol ?? '').padStart(6, '0');
+    const kept = byCode.get(key);
+    if (!kept || (!(num(kept.price) > 0) && num(r.price) > 0)) byCode.set(key, r);
+  }
+  return [...byCode.values()].map((r) => {
     const code = String(r.code ?? r.symbol ?? '').padStart(6, '0');
     const price = num(r.price);
     const prevClose = num(r.last_close ?? r.last_close_price);
     const pct = prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : 0;
+    const open = num(r.open);
+    const high = num(r.high);
+    const low = num(r.low);
+    const bids = mapOrderBookSide(r, 'bid');
+    const asks = mapOrderBookSide(r, 'ask');
+    // 可选字段一律「有值才带」：给个 0 会被下游当成真实的开盘价/最高价用
     return {
       code,
       name: code,
@@ -148,6 +230,10 @@ export async function getQuotesAstock(codes: string[]): Promise<StockQuote[]> {
       pct,
       prevClose,
       amount: num(r.amount) / 1e8,
+      ...(open > 0 ? { open } : {}),
+      ...(high > 0 ? { high } : {}),
+      ...(low > 0 ? { low } : {}),
+      ...(bids.length > 0 && asks.length > 0 ? { orderBook: { bids, asks } } : {}),
     } satisfies StockQuote;
   });
 }

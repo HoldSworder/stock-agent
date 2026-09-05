@@ -91,8 +91,14 @@ async function tick(cfg: WeipanConfig): Promise<void> {
   for (const pos of positions) {
     const price = pos.price > 0 ? pos.price : pos.avgCost;
     if (!(price > 0)) continue;
-    // dayHigh 以成本兜底（保证 trailing 只在真正冲高到成本上方后才可能触发）
-    const dayHigh = Math.max(dayHighs.get(pos.code) ?? 0, price, pos.avgCost);
+    // 优先用报价自带的当日最高（交易所口径，进程重启不丢），报价源没给才退回内存累加。
+    // 仍与成本取大：保证移动止盈只在真正冲高到成本上方后才可能触发。
+    const dayHigh = Math.max(
+      pos.dayHigh ?? 0,
+      dayHighs.get(pos.code) ?? 0,
+      price,
+      pos.avgCost,
+    );
     dayHighs.set(pos.code, dayHigh);
 
     const exit = evalWeipanExit({ avgCost: pos.avgCost, price, dayHigh, minutes }, profile);

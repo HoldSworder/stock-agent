@@ -149,16 +149,22 @@ async function seedDayHigh(code: string, day: string, price: number): Promise<nu
 }
 
 /**
- * 批量播种当日高点：只对本进程首见的标的取 K 线，并发受限。
+ * 批量播种当日高点：只对本进程首见**且报价没带当日最高**的标的取 K 线，并发受限。
  * 串在报价循环里逐只 await 时，30 只 × 300ms 就给首个 tick 多加约 9 秒，
  * 上百只的池子会直接超过 pollSec；跨日清空后每天早上还要再来一次。
+ *
+ * 报价自带 high 时整只跳过：那已经是交易所口径的当日最高，再拉一次日线纯属白花时间。
  */
 async function seedDayHighs(
-  quotes: Array<{ code: string; price: number }>,
+  quotes: Array<{ code: string; price: number; high?: number }>,
   day: string,
 ): Promise<Map<string, number>> {
   const pending = quotes.filter(
-    (q) => q.price > 0 && !rollState.has(q.code) && !seededDayHigh.has(q.code),
+    (q) =>
+      q.price > 0 &&
+      !(q.high && q.high > 0) &&
+      !rollState.has(q.code) &&
+      !seededDayHigh.has(q.code),
   );
   const seeded = new Map<string, number>();
   await mapLimit(pending, 5, async (q) => {
@@ -520,9 +526,16 @@ async function tick(cfg: WatchConfig): Promise<void> {
     // 坏价过滤：异常跳变跳过本轮，不评估、不更新滚动状态（保留上一良好价）
     if (prevPrice != null && isAbnormalJump(q.code, name, prevPrice, q.price)) continue;
 
-    // 本进程首见该标的：用当日日线 high 播种，否则盘中重启会把今日高点重置成当时现价
-    const baseHigh = prev?.dayHigh ?? seededHighs.get(q.code) ?? q.price;
-    const dayHigh = Math.max(baseHigh, q.price);
+    // 当日高点优先用报价自带的 high（交易所口径，盘中重启也不丢）；
+    // 兜底报价源不返回该字段时，退回原来的「日线播种 + 内存滚动累加」。
+    // 取各来源最大值而不是只认一个：报价源会在 mootdx 与东财之间切换，
+    // 只认带 high 的那个会让高点在切到不带 high 的源时回退，把回撤基准算低。
+    const dayHigh = Math.max(
+      q.high ?? 0,
+      prev?.dayHigh ?? 0,
+      seededHighs.get(q.code) ?? 0,
+      q.price,
+    );
 
     const ctx: QuoteCtx = {
       code: q.code,

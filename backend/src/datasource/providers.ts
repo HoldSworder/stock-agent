@@ -6,11 +6,18 @@ import { getQuotesNetease } from '../market/netease';
 import { getKlineAstock, getQuotesAstock } from '../astock/market';
 
 // 能力 → 有序 provider 适配器。scheduler 据此按 启用+优先级 选源与故障转移。
-// 顺序依据 2026-06-25 在群晖生产网络(31 子网出口)实测：
-//   - 报价：东财 push2 可用、最快(~37ms)、字段最全(名称/换手/量比)，故为主；网易兜底；
-//     a-stock-data(mootdx) 末位兜底（无名称/换手，仅价，但 TCP 不封 IP）。
-//   - K 线：东财 push2his 在该网络被封(0% 成功)，故 mootdx(通达信 TCP，不封 IP，100% 成功)为首选，
-//     腾讯(可用，~60ms)次之，东财(被封时快速失败)再次，新浪末位。
+//
+// 报价顺序 2026-09-05 重排（原顺序为 东财 → 网易 → mootdx，依据是 2026-06-25 实测「东财最快、字段最全」）。
+// 重排原因是当天在 stock-agent 容器内逐域名复测，发现结论已经过期：
+//   - push2.eastmoney.com 与 push2his.eastmoney.com 均 TLS 握手完成后被对端关闭（源站反爬封了本出口 IP），
+//     而 push2delay / push2ex / datacenter-web 仍 200。也就是说东财报价并没有整体失败，
+//     而是被 eastmoney.ts 的 host 兜底静默切到了 push2delay —— 那是**延迟行情**。
+//     盯盘拿延迟价判急跌与炸板是错的，故不能再让它排第一。
+//   - mootdx 走通达信 TCP，不受 HTTP 反爬影响，且是唯一返回**五档盘口与当日最高/最低**的源
+//     （mootdx_quote 46 字段）。这两项此前被误判为「无数据源」，见 symbolPlans/capability.ts。
+// 代价：mootdx 不返回个股名称与换手/量比。名称由 scheduler 回填，换手/量比缺失的消费方本就按可选处理。
+//
+// K 线顺序不变：分钟线 mootdx 首选（同样因不封 IP），日线经 fetchDailyAdjusted 统一复权修正后按数据完整度排。
 // 注：腾讯/新浪实时报价为 GBK 接口（名称需 iconv 解码），故不纳入报价 provider，仅做 K 线兜底。
 // a-stock-data 未配置 Base URL / sidecar 不可用时，对应 provider 会快速失败并转下一源，不影响调度。
 
@@ -25,9 +32,9 @@ export interface KlineProvider {
 }
 
 export const QUOTE_PROVIDERS: QuoteProvider[] = [
+  { sourceId: 'astockdata', fn: getQuotesAstock },
   { sourceId: 'eastmoney', fn: getQuotesEastmoney },
   { sourceId: 'netease', fn: getQuotesNetease },
-  { sourceId: 'astockdata', fn: getQuotesAstock },
 ];
 
 // K 线按周期分两条链（scheduler 据 isMinutePeriod 选择）：

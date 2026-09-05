@@ -9,6 +9,7 @@ import type {
 } from '@stock-agent/shared';
 import { planPeriodRank } from '@stock-agent/shared';
 import { budgetForPhase, computeSizing } from '../positions/riskBudget';
+import { capabilityOf } from './capability';
 import { nextTradingClose } from './sessionClock';
 
 const REGIME_PHASES: MarketRegimePhase[] = ['主升', '退潮', '反弹', '震荡'];
@@ -34,6 +35,15 @@ const CHASE_GUARD_ATR = 1.5;
 
 /** ETF 折溢价闸门（%），超过则市场条件满足也不给可执行动作 */
 const MAX_PREMIUM_PCT = 1;
+
+/**
+ * 买卖价差闸门（%）：买一卖一价差占中间价超过这个数就不给可执行动作。
+ *
+ * 取 0.5：流动性正常的宽基 ETF 一跳就是 0.02%~0.05% 量级，冷门行业 ETF 常在 0.2% 上下，
+ * 到 0.5% 意味着一进一出光价差就吃掉 1%，已经和中线一次波段的预期收益同量级。
+ * 这道闸门在 2026-08-03 到 09-05 之间一直是 null（五档被误判为无数据源），等于从未生效。
+ */
+const MAX_SPREAD_PCT = 0.5;
 
 export interface RiskInput {
   context: SymbolTechnicalContext;
@@ -177,8 +187,9 @@ export function assembleRisk(input: RiskInput): AssembledRisk {
       // 由每条条件的 cadenceOf(cond) 逐条决定，前端也照此逐条显示
       chaseGuardAtr: CHASE_GUARD_ATR,
       maxPremiumPct: context.assetType === 'etf' ? MAX_PREMIUM_PCT : null,
-      // 五档不可用，价差闸门保持 null 并由 executionQuality 显式标缺失
-      maxSpreadPct: null,
+      // 盘口取不到时仍保持 null：闸门值必须和「有没有实测价差可比」一致，
+      // 否则界面会显示一个永远比不到的阈值，看着像在管、其实没管
+      maxSpreadPct: capabilityOf('orderBookL2').verdict === 'available' ? MAX_SPREAD_PCT : null,
       nextReviewAt: nextReviewAt(),
     },
   };

@@ -61,15 +61,22 @@ async function probeMinuteDepth(): Promise<void> {
 
 // ===== 2. 五档盘口（计划 4.8 盘口价差 / 冲击成本的前置）=====
 
-/** mootdx sidecar 的五档端点名在不同 vendor 版本下可能不同，逐个试 */
-const L2_ENDPOINTS = ['quotes', 'quote', 'l2_quotes', 'snapshot'];
+/**
+ * sidecar 的五档端点名。
+ *
+ * 别再往这里塞猜的名字：首轮探测就是靠猜（quotes/quote/l2_quotes/snapshot）全 404，
+ * 把本来一直可用的五档误判成「无数据源」，价差闸门因此空转了一个月。
+ * 要加候选先去 `GET /api/manifest` 对一遍真实端点名，那份清单就是权威。
+ * 端点的入参名也来自 manifest：mootdx_quote 收的是 symbols（复数、逗号分隔），不是 symbol。
+ */
+const L2_ENDPOINTS = ['mootdx_quote'];
 
 async function probeOrderBook(): Promise<void> {
   const label = '五档盘口';
   const tried: string[] = [];
   for (const ep of L2_ENDPOINTS) {
     try {
-      const res = await callAstock(ep, { symbol: STOCK }, undefined, 'astockdata', 12_000, 1);
+      const res = await callAstock(ep, { symbols: [STOCK] }, undefined, 'astockdata', 12_000, 1);
       const text = JSON.stringify(res);
       // 判定是否真含买卖档位字段（bid/ask 或 买一/卖一）
       const hasBook = /bid1|ask1|bid_1|ask_1|买一|卖一|bid_p|ask_p/i.test(text);

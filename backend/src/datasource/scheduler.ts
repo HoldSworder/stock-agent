@@ -10,7 +10,66 @@ import { toSecid } from './codes';
 
 const lastServed: { quote: string | null; kline: string | null } = { quote: null, kline: null };
 
-/** 批量实时报价（东财 → 网易 自动兜底） */
+/**
+ * 代码 → 名称的进程内缓存。
+ *
+ * 首选报价源 mootdx 不返回名称，而「加自选」「同花顺账本同名」等入口靠名称判断代码是否真实存在，
+ * 拿代码当名称会把 600519 存成「600519」。名称几乎不变，故缓存整个进程生命周期，
+ * 不设过期——真改名了重启一次即可，不值得为此每轮多打一次网络。
+ */
+const nameCache = new Map<string, string>();
+
+/**
+ * 已经向备用源问过、但对方也给不出名称的代码（退市、指数、北交所冷门标的等）。
+ *
+ * 没有这层记录的话，盯盘每 10 秒一轮都会为同一批查无此名的代码再打一次备用源，
+ * 白白把「首选源不带名称」变成一个持续的额外请求源。
+ */
+const nameUnavailable = new Set<string>();
+
+/** 名称是否已取到：mootdx 缺名时回退成代码本身，这种要当作没取到 */
+function hasRealName(q: StockQuote): boolean {
+  const n = q.name?.trim();
+  return !!n && n !== q.code;
+}
+
+/**
+ * 给缺名的报价补上名称：先查进程缓存，仍缺的再向带名称的备用源问一次。
+ *
+ * 整个过程 best-effort：备用源也挂了就保持代码原样返回，绝不让补名把主链路的报价拖失败。
+ */
+async function backfillNames(quotes: StockQuote[], servedBy: string): Promise<StockQuote[]> {
+  const applyCache = (): StockQuote[] => {
+    for (const q of quotes) {
+      const cached = nameCache.get(q.code);
+      if (cached && !hasRealName(q)) q.name = cached;
+    }
+    return quotes;
+  };
+
+  if (quotes.every(hasRealName)) return quotes;
+  applyCache();
+
+  const ask = quotes.filter((q) => !hasRealName(q) && !nameUnavailable.has(q.code)).map((q) => q.code);
+  if (ask.length === 0) return quotes;
+
+  for (const p of QUOTE_PROVIDERS) {
+    if (p.sourceId === servedBy || !isSourceEnabled(p.sourceId)) continue;
+    try {
+      for (const alt of await p.fn(ask)) {
+        if (hasRealName(alt)) nameCache.set(alt.code, alt.name);
+      }
+      // 这一轮问过还是没有的，记下来不再反复问
+      for (const code of ask) if (!nameCache.has(code)) nameUnavailable.add(code);
+      break;
+    } catch {
+      /* 备用源不可用：换下一个。全挂时不写 nameUnavailable，留待下轮重试 */
+    }
+  }
+  return applyCache();
+}
+
+/** 批量实时报价（mootdx → 东财 → 网易 自动兜底；首选源缺名称时自动回填） */
 export async function getQuotes(codes: string[]): Promise<StockQuote[]> {
   const errors: string[] = [];
   for (const p of QUOTE_PROVIDERS) {
@@ -18,7 +77,7 @@ export async function getQuotes(codes: string[]): Promise<StockQuote[]> {
     try {
       const r = await p.fn(codes);
       lastServed.quote = p.sourceId;
-      return r;
+      return await backfillNames(r, p.sourceId);
     } catch (e) {
       errors.push(`${p.sourceId}: ${e instanceof Error ? e.message : String(e)}`);
     }
