@@ -11,6 +11,16 @@ import { fileURLToPath } from 'node:url';
 
 const REPO = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..');
 
+/**
+ * 相对路径统一成正斜杠。
+ *
+ * SKIP_DIRS / SKIP_FILES / allow[].file 全部写成 `backend/src/xxx`，而 path.relative
+ * 在 Windows 上给的是 `backend\src\xxx`，直接比会**永远不匹配**：整个 agent/ 目录被扫、
+ * 所有按文件豁免的提示词文件全部失效，同一份代码在 Windows 上报一百多处、在 Linux 上零命中。
+ * 这类失效是静默的（只表现为命中变多），所以路径一律经这里归一后再比。
+ */
+const toPosix = (p: string): string => p.split(path.sep).join('/');
+
 /** 一条黑话规则：命中的词、为什么不能用、改成什么、以及已复核可保留的语境 */
 type GlossaryRule = {
   /** 要拦的词 */
@@ -240,7 +250,7 @@ function walk(dir: string, exts: string[], out: string[]): void {
   if (!fs.existsSync(dir)) return;
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
-    const rel = path.relative(REPO, full);
+    const rel = toPosix(path.relative(REPO, full));
     if (SKIP_DIRS.some((d) => rel.startsWith(d))) continue;
     if (entry.isDirectory()) walk(full, exts, out);
     else if (
@@ -274,7 +284,7 @@ function scan(): Hit[] {
     const files: string[] = [];
     walk(path.join(REPO, target.dir), target.exts, files);
     for (const file of files) {
-      const rel = path.relative(REPO, file);
+      const rel = toPosix(path.relative(REPO, file));
       let inBlockComment = false;
       const lines = fs.readFileSync(file, 'utf8').split('\n');
       for (const [i, line] of lines.entries()) {
