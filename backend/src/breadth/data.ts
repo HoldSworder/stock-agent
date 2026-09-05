@@ -1,5 +1,6 @@
 import type { BoardKind } from '@stock-agent/shared';
 import { callAkshare } from '../market/akshare';
+import { getBoardConstituents, getBoardList } from '../market/eastmoney';
 import { cached } from '../lib/ttlCache';
 
 // 板块新高宽度取数层（经 aktools 透传 akshare，best-effort，纯只读）：
@@ -60,11 +61,18 @@ export async function fetchMarketNewHighSet(
 }
 
 /**
- * 取某口径的全部板块清单（东财，缓存 6h）。
- * best-effort：失败返回 []。
+ * 取某口径的全部板块清单（东财，缓存 6h）。best-effort：失败返回 []。
+ *
+ * 与成分取数同理：主路径用东财内部客户端（主 host 被封时自动切延迟镜像），
+ * akshare 只作兜底。清单一旦取空，下游按名字解析 BK 代码就会全线落空。
  */
 export async function fetchBoards(kind: BoardKind, signal?: AbortSignal): Promise<BoardMeta[]> {
   return cached(`breadth:boards:${kind}`, BOARD_TTL_MS, async () => {
+    try {
+      return (await getBoardList(kind)).map((b) => ({ code: b.code, name: b.name, kind }));
+    } catch (e) {
+      console.warn(`[breadth] 东财板块清单取数失败 ${kind}，转 AKShare：`, e instanceof Error ? e.message : e);
+    }
     const data = await callAkshare(funcs(kind).name, {}, signal);
     const out: BoardMeta[] = [];
     if (Array.isArray(data)) {
@@ -78,9 +86,22 @@ export async function fetchBoards(kind: BoardKind, signal?: AbortSignal): Promis
   });
 }
 
+/** 板块名 → 东财 BK 代码（复用 fetchBoards 的 6h 缓存清单，取不到返回 null） */
+async function resolveBoardCode(
+  kind: BoardKind,
+  name: string,
+  signal?: AbortSignal,
+): Promise<string | null> {
+  const boards = await fetchBoards(kind, signal).catch(() => [] as BoardMeta[]);
+  return boards.find((b) => b.name === name)?.code ?? null;
+}
+
 /**
- * 取单个板块的成分股 6 位代码（按板块名，缓存 6h）。
- * akshare 成分接口以板块名称（symbol）为入参。best-effort：失败/为空返回 []。
+ * 取单个板块的成分股 6 位代码（按板块名，缓存 6h）。best-effort：失败/为空返回 []。
+ *
+ * 主路径走东财内部客户端（按 BK 代码取），因为它在 push2 主 host 被封时会自动切
+ * push2delay 延迟镜像；akshare 那条路直连 push2、没有镜像兜底，2026-09-05 起整体失败。
+ * 仍保留 akshare 作兜底：板块名不在清单里（清单本身取数失败）时还能试一把。
  */
 export async function fetchBoardConstituents(
   kind: BoardKind,
@@ -90,6 +111,17 @@ export async function fetchBoardConstituents(
   const name = (boardName ?? '').trim();
   if (!name) return [];
   return cached(`breadth:cons:${kind}:${name}`, CONS_TTL_MS, async () => {
+    const errors: string[] = [];
+    const code = await resolveBoardCode(kind, name, signal);
+    if (code) {
+      try {
+        return await getBoardConstituents(code);
+      } catch (e) {
+        errors.push(`东财(${code}): ${e instanceof Error ? e.message : String(e)}`);
+      }
+    } else {
+      errors.push('板块清单里没有这个名字，取不到 BK 代码');
+    }
     try {
       const data = await callAkshare(funcs(kind).cons, { symbol: name }, signal);
       const codes = new Set<string>();
@@ -99,10 +131,12 @@ export async function fetchBoardConstituents(
           if (c) codes.add(c);
         }
       }
-      return Array.from(codes);
+      if (codes.size > 0) return Array.from(codes);
+      errors.push('AKShare 返回空');
     } catch (e) {
-      console.warn(`[breadth] 取板块成分失败 ${kind}:${name}：`, e instanceof Error ? e.message : e);
-      return [];
+      errors.push(`AKShare: ${e instanceof Error ? e.message : String(e)}`);
     }
+    console.warn(`[breadth] 取板块成分失败 ${kind}:${name} → ${errors.join(' | ')}`);
+    return [];
   });
 }

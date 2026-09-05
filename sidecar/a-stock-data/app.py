@@ -121,6 +121,79 @@ def mootdx_f10_announcement(symbol: str) -> Any:
     return _with_tdx(lambda c: c.F10(symbol=symbol, name="最新提示"))
 
 
+# ── 上游函数的本地修正 wrapper ─────────────────────────────────────────────
+# astock_functions.py 由 extract.py 从 vendor/SKILL.md 构建期生成，不能手改
+# （改了会被下次上游同步覆盖）。上游有 bug 又等不及上游修时，在这里包一层，
+# 并在 _SPEC 里注册 wrapper 而不是 _af("原函数名")。
+
+def _tq_num(vals: list[str], i: int) -> float:
+    """腾讯报文取数值字段：空串与非数字一律归 0（ETF 没有市盈率，该位就是空的）"""
+    try:
+        return float(vals[i]) if vals[i] else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def tencent_quote(codes: list[str]) -> Any:
+    """腾讯实时行情，修正上游的市场前缀判定。
+
+    上游 `tencent_quote` 的规则是「6/9 开头→sh，8 开头→bj，其余→sz」，
+    于是 5 开头的**沪市基金全被拼成 sz**（510300 → sz510300）。腾讯对错误前缀
+    返回的短行会被上游的 `len(vals) < 53` 判掉，函数静默少返回这些标的——
+    510300、588200 这类沪市 ETF 一只都取不到，而深市 159xxx 恰好蒙对所以看着正常。
+
+    这里按交易所真实编码段重新分市场：
+      北交所 4xx 8xx 92x
+      沪市   6xx(主板/科创) 9xx(B股) 5xx(基金/ETF) 11x(可转债)
+      其余归深市（00x 主板 30x 创业板 15x/16x/18x 基金 12x 可转债 399xxx 指数）
+
+    两处顺序敏感，改动前先看清楚：
+      - 北交所必须先判。北交所新代码段 920xxx 也以 9 开头，放在沪市之后会被吞成 sh。
+      - 沪市可转债 11xxxx 用两位前缀匹配。只看首字符 1 会把深市基金 15x/16x 一起带走。
+
+    指数代码撞码（000001 既是上证指数也是平安银行）不在此处理：上游本就按个股解析，
+    改判会影响既有调用方，需要指数行情请显式用 mootdx_index。
+    """
+    fixed = []
+    for c in codes:
+        code = str(c).strip()
+        if code.startswith(("4", "8", "92")):
+            fixed.append(f"bj{code}")
+        elif code.startswith(("6", "9", "5", "11")):
+            fixed.append(f"sh{code}")
+        else:
+            fixed.append(f"sz{code}")
+    # 上游函数只收裸代码、自己拼前缀，没有让外部传入前缀的口子，
+    # 所以拼好 URL 后自行请求与解析，不复用它。
+    import urllib.request
+
+    url = "https://qt.gtimg.cn/q=" + ",".join(fixed)
+    req = urllib.request.Request(url)
+    req.add_header("User-Agent", "Mozilla/5.0")
+    data = urllib.request.urlopen(req, timeout=10).read().decode("gbk")
+
+    result: dict[str, dict] = {}
+    for line in data.strip().split(";"):
+        if not line.strip() or "=" not in line or '"' not in line:
+            continue
+        key = line.split("=")[0].split("_")[-1]
+        vals = line.split('"')[1].split("~")
+        # 字段索引最大用到 52；不足说明这行不是正常行情报文（错误前缀会返回短行）
+        if len(vals) < 53 or len(key) <= 2:
+            continue
+        f = _tq_num
+        result[key[2:]] = {
+            "name": vals[1], "price": f(vals, 3), "last_close": f(vals, 4), "open": f(vals, 5),
+            "change_amt": f(vals, 31), "change_pct": f(vals, 32),
+            "high": f(vals, 33), "low": f(vals, 34),
+            "amount_wan": f(vals, 37), "turnover_pct": f(vals, 38), "pe_ttm": f(vals, 39),
+            "amplitude_pct": f(vals, 43), "mcap_yi": f(vals, 44), "float_mcap_yi": f(vals, 45),
+            "pb": f(vals, 46), "limit_up": f(vals, 47), "limit_down": f(vals, 48),
+            "vol_ratio": f(vals, 49), "pe_static": f(vals, 52),
+        }
+    return result
+
+
 # ── 大盘阶段 HMM 影子信号（hmmlearn，纯确定性，零 token）─────────────────────
 # 与 backend 的确定性六维规则并列的「概率视角」：在全A等权(880008)日线上现训
 # GaussianHMM，用「对数收益 + 20日滚动波动」两特征聚出 强势/震荡/弱势 三态，
@@ -262,9 +335,11 @@ _SPEC: list[dict] = [
     {"name": "mootdx_transaction", "fn": mootdx_transaction, "layer": "行情",
      "params": [("symbol", "str", True, None), ("date", "str", True, None)],
      "desc": "mootdx 逐笔成交（非交易时间返回空），date=YYYYMMDD", "sample": None},
-    {"name": "tencent_quote", "fn": _af("tencent_quote"), "layer": "行情",
+    # 用本地 wrapper 而非 _af("tencent_quote")：上游的市场前缀判定漏了沪市基金段，
+    # 5 开头的沪市 ETF 会被拼成 sz 前缀而静默取不到（详见 wrapper 注释）
+    {"name": "tencent_quote", "fn": tencent_quote, "layer": "行情",
      "params": [("codes", "codes", True, None)],
-     "desc": "腾讯财经 PE(TTM)/PB/市值/换手/涨跌停/指数/ETF（不封IP）", "sample": {"codes": "688017,300476"}},
+     "desc": "腾讯财经 PE(TTM)/PB/市值/换手/涨跌停/指数/ETF（不封IP）", "sample": {"codes": "510300,688017"}},
     {"name": "baidu_kline_with_ma", "fn": _af("baidu_kline_with_ma"), "layer": "行情",
      "params": [("code", "str", True, None), ("start_time", "str", False, "")],
      "desc": "百度股市通日K线，自带 MA5/MA10/MA20 均价", "sample": {"code": "600519"}},

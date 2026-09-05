@@ -678,6 +678,52 @@ export async function getSectorByChange(
   }));
 }
 
+/**
+ * 全部行业/概念板块清单（东财 clist，m:90+t:2 行业 / t:3 概念）。
+ *
+ * 与 getSectorRanking 的差别：那个是「按涨幅取前 N 名」，这里要的是**全量清单**，
+ * 用于把板块名解析成 BK 代码。同样走 getJson，主 host 被封时自动切延迟镜像。
+ */
+export async function getBoardList(
+  kind: 'industry' | 'concept',
+  max = 600,
+): Promise<Array<{ code: string; name: string }>> {
+  const t = kind === 'industry' ? 2 : 3;
+  const url = `${PUSH2}/clist/get?pn=1&pz=${max}&po=1&np=1&fltt=2&invt=2&fid=f3&fs=m:90+t:${t}&fields=f12,f14`;
+  const json = await getJson(url, { label: '东财板块清单' });
+  const out: Array<{ code: string; name: string }> = [];
+  for (const r of toRows(json)) {
+    const code = String(r.f12 ?? '').trim();
+    const name = String(r.f14 ?? '').trim();
+    if (/^BK\d{4}$/i.test(code) && name) out.push({ code: code.toUpperCase(), name });
+  }
+  if (out.length === 0) throw new MarketError(`${kind} 板块清单为空`);
+  return out;
+}
+
+/**
+ * 板块成分股 6 位代码（东财 clist，fs=b:BK 板块码）。
+ *
+ * 为什么不继续走 akshare 的 stock_board_*_cons_em：那条路经 aktools 容器直连 push2 主 host，
+ * 而 push2 对本项目出口 IP 做了封禁（TLS 握手完成后即被对端关闭），2026-09-05 实测
+ * 板块成分采集长期整体失败（日志里 `stock_board_concept_cons_em 500` 反复刷屏）。
+ * 走本文件的 getJson 则会在主 host 失败时自动切 push2delay 延迟镜像——
+ * 成分名单本身不是实时数据，用延迟镜像取没有任何损失。
+ */
+export async function getBoardConstituents(boardCode: string, max = 500): Promise<string[]> {
+  const bk = boardCode.trim().toUpperCase();
+  if (!/^BK\d{4}$/.test(bk)) throw new MarketError(`非法板块代码: ${boardCode}`);
+  const url = `${PUSH2}/clist/get?pn=1&pz=${max}&po=1&np=1&fltt=2&invt=2&fid=f3&fs=b:${bk}&fields=f12,f14`;
+  const json = await getJson(url, { label: '东财板块成分' });
+  const codes = new Set<string>();
+  for (const r of toRows(json)) {
+    const c = String(r.f12 ?? '').trim();
+    if (/^\d{6}$/.test(c)) codes.add(c);
+  }
+  if (codes.size === 0) throw new MarketError(`板块 ${bk} 成分为空`);
+  return [...codes];
+}
+
 /** 板块主力资金流（inflow=净流入TOP po=1 / outflow=净流出TOP po=0），f62 主力净流入 */
 export async function getSectorMoneyFlow(
   dir: 'inflow' | 'outflow',
