@@ -296,6 +296,11 @@ def regime_hmm(symbol: str = "880008", n_states: int = 3, window: int = 750) -> 
         import pandas as pd
         if not isinstance(df, pd.DataFrame):
             df = pd.DataFrame(df)
+        # mootdx 的 index() 返回的 DataFrame 索引名也叫 datetime，与同名列重名，
+        # 此时 sort_values("datetime") 会抛「both an index level and a column label」。
+        # 时间信息在列里已有一份，直接把索引丢掉消歧。
+        if df.index.name is not None and df.index.name in df.columns:
+            df = df.reset_index(drop=True)
         tcol = "datetime" if "datetime" in df.columns else ("date" if "date" in df.columns else None)
         if tcol:
             df = df.sort_values(tcol)
