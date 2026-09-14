@@ -8,7 +8,7 @@
 // 这样脚本与接口用的是同一套口径——两处各写一份的话，两边的分数会慢慢对不上，
 // 而「成绩单」这种东西一旦出现两个版本就没人信了。
 import { scoreSignals, DEFAULT_HORIZONS } from '../scorecard/score';
-import { SIGNAL_SOURCES } from '../scorecard/sources';
+import { poolFor, SIGNAL_SOURCES } from '../scorecard/sources';
 
 const HORIZONS = (() => {
   const args = process.argv.slice(2).map(Number).filter((n) => Number.isInteger(n) && n > 0);
@@ -22,9 +22,6 @@ const pad = (s: string, w: number): string => {
   return s + ' '.repeat(Math.max(1, w - width));
 };
 
-// 统一对照池：全部来源涉及的标的并集。不让各来源自己挑对自己有利的池子
-const pool = [...new Set(SIGNAL_SOURCES.flatMap((s) => s.load().map((x) => x.code)))];
-
 console.log('# ETF 盯盘信号成绩单');
 console.log();
 
@@ -35,7 +32,7 @@ for (const src of SIGNAL_SOURCES) {
     signals: src.load(),
     side: src.side,
     horizons: HORIZONS,
-    pool,
+    pool: poolFor(src),
   });
   if (card.count === 0) continue;
 

@@ -11,6 +11,7 @@
 import assert from 'node:assert/strict';
 import { forwardReturnOn, rollForwardDays, type Series } from '../scorecard/series';
 import { MEANINGFUL_EDGE, MIN_JUDGED, signalEdge } from '../scorecard/score';
+import { poolFor, SIGNAL_SOURCES } from '../scorecard/sources';
 
 /** 由收盘价数组造一段序列，日期按 2026-01-01 起逐日递增（仅用于断言，不必是真交易日） */
 function makeSeries(closes: number[], dates?: string[]): Series {
@@ -101,6 +102,41 @@ assert.equal(
   '价值幅度低于门槛不得判为领先',
 );
 
+// ===== 5. 对照池的归属 =====
+//
+// 池子既不能是「该来源自己触发过的标的」——那等于拿信号偏爱的标的做基准，会低估它的优势；
+// 也不能跨模块合并——把波段覆盖的几百只个股混进 ETF 的基准，拿 ETF 跟个股比涨跌
+// 说明不了任何事。必须是模块级：同 poolKey 的来源共享池，它就是这套规则实际工作的范围。
+{
+  const keys = [...new Set(SIGNAL_SOURCES.map((s) => s.poolKey))];
+  assert.ok(keys.length >= 2, '至少要有两个不同模块，否则这条约束测不出来');
+  for (const s of SIGNAL_SOURCES) {
+    assert.ok(s.poolKey.trim().length > 0, `来源 ${s.id} 缺 poolKey`);
+    assert.ok(s.origin.trim().length >= 8, `来源 ${s.id} 的产生方式说明太短`);
+  }
+  // 同模块的买卖两侧必须拿到同一个池；不同模块必须拿到不同的池
+  const byKey = new Map<string, string[]>();
+  for (const s of SIGNAL_SOURCES) {
+    byKey.set(s.poolKey, poolFor(s).sort());
+  }
+  for (const s of SIGNAL_SOURCES) {
+    assert.deepEqual(
+      poolFor(s).sort(),
+      byKey.get(s.poolKey),
+      `同 poolKey 的来源必须共享同一个对照池（${s.id}）`,
+    );
+  }
+  const [a, b] = keys;
+  const pa = new Set(byKey.get(a) ?? []);
+  const pb = byKey.get(b) ?? [];
+  // 允许有重叠（同一只 ETF 可能两个模块都覆盖），但不能完全相同——那说明池子被合并了
+  assert.ok(
+    pb.some((c) => !pa.has(c)) || (byKey.get(a) ?? []).length !== pb.length,
+    '不同模块的对照池不得完全相同，否则等于跨模块合并',
+  );
+}
+
 console.log(
-  '✅ 判分口径自检通过：前向收益边界 / 顺延上限 / 看跌价值取反 / 样本不足不给结论 / 只赢一个不算',
+  '✅ 判分口径自检通过：前向收益边界 / 顺延上限 / 看跌价值取反 / ' +
+    '样本不足不给结论 / 只赢一个不算 / 对照池按模块归拢',
 );

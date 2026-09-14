@@ -1,7 +1,7 @@
 import type { FastifyInstance } from 'fastify';
 import type { Scorecard } from '@stock-agent/shared';
 import { scoreSignals } from './score';
-import { findSource, SIGNAL_SOURCES } from './sources';
+import { findSource, poolFor, SIGNAL_SOURCES } from './sources';
 
 // 判卷机的对外接口。
 //
@@ -9,14 +9,14 @@ import { findSource, SIGNAL_SOURCES } from './sources';
 // 想看就算一遍。判分依赖的是已经落库的信号与本地日线，
 // 同样的输入永远得出同样的分数，这是它能当证据用的前提。
 
-/** 统一的对照池：全部来源涉及的标的并集。由判分方定池，不让各来源自己挑对自己有利的池子 */
-function commonPool(): string[] {
-  const codes = new Set<string>();
-  for (const s of SIGNAL_SOURCES) {
-    for (const sig of s.load()) codes.add(sig.code);
-  }
-  return [...codes];
-}
+// 对照池不跨来源合并。
+//
+// 曾经用「全部来源涉及标的的并集」做统一池，想的是别让各来源自己挑对自己有利的池子。
+// 但那样 ETF 盯盘的「同日全池」对照会混进波段扫描覆盖的几百只个股，
+// 池子从 56 只涨到 168 只，基准就不是同类了——拿 ETF 跟个股比涨跌说明不了任何事。
+//
+// 正确的做法是池子由该来源自己的信号机械推导（scoreSignals 在 pool 为空时的默认行为）：
+// 既是同类可比的范围，又不存在人为挑选的空间。
 
 export function registerScorecardModule(app: FastifyInstance): void {
   // 名册：有哪些来源可以被判分，各自的产生方式
@@ -33,7 +33,6 @@ export function registerScorecardModule(app: FastifyInstance): void {
   // 全部来源的成绩单。一次算完，便于横向比较——分开取容易只看自己想看的那个
   app.get<{ Querystring: { horizons?: string } }>('/api/scorecard', (req) => {
     const horizons = parseHorizons(req.query.horizons);
-    const pool = commonPool();
     const data: Scorecard[] = SIGNAL_SOURCES.map((s) =>
       scoreSignals({
         source: s.id,
@@ -41,7 +40,7 @@ export function registerScorecardModule(app: FastifyInstance): void {
         signals: s.load(),
         side: s.side,
         horizons,
-        pool,
+        pool: poolFor(s),
       }),
     );
     return { ok: true, data };
@@ -61,7 +60,7 @@ export function registerScorecardModule(app: FastifyInstance): void {
           signals: src.load(),
           side: src.side,
           horizons: parseHorizons(req.query.horizons),
-          pool: commonPool(),
+          pool: poolFor(src),
         }),
       };
     },
