@@ -6,6 +6,7 @@ import StockLink from '@/components/StockLink.vue';
 import type {
   AssertionAccuracy,
   AssertionAccuracyReport,
+  AssertionScorecard,
   AssertionSliceDim,
   PlanOutcomeStat,
   SymbolAssertion,
@@ -18,6 +19,15 @@ import type {
 
 const report = ref<AssertionAccuracyReport | null>(null);
 const outcomeStats = ref<PlanOutcomeStat[]>([]);
+/**
+ * 各方法相对「同样远近的随机价位」的增益。
+ *
+ * 它必须排在绝对遵循率之前：**只看遵循率会骗人**——价格总会在某处反应，
+ * 所以任何画在图上的线都能拿到接近五成的遵循率。
+ * 真正的问题是「比随便画一条线好多少」，而这个答案早就算出来了，
+ * 此前只存在于数据库和代码注释里，页面上一个字都看不到。
+ */
+const scorecard = ref<AssertionScorecard | null>(null);
 const loading = ref(false);
 const days = ref(180);
 
@@ -37,12 +47,14 @@ const DIMS: Array<{ key: AssertionSliceDim; label: string }> = [
 async function load(): Promise<void> {
   loading.value = true;
   try {
-    const [r, o] = await Promise.all([
+    const [r, o, s] = await Promise.all([
       api.assertions.report(days.value),
       api.planOutcomes.stats().catch(() => [] as PlanOutcomeStat[]),
+      api.assertions.scorecard().catch(() => null),
     ]);
     report.value = r;
     outcomeStats.value = o;
+    scorecard.value = s;
   } catch (e) {
     ElMessage.error(e instanceof Error ? e.message : String(e));
   } finally {
@@ -130,6 +142,13 @@ const kindOf = (key: 'level' | 'time'): AssertionAccuracy =>
 const levelAcc = computed(() => kindOf('level'));
 const timeAcc = computed(() => kindOf('time'));
 
+/** 增益（百分点）带正负号，零点几也如实显示，不四舍五入成 0 */
+const fmtPoints = (v: number): string => `${v >= 0 ? '+' : ''}${v.toFixed(1)} 个百分点`;
+
+/** 达到 0.5 个百分点才着色，避免把噪声画成结论 */
+const edgeClass = (v: number | null): string =>
+  v == null ? '' : v >= 0.5 ? 'edge-up' : v <= -0.5 ? 'edge-down' : '';
+
 onMounted(load);
 </script>
 
@@ -154,6 +173,36 @@ onMounted(load);
         <el-button size="small" type="primary" plain @click="runSettle">立即核对</el-button>
       </div>
     </div>
+
+    <!-- 排在绝对遵循率之前：只看遵循率会骗人，见 scorecard 的注释 -->
+    <el-card v-if="scorecard && scorecard.rows.length" class="vs-random" shadow="never">
+      <template #header>
+        <div class="vs-head">
+          <span class="vs-title">比随便画一条线，好多少</span>
+          <el-tag size="small" effect="plain" type="info">算于 {{ scorecard.computedAt }}</el-tag>
+          <el-tag
+            size="small"
+            effect="plain"
+            :type="scorecard.weightsEnabled ? 'warning' : 'success'"
+          >
+            {{ scorecard.weightsEnabled ? '正在影响价位排序' : '只记录，不影响价位排序' }}
+          </el-tag>
+        </div>
+      </template>
+      <el-table :data="scorecard.rows" size="small">
+        <el-table-column prop="label" label="方法" width="130" />
+        <el-table-column label="比随机好多少" width="130">
+          <template #default="{ row }">
+            <span :class="edgeClass(row.edgeLowerPoints)">
+              {{ row.edgeLowerPoints == null ? '—' : fmtPoints(row.edgeLowerPoints) }}
+            </span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="samples" label="样本" width="80" />
+        <el-table-column prop="verdict" label="结论" min-width="280" />
+      </el-table>
+      <p class="vs-note">{{ scorecard.note }}</p>
+    </el-card>
 
     <el-empty
       v-if="!loading && !hasData"
@@ -309,6 +358,31 @@ onMounted(load);
 </template>
 
 <style scoped>
+.vs-random {
+  margin-bottom: 12px;
+}
+.vs-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.vs-title {
+  font-weight: 600;
+}
+.vs-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--el-text-color-secondary);
+}
+.edge-up {
+  color: var(--el-color-success);
+  font-weight: 600;
+}
+.edge-down {
+  color: var(--el-color-danger);
+  font-weight: 600;
+}
 .page {
   padding: 16px 18px 28px;
 }

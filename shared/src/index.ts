@@ -5311,6 +5311,45 @@ export interface Scorecard {
   verdict: string;
 }
 
+/**
+ * 技术判断的成绩（道氏、波浪、黄金分割、均线、枢轴、缠论中枢）。
+ *
+ * 与信号级判分是两套判定形态：这里是点位判断 + 安慰剂对照——为每条真实价位造一条
+ * 同样远近的随机价位，比较两者被触及后是否按判断掉头。结论口径与信号级保持一致。
+ */
+export interface AssertionScoreRow {
+  /** 依据来源标识 */
+  source: string;
+  /** 人读名 */
+  label: string;
+  /** 这条成绩算于哪一天 */
+  asOf: string;
+  /** 相对随机价位的增益（百分点），点估计 */
+  edgePoints: number | null;
+  /** 95% 保守下界（百分点）。结论以它为准，不看点估计 */
+  edgeLowerPoints: number | null;
+  /** 参与统计的判断条数 */
+  samples: number | null;
+  /** 独立日期分块数 */
+  blocks: number | null;
+  /** 一句人话结论 */
+  verdict: string;
+}
+
+export interface AssertionScorecard {
+  rows: AssertionScoreRow[];
+  /** 最近一次算出成绩的日期；从未算过为 null */
+  computedAt: string | null;
+  /**
+   * 这些成绩是否真的在影响候选价位的排序。
+   * false 即影子模式：照算照留痕，但不改变任何排序——
+   * 首轮对照没有一套方法显示出优势，此时打开权重等于拿还没被证明的优势去改排序。
+   */
+  weightsEnabled: boolean;
+  /** 判定方式说明 */
+  note: string;
+}
+
 /** 全局安全控制状态（交易/模拟总闸） */
 export interface SafetyState {
   /** 总急停：开启后拒绝一切交易/模拟动作 */

@@ -3,6 +3,7 @@ import type { AssertionSource } from '@stock-agent/shared';
 import { defineModuleSchedules } from '../scheduling/defineModuleSchedules';
 import { shanghaiToday } from '../util';
 import { buildCalendar } from './calendar';
+import { getAssertionScorecard } from './scorecard';
 import {
   accuracyBySource,
   buildReport,
@@ -60,6 +61,14 @@ export function registerAssertionsModule(app: FastifyInstance): void {
       }
     },
   );
+
+  /**
+   * 各技术依据的明码标价：相对同样远近随机价位的增益 + 一句人话结论。
+   *
+   * 与 by-source 的区别：那份是绝对遵循率，这份是相对随机的增益。
+   * 只看遵循率会骗人——价格总会在某处反应，任何画在图上的线都能拿到接近五成。
+   */
+  app.get('/api/assertions/scorecard', () => ({ ok: true, data: getAssertionScorecard() }));
 
   /** 某标的各来源的遵循率，供详情页把统计挂到价位旁边 */
   app.get<{ Querystring: { code?: string } }>('/api/assertions/by-source', async (req, reply) => {

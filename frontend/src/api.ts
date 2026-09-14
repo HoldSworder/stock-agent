@@ -76,6 +76,7 @@ import type {
   ElliottAnalysis,
   AssertionAccuracy,
   AssertionAccuracyReport,
+  AssertionScorecard,
   SymbolAssertion,
   TurningCalendar,
   PlanOutcomeStat,
@@ -827,6 +828,9 @@ export const api = {
       ),
     bySource: (code?: string) =>
       unwrap<AssertionAccuracy[]>(http.get('/assertions/by-source', { params: { code } })),
+    // 明码标价：各技术依据相对「同样远近的随机价位」的增益。
+    // 与 bySource 的区别是那份为绝对遵循率，只看它会骗人——价格总会在某处反应
+    scorecard: () => unwrap<AssertionScorecard>(http.get('/assertions/scorecard')),
     // 转折日历：未来若干天内各标的的波浪时间位。asOf 可回放历史交易日
     calendar: (params: { days?: number; asOf?: string } = {}) =>
       unwrap<TurningCalendar>(http.get('/assertions/calendar', { params, timeout: 30000 })),
