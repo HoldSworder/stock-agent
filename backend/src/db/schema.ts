@@ -1539,6 +1539,69 @@ export const positionAttributions = sqliteTable(
   }),
 );
 
+/**
+ * 真实账户的清仓台账。
+ *
+ * 券商接口在持仓数量归零时会返回该行并带上已实现盈亏（这个数不能本地重算），
+ * 原先只进内存给前端看一眼，同步一次就丢——于是每完成一笔交易，系统都看见了结果
+ * 然后忘掉，过去所有交易的成绩在库里已经不存在。这张表让它从今天起留下来。
+ */
+export const realPositionCloses = sqliteTable(
+  'real_position_closes',
+  {
+    id: text('id').primaryKey(),
+    account: text('account').notNull().default('real'),
+    /** 清仓日 YYYY-MM-DD（Asia/Shanghai），取券商数据日期而非本机时间 */
+    closeDate: text('close_date').notNull(),
+    code: text('code').notNull(),
+    name: text('name').notNull(),
+    avgCost: real('avg_cost').notNull().default(0),
+    closePrice: real('close_price').notNull().default(0),
+    /** 已实现盈亏（元），券商原值，禁止本地重算 */
+    realizedPnl: real('realized_pnl').notNull().default(0),
+    /** 已实现收益率（小数），券商原值 */
+    realizedRate: real('realized_rate').notNull().default(0),
+    holdDays: integer('hold_days').notNull().default(0),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({
+    byKey: uniqueIndex('idx_real_position_closes_key').on(t.account, t.closeDate, t.code),
+    byDate: index('idx_real_position_closes_date').on(t.closeDate),
+  }),
+);
+
+/**
+ * 真实账户的按日持仓快照。
+ *
+ * `positions` 表对 real 账户是先删后写、只留最新镜像，没有任何历史，
+ * 于是无法回答「某一笔从买到卖赚了多少」。这张表按日留痕，
+ * 相邻两日差分可反推出成交（数量 1000 → 0 即卖出）。
+ *
+ * 天花板：同日先买后卖、分红送股、部分减仓改成本、T+0 回转这几种情形下差分会失真。
+ * 它是够用的账，不是精确的账；要精确只能去接券商的成交流水接口。
+ */
+export const realPositionSnapshots = sqliteTable(
+  'real_position_snapshots',
+  {
+    id: text('id').primaryKey(),
+    account: text('account').notNull().default('real'),
+    /** 快照日 YYYY-MM-DD（Asia/Shanghai），取券商数据日期 */
+    tradeDate: text('trade_date').notNull(),
+    code: text('code').notNull(),
+    name: text('name').notNull(),
+    qty: real('qty').notNull().default(0),
+    avgCost: real('avg_cost').notNull().default(0),
+    price: real('price').notNull().default(0),
+    marketValue: real('market_value').notNull().default(0),
+    /** 累计持有盈亏（元），券商原值 */
+    holdProfit: real('hold_profit').notNull().default(0),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({
+    byKey: uniqueIndex('idx_real_position_snapshots_key').on(t.account, t.tradeDate, t.code),
+    byDate: index('idx_real_position_snapshots_date').on(t.tradeDate),
+  }),
+);
 
 /** 回测运行记录（单标的信号级 / 组合级）：曲线与流水以 JSON 列内联存储 */
 export const backtestRuns = sqliteTable(

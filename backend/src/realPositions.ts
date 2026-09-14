@@ -286,7 +286,94 @@ function normalizeFund(h: RawFund, totalAsset: number): FundPosition {
   };
 }
 
+/**
+ * 留痕：清仓台账 + 按日持仓快照。
+ *
+ * 与下面的 persist 分开，因为两者的语义相反——positions 表是「现在拿着什么」的镜像，
+ * 会被下一次同步整表覆盖；这两张是「当时拿着什么、卖出后赚了多少」的历史，只增不改。
+ * 没有历史就永远回答不了「某一笔从买到卖赚了多少」，而历史是追不回来的，
+ * 所以每次同步成功都要写。
+ *
+ * 按（账户, 日期, 标的）幂等 upsert：同一天同步多次不会写重，
+ * 盘中多次同步时后一次的数量与价格覆盖前一次，收盘后那一次即当日定稿。
+ *
+ * 导出仅供 positionLedger.livecheck.ts 用合成组合核对写入链路——
+ * 券商 Cookie 失效时无法靠真实同步验证，而这条链路一旦写错，
+ * 攒出来的账会静默失真，比不攒更糟。业务代码不要直接调它，走 fetchRealPositions。
+ */
+export function persistHistory(portfolio: RealPortfolio): void {
+  const now = nowIso();
+  // 日期取券商给的数据日期，不用本机时间：本机时区错了或跨零点同步会把快照记到错的一天
+  const date = portfolio.sourceDate;
+  if (!date) return;
 
+  for (const c of portfolio.closedToday) {
+    db.insert(schema.realPositionCloses)
+      .values({
+        id: newId(),
+        account: 'real',
+        closeDate: date,
+        code: c.code,
+        name: c.name,
+        avgCost: c.avgCost,
+        closePrice: c.price,
+        realizedPnl: c.holdProfit,
+        realizedRate: c.holdRate,
+        holdDays: Math.round(c.holdDays),
+        createdAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [
+          schema.realPositionCloses.account,
+          schema.realPositionCloses.closeDate,
+          schema.realPositionCloses.code,
+        ],
+        set: {
+          closePrice: c.price,
+          realizedPnl: c.holdProfit,
+          realizedRate: c.holdRate,
+          holdDays: Math.round(c.holdDays),
+        },
+      })
+      .run();
+  }
+
+  // 快照只记股票持仓。场外基金的份额与净值不参与「某一笔赚了多少」的反推，
+  // 混进来会让差分把净值波动当成申赎。
+  for (const p of portfolio.positions) {
+    db.insert(schema.realPositionSnapshots)
+      .values({
+        id: newId(),
+        account: 'real',
+        tradeDate: date,
+        code: p.code,
+        name: p.name,
+        qty: p.qty,
+        avgCost: p.avgCost,
+        price: p.price,
+        marketValue: p.marketValue,
+        holdProfit: p.holdProfit,
+        createdAt: now,
+      })
+      .onConflictDoUpdate({
+        target: [
+          schema.realPositionSnapshots.account,
+          schema.realPositionSnapshots.tradeDate,
+          schema.realPositionSnapshots.code,
+        ],
+        set: {
+          qty: p.qty,
+          avgCost: p.avgCost,
+          price: p.price,
+          marketValue: p.marketValue,
+          holdProfit: p.holdProfit,
+        },
+      })
+      .run();
+  }
+}
+
+/** 把真实持仓镜像写入 positions 表（先清旧 real 行，再写当前快照） */
 function persist(portfolio: RealPortfolio): void {
   db.delete(schema.positions).where(eq(schema.positions.account, 'real')).run();
   const rows = [
@@ -364,6 +451,13 @@ export async function fetchRealPositions(persistSnapshot = true): Promise<RealPo
   const portfolio = await loadCachedPortfolio();
   if (persistSnapshot && portfolio.asOf !== lastPersistedAsOf) {
     persist(portfolio);
+    // 留痕与镜像一起写。留痕失败不能连带让镜像与缓存失效——镜像是盯盘等模块的当前数据源，
+    // 为了记历史而让当前数据不可用，方向反了。
+    try {
+      persistHistory(portfolio);
+    } catch (e) {
+      console.error('[realPositions] 清仓台账/持仓快照留痕失败:', e instanceof Error ? e.message : e);
+    }
     lastPersistedAsOf = portfolio.asOf;
   }
   return portfolio;

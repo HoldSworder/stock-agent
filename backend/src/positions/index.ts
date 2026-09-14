@@ -22,6 +22,7 @@ import {
   recordDisciplineEvents,
 } from './discipline';
 import { getAttribution, runAttribution } from './attribution';
+import { listCloses, listTradeGuesses, summarizeCloses } from './ledgerRepo';
 
 // 真实持仓纪律模块：确定性体检（只读不下单）+ 逐票纪律覆盖 + 事件流 + 收盘前定时体检推送
 // + 日终持仓归因 + 真实 vs 模拟战法绩效对照（均只读，绝不对真实账户下单）。
@@ -131,7 +132,27 @@ export function registerPositionsModule(app: FastifyInstance): void {
     return { ok: true, data: { enabled: isPushMediumEnabled() } };
   });
 
+  // 真实成交台账（只读）。
+  //
+  // 分三个端点而不是一个，因为三者的可信度完全不同，混在一起会让最弱的那份
+  // 冒充最强的那份：
+  //   closes  券商给的已实现盈亏，最可信，是目前唯一能说「真实赚了多少」的数字
+  //   summary 上面那批的汇总，必须带起始日期——它只覆盖开始记录之后的交易
+  //   trades  快照差分反推，四种情形下给不出唯一答案，如实标「说不清」
+  app.get<{ Querystring: { since?: string } }>('/api/positions/ledger/closes', (req) => ({
+    ok: true,
+    data: listCloses(req.query.since),
+  }));
+  app.get<{ Querystring: { since?: string } }>('/api/positions/ledger/summary', (req) => ({
+    ok: true,
+    data: summarizeCloses(req.query.since),
+  }));
+  app.get<{ Querystring: { since?: string } }>('/api/positions/ledger/trades', (req) => ({
+    ok: true,
+    data: listTradeGuesses(req.query.since),
+  }));
 
+  // 日终持仓归因：取某日已落库归因；无 date 取最近一日
   app.get<{ Querystring: { date?: string } }>('/api/positions/attribution', (req, reply) => {
     try {
       return { ok: true, data: getAttribution(req.query.date) };

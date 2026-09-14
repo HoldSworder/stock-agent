@@ -758,6 +758,52 @@ CREATE TABLE IF NOT EXISTS position_attributions (
 CREATE INDEX IF NOT EXISTS idx_position_attributions_date ON position_attributions(date);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_position_attributions_key ON position_attributions(account, date, code);
 
+-- 真实账户的清仓台账。券商接口在持仓数量归零时会返回该行并带上已实现盈亏（这个数不能本地重算），
+-- 原先只进内存给前端看一眼，同步一次就丢。于是每完成一笔交易，系统都看见了结果然后忘掉，
+-- 过去所有交易的成绩在库里已经不存在。这张表让它从今天起留下来。
+CREATE TABLE IF NOT EXISTS real_position_closes (
+  id TEXT PRIMARY KEY,
+  account TEXT NOT NULL DEFAULT 'real',
+  -- 清仓日 YYYY-MM-DD（Asia/Shanghai），取自券商数据日期而非本机时间
+  close_date TEXT NOT NULL,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  -- 持仓成本价与清仓时的价格，均取自券商原值
+  avg_cost REAL NOT NULL DEFAULT 0,
+  close_price REAL NOT NULL DEFAULT 0,
+  -- 已实现盈亏（元）与收益率（小数），券商直接给出，禁止本地重算
+  realized_pnl REAL NOT NULL DEFAULT 0,
+  realized_rate REAL NOT NULL DEFAULT 0,
+  -- 持有天数，券商给出
+  hold_days INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_real_position_closes_key ON real_position_closes(account, close_date, code);
+CREATE INDEX IF NOT EXISTS idx_real_position_closes_date ON real_position_closes(close_date);
+
+-- 真实账户的按日持仓快照。positions 表对 real 账户是先删后写、只留最新镜像，
+-- 没有任何历史，于是无法回答「某一笔从买到卖赚了多少」。
+-- 这张表按日留痕，相邻两日的差分可反推出成交（数量 1000 → 0 即卖出）。
+-- 天花板要记住：同日先买后卖、分红送股、部分减仓改成本、T+0 回转这几种情形下差分会失真，
+-- 它是够用的账，不是精确的账。要精确只能去接券商的成交流水接口。
+CREATE TABLE IF NOT EXISTS real_position_snapshots (
+  id TEXT PRIMARY KEY,
+  account TEXT NOT NULL DEFAULT 'real',
+  -- 快照日 YYYY-MM-DD（Asia/Shanghai），取自券商数据日期
+  trade_date TEXT NOT NULL,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  qty REAL NOT NULL DEFAULT 0,
+  avg_cost REAL NOT NULL DEFAULT 0,
+  price REAL NOT NULL DEFAULT 0,
+  market_value REAL NOT NULL DEFAULT 0,
+  -- 累计持有盈亏（元），券商原值
+  hold_profit REAL NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_real_position_snapshots_key ON real_position_snapshots(account, trade_date, code);
+CREATE INDEX IF NOT EXISTS idx_real_position_snapshots_date ON real_position_snapshots(trade_date);
+
 CREATE TABLE IF NOT EXISTS backtest_runs (
   id TEXT PRIMARY KEY,
   scope TEXT NOT NULL DEFAULT 'signal',
