@@ -14,6 +14,7 @@ import type {
   PlanTrigger,
   PlanTriggerHitPayload,
   PlanTriggerKind,
+  RealPortfolio,
   RunTrigger,
 } from '@stock-agent/shared';
 import { isIndividualStock } from '../decision/sellcheck';
@@ -23,6 +24,13 @@ import * as gateway from '../agent/gateway';
 import { getPrompt, PROMPT_KEYS, registerPromptDef } from '../agent/promptConfig';
 import { signals as etfSignals } from '../etf/service';
 import { fetchRealPositions } from '../realPositions';
+// 已持仓的有效止损复用纪律模块那条锚定成本的规则，不自己再算一套
+import {
+  getDisciplineConfig,
+  isEtfPosition,
+  listOverrides,
+  resolveRule,
+} from '../positions/discipline';
 import { buildRotationOverview, formatForAgent } from '../rotation/service';
 import { nowIso, shanghaiToday } from '../util';
 import * as repo from './repo';
@@ -562,6 +570,28 @@ function etfActionToDirection(action: EtfAction | undefined): DailyPlanItem['dir
  * 经 repo.addItemsIfAbsent 追加（不覆盖 AI 已给标的）。在 ETF 研判增强之前调用，使注入项也能拿到研判。
  * best-effort：失败不抛、不拖垮计划生成。返回注入的 code 列表。
  */
+/**
+ * 已持仓标的的有效止损价：按 discipline 的规则从成本反推，锚定成本、不随现价漂移。
+ *
+ * 为什么单独抽出来：这条止损的语义是「这笔头寸亏到多少就该走」，
+ * 与「新进场时破哪个位算破位」是两件事。后者随现价走是对的，前者随现价走就是
+ * 把亏损一路放宽——价格跌得越多，它算出来的止损越低，于是永远「还没破」。
+ */
+function heldStopLossOf(p: RealPortfolio['positions'][number]): PlanTrigger | null {
+  if (!(p.avgCost > 0)) return null;
+  const assetType = isEtfPosition(p.code, p.name) ? 'etf' : 'stock';
+  const rule = resolveRule(p, assetType, getDisciplineConfig(), new Map(
+    listOverrides().map((o) => [o.code, o]),
+  ));
+  const pct = rule.stopLossPct;
+  if (!(pct > 0)) return null;
+  return {
+    type: 'price',
+    value: Math.round(p.avgCost * (1 - pct / 100) * 1000) / 1000,
+    note: `按成本 ${p.avgCost} 的 ${pct}% 止损线，不随现价下移`,
+  };
+}
+
 export async function ensureHeldEtfCoverage(runId: string | null): Promise<string[]> {
   const plan = getTodayPlan();
   if (!plan) return [];
@@ -606,7 +636,15 @@ export async function ensureHeldEtfCoverage(runId: string | null): Promise<strin
       thesis,
       buyTrigger: sig?.buyTrigger ?? null,
       sellTrigger: sig?.sellTrigger ?? null,
-      stopLoss: sig?.stopLoss ?? null,
+      // 已持仓的止损必须锚定成本，**不能用跟踪池信号里的那个**。
+      //
+      // 那个值的标签是「新进场的破位止损参考价」，公式是 min(下一档买价×0.96, 现价×0.95)——
+      // 对新建仓是合理的，但它**随现价下移**：成本 10 元、现价跌到 8 元时它给 7.53，
+      // 于是持仓已亏 20% 而「还没破止损」。把它挂到已持仓标的上，
+      // 就会出现同一只 ETF 在计划页说「没破」、持仓页按成本 -12% 说「早该卖」。
+      //
+      // discipline.ts 里那条锚定成本的规则才是这笔头寸的有效止损，这里复用它。
+      stopLoss: heldStopLossOf(p),
       takeProfit: sig?.takeProfit ?? null,
       positionHint: `当前 ${pctOf(p.positionRate, 0)}`,
       source: 'position',
