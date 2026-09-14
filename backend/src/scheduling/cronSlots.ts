@@ -47,7 +47,10 @@ export function previousScheduledSlot(
   return null; // 槽位打满：last 只是当日靠前的某一槽，给出去会误导，直接判为不可判
 }
 
-/** 往回翻的天数上限。超过两周没跑的任务，具体落后几天已经不重要，都是「早就停了」 */
+/**
+ * 往回翻的天数上限（含第 0 天，实际覆盖 15 个自然日）。
+ * 超过两周没跑的任务，具体落后几天已经不重要，都是「早就停了」。
+ */
 const MAX_LOOKBACK_DAYS = 14;
 
 /**
@@ -58,6 +61,10 @@ const MAX_LOOKBACK_DAYS = 14;
  * 像每周一次或工作日任务在周末这种情形，今天根本没有槽位，只看今天会误判成一切正常。
  *
  * skip 回调用于跳过不该触发的日子（法定节假日）。返回 true 表示该时刻不算数，继续往前找。
+ *
+ * 日界与 previousScheduledSlot 一样固定按上海划。本项目只有 A 股一个市场、
+ * 所有模块定时都跑在 Asia/Shanghai，这里收 tz 只为传给 croner 解析表达式；
+ * 真要支持别的时区，得连 previousScheduledSlot 的日界一起改，不是加个参数的事。
  */
 export function lastExpectedSlot(
   cronExpr: string,

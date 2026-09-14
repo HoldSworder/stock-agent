@@ -78,6 +78,7 @@ assert.equal(lastExpectedSlot('这不是 cron', TZ, sh('2026-09-11T16:00:00')), 
 // 用与其完全一致的三行逻辑复刻，避免为测试去启动整个 fastify 与 DB。
 type Status = 'ok' | 'overdue' | 'disabled' | 'idle';
 const GRACE_MS = 10 * 60 * 1000;
+const LOW_FREQ_STALE_MS = 15 * 86400_000;
 const decide = (
   enabled: boolean,
   expected: Date | null,
@@ -85,7 +86,12 @@ const decide = (
   now: Date = sh('2026-09-11T16:00:00'),
 ): Status => {
   if (!enabled) return 'disabled';
-  if (!expected) return 'idle';
+  if (!expected) {
+    const staleMs = lastSuccess
+      ? now.getTime() - new Date(lastSuccess).getTime()
+      : Number.POSITIVE_INFINITY;
+    return staleMs > LOW_FREQ_STALE_MS ? 'overdue' : 'idle';
+  }
   if (lastSuccess && new Date(lastSuccess).getTime() >= expected.getTime()) return 'ok';
   if (now.getTime() - expected.getTime() < GRACE_MS) return 'idle';
   return 'overdue';
@@ -108,8 +114,20 @@ assert.equal(
 // 9. 正常：应触发时刻之后有成功记录
 assert.equal(decide(true, expected, '2026-09-11T06:40:00Z'), 'ok');
 
-// 10. 还没到点：算不出应触发时刻时不下故障结论
-assert.equal(decide(true, null, null), 'idle', '算不出应触发时刻时不得判为故障');
+// 10. 算不出应触发时刻（月度/季度这类低频任务，或槽位打满的秒级表达式）：
+//     不能一律放过。一个季度任务停掉，界面永远显示「还没到点」，半年后才被发现，
+//     那正是这块要防的静默失效。改看上次成功距今有多久。
+assert.equal(
+  decide(true, null, '2026-09-05T00:00:00Z'),
+  'idle',
+  '低频任务上次成功在判废线内，算正常',
+);
+assert.equal(
+  decide(true, null, '2026-07-01T00:00:00Z'),
+  'overdue',
+  '低频任务超过判废线仍没成功，必须报警',
+);
+assert.equal(decide(true, null, null), 'overdue', '从未成功过的低频任务同样要报警');
 
 // 11. 宽限期内不报警。任务本身要跑一会儿、服务重启会错过一两拍、互斥锁会让本次跳过，
 //     刚过点就标红会让每十分钟一次的任务频繁误报——红得太容易，人就不看了
@@ -124,6 +142,21 @@ assert.equal(
   '过点 15 分钟超出宽限期，必须报警',
 );
 
+// 12. 落后天数按上海日历日之差算，不用毫秒除法。
+//     过点 12~24 小时时槽位其实是昨天的，四舍五入会把它显示成「今天没跑」
+const calDays = (from: Date, to: Date): number => {
+  const d = (x: Date): number =>
+    Date.parse(`${new Intl.DateTimeFormat('en-CA', { timeZone: TZ }).format(x)}T00:00:00Z`);
+  return Math.max(0, Math.round((d(to) - d(from)) / 86400_000));
+};
+assert.equal(
+  calDays(sh('2026-09-10T14:40:00'), sh('2026-09-11T09:00:00')),
+  1,
+  '过点 18 小时但已跨日，应算落后 1 天而不是 0 天',
+);
+assert.equal(calDays(sh('2026-09-11T14:40:00'), sh('2026-09-11T23:00:00')), 0, '同一天算 0 天');
+assert.equal(calDays(sh('2026-09-07T14:40:00'), sh('2026-09-11T12:00:00')), 4);
+
 console.log(
-  '✅ 任务健康自检通过：跨天回溯 / 周末回退 / 节假日跳过 / 宽限期 / 关闭与故障分开',
+  '✅ 任务健康自检通过：跨天回溯 / 周末回退 / 节假日跳过 / 宽限期 / 低频任务判废 / 落后天数按日历日',
 );

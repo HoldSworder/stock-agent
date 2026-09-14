@@ -1,5 +1,6 @@
 import { Cron } from 'croner';
 import { shouldSkipForHoliday, shanghaiDateStr, shanghaiTimeStr } from '../market/calendar';
+// shanghaiDateStr 同时供 catchUpModuleMissedRuns 与健康判定的日历日差使用
 import { getMeta, setMeta } from '../settings';
 import { sendTelegram } from '../notify/telegram';
 import { nowIso } from '../util';
@@ -92,9 +93,15 @@ async function execJob(def: ModuleJob, trigger: 'cron' | 'manual'): Promise<void
     setMeta(lastErrorKey(def.id), ''); // 成功即清错，避免旧故障一直挂在界面上
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    // 截断：个别失败会把整段响应体塞进 message，原样落库会撑大 settings 表
-    setMeta(lastErrorKey(def.id), JSON.stringify({ at: nowIso(), message: msg.slice(0, 300) }));
     console.error(`[modsched] ${def.label} 执行失败:`, msg);
+    // 记错本身再抛就糟了：这个函数承诺不抛出（否则 cron 回调的 void execJob 会变成
+    // 未处理拒绝，Node 默认直接退进程），而且会盖掉真正的失败原因与下面的告警。
+    // 截断是因为个别失败会把整段响应体塞进 message，原样落库会撑大 settings 表。
+    try {
+      setMeta(lastErrorKey(def.id), JSON.stringify({ at: nowIso(), message: msg.slice(0, 300) }));
+    } catch {
+      /* 记错失败不影响告警，忽略 */
+    }
     // 仅 cron 触发失败时告警；手动触发用户已在 UI 看到错误
     if (trigger === 'cron') {
       await sendTelegram(`⚠️【${def.label}】定时执行失败\n${msg}`).catch(() => {});
@@ -184,23 +191,52 @@ export interface ModuleJobHealth {
  */
 const OVERDUE_GRACE_MS = 10 * 60 * 1000;
 
+/**
+ * 低频任务（月度、季度）的判废线：回溯窗口内算不出应触发时刻时，
+ * 上次成功距今超过这么久就算它该跑没跑，而不是一直显示「还没到点」。
+ * 取值与 cronSlots 的回溯上限同量级。
+ */
+const LOW_FREQ_STALE_MS = 15 * 86400_000;
+
+/** 两个时刻相差几个上海日历日。不用毫秒除法，避免过点半天以上被舍成「今天」 */
+function calendarDaysBetween(from: Date, to: Date): number {
+  const d = (x: Date): number => Date.parse(`${shanghaiDateStr(x)}T00:00:00Z`);
+  return Math.max(0, Math.round((d(to) - d(from)) / 86400_000));
+}
+
 export function jobHealth(def: ModuleJob, now: Date = new Date()): ModuleJobHealth {
   if (!def.enabled) return { status: 'disabled', expectedAt: null, staleDays: 0 };
 
   const expected = lastExpectedSlot(def.cronExpr, def.tz, now, (at) =>
     def.skipHoliday ? shouldSkipForHoliday(at) : false,
   );
-  // 算不出应触发时刻：表达式太密（秒级）或两周内确实没有槽位，一律不判，避免给出错误结论
-  if (!expected) return { status: 'idle', expectedAt: null, staleDays: 0 };
+  const last = getLastSuccessAt(def.id);
+
+  // 回溯窗口内算不出应触发时刻：可能是表达式太密（秒级，槽位打满判为不可判），
+  // 也可能是月度/季度这种低频任务。后者不能一律放过——那正是这块要防的静默失效：
+  // 一个季度任务停掉，界面上永远显示「还没到点」，等到发现已经过去半年。
+  // 所以低频任务改看「上次成功距今有多久」：超过回溯窗口就算它该跑没跑。
+  if (!expected) {
+    const staleMs = last ? now.getTime() - new Date(last).getTime() : Number.POSITIVE_INFINITY;
+    if (staleMs > LOW_FREQ_STALE_MS) {
+      return {
+        status: 'overdue',
+        expectedAt: null,
+        staleDays: Number.isFinite(staleMs) ? Math.round(staleMs / 86400000) : 0,
+      };
+    }
+    return { status: 'idle', expectedAt: null, staleDays: 0 };
+  }
 
   const expectedAt = expected.toISOString();
-  const last = getLastSuccessAt(def.id);
   if (last && new Date(last).getTime() >= expected.getTime()) {
     return { status: 'ok', expectedAt, staleDays: 0 };
   }
   const lateBy = now.getTime() - expected.getTime();
   if (lateBy < OVERDUE_GRACE_MS) return { status: 'idle', expectedAt, staleDays: 0 };
-  return { status: 'overdue', expectedAt, staleDays: Math.round(lateBy / 86400000) };
+  // 按上海日历日之差算，不用毫秒除法：过点 12~24 小时时槽位其实是昨天的，
+  // 四舍五入会把它显示成「今天没跑」
+  return { status: 'overdue', expectedAt, staleDays: calendarDaysBetween(expected, now) };
 }
 
 /** 全部模块定时的健康状态，按「越该管的排越前」：落后最久 → 落后较短 → 正常 → 被关掉 */

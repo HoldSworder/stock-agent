@@ -12,7 +12,12 @@
  */
 import { computed, onMounted, ref } from 'vue';
 import { Refresh } from '@element-plus/icons-vue';
-import { TASK_HEALTH_LABELS, type TaskHealthItem, type TaskHealthOverview } from '@stock-agent/shared';
+import {
+  TASK_HEALTH_LABELS,
+  type TaskHealthItem,
+  type TaskHealthOverview,
+  type TaskHealthStatus,
+} from '@stock-agent/shared';
 import { api } from '@/api';
 
 const data = ref<TaskHealthOverview | null>(null);
@@ -46,16 +51,18 @@ const summary = computed(() => {
   const d = data.value;
   if (!d) return '';
   const n = d.overdueCount;
-  if (n === 0) return `该跑的都跑了，另有 ${d.disabledCount} 项是你关掉的`;
-  return `有 ${n} 项该跑却没跑，需要处理`;
+  const off = d.disabledCount > 0 ? `，另有 ${d.disabledCount} 项是你关掉的` : '';
+  if (n === 0) return `该跑的都跑了${off}`;
+  return `有 ${n} 项该跑却没跑，需要处理${off}`;
 });
 
-const TAG_TYPE = {
+// 穷尽映射：后端加一个状态值时这里会编译报错，而不是悄悄渲染成空标签
+const TAG_TYPE: Record<TaskHealthStatus, 'success' | 'danger' | 'info' | 'warning'> = {
   ok: 'success',
   overdue: 'danger',
   disabled: 'info',
   idle: 'warning',
-} as const;
+};
 
 /** ISO → 'MM-DD HH:mm'，空值给一个说得清的占位而不是横杠 */
 function at(iso: string | null): string {
@@ -126,9 +133,9 @@ function stale(item: TaskHealthItem): string {
       <el-table v-if="expanded" :data="others" size="small">
         <el-table-column prop="name" label="任务" min-width="180" />
         <el-table-column label="状态" width="100">
-          <template #default="{ row }">
-            <el-tag size="small" :type="TAG_TYPE[row.status as keyof typeof TAG_TYPE]" effect="plain">
-              {{ TASK_HEALTH_LABELS[row.status as keyof typeof TASK_HEALTH_LABELS] }}
+          <template #default="{ row }: { row: TaskHealthItem }">
+            <el-tag size="small" :type="TAG_TYPE[row.status]" effect="plain">
+              {{ TASK_HEALTH_LABELS[row.status] }}
             </el-tag>
           </template>
         </el-table-column>
