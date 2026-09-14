@@ -588,7 +588,12 @@ interface PrefetchContext {
   name: string;
   /** 是否在真实持仓中（影响 buy/add vs hold/reduce 措辞） */
   held: boolean;
-  /** 持仓简述（现价/成本/盈亏/仓位），非持仓为空串 */
+  /**
+   * 三态持仓。**取不到 ≠ 空仓**：unknown 时不得把可选动作限制成只能买入，
+   * 否则使用者满仓拿着一只该卖的标的时，恰好被禁止给出卖出建议。
+   */
+  holdState: 'held' | 'flat' | 'unknown';
+  /** 持仓简述（现价/成本/盈亏/仓位）；未持仓为空串，取不到时写明未知 */
   positionNote: string;
   quoteNote: string;
   researchNote: string;
@@ -641,15 +646,21 @@ async function prefetch(input: DecisionInput, opts: RunDecisionOptions): Promise
   const id = newId();
   opts.onEvent?.({ type: 'tool_call', id, name: '数据预取', args: input.code });
 
-  // 真实持仓：判定是否持有 + 取名称/成本（best-effort）
-  let held = false;
+  // 真实持仓：判定是否持有 + 取名称/成本（best-effort）。
+  //
+  // 必须分三态，不能只有「持有 / 未持有」：**取不到 ≠ 空仓**。
+  // 原来拉取失败按未持有处理，下游会据此告诉模型「当前未持有该标的」，
+  // 并把可选动作限制成只能买入或观望、不许卖出——而此时使用者可能正满仓
+  // 拿着这只需要卖的标的。券商 Cookie 过期是常态（实测就发生过），
+  // 于是这条路径会在最需要它给卖出建议的时候恰好禁止卖出。
+  let holdState: 'held' | 'flat' | 'unknown' = 'flat';
   let positionNote = '';
   let nameFromPos = '';
   try {
     const pf = await fetchRealPositions();
     const p = pf.positions.find((x) => x.code === input.code);
     if (p) {
-      held = true;
+      holdState = 'held';
       nameFromPos = p.name;
       positionNote =
         `已持有：现价${p.price} 成本${p.avgCost} ${p.qty}股 ` +
@@ -657,8 +668,12 @@ async function prefetch(input: DecisionInput, opts: RunDecisionOptions): Promise
         `当日${p.todayProfit.toFixed(0)}(${(p.todayRate * 100).toFixed(2)}%) 仓位${(p.positionRate * 100).toFixed(1)}%`;
     }
   } catch {
-    /* 未配置同花顺 Cookie 或拉取失败：按未持有处理 */
+    holdState = 'unknown';
+    positionNote = '账户数据没取到，持仓情况未知，不要当作空仓';
   }
+  // 下游只认 held 布尔的地方保持原语义（未知不等于持有），
+  // 但凡是要据此限制动作集合的地方，必须改看 holdState
+  const held = holdState === 'held';
 
   const queryName = input.name || nameFromPos || input.code;
   // 妙想是否就绪：未配置 MX_APIKEY 时，消息/政策走 TrendRadar 兜底，整条流水线仍可跑
@@ -859,6 +874,7 @@ async function prefetch(input: DecisionInput, opts: RunDecisionOptions): Promise
   return {
     name,
     held,
+    holdState,
     positionNote,
     quoteNote,
     researchNote,
@@ -988,7 +1004,9 @@ function buildAnalystPrompt(roleFocus: AnalystMeta, code: string, ctx: PrefetchC
     `只聚焦：${getInstruction(roleFocus.key)}。\n` +
     '基于下方已取好的数据，给出该维度结论，务必精炼（≤200 字），首行用「倾向：偏多/偏空/中性」表态，' +
     '其后分点列依据。禁止编造未出现的数字，数据缺失则明说。\n\n' +
-    (ctx.positionNote ? `=== 我的持仓 ===\n${ctx.positionNote}\n\n` : '') +
+    (ctx.positionNote
+      ? `=== ${ctx.holdState === 'unknown' ? '持仓情况未知' : '我的持仓'} ===\n${ctx.positionNote}\n\n`
+      : '') +
     data
   );
 }
@@ -1242,8 +1260,14 @@ export async function runDecision(input: DecisionInput, opts: RunDecisionOptions
   const traderText = await stage(
     'Trader 拟单',
     `${getInstruction(AGENT_KEYS.trader)}` +
-      (ctx.positionNote ? `\n我的持仓：${ctx.positionNote}` : '\n当前未持有该标的。') +
-      (ctx.held
+      (ctx.holdState === 'unknown'
+        ? `\n持仓情况未知：${ctx.positionNote}`
+        : ctx.positionNote
+          ? `\n我的持仓：${ctx.positionNote}`
+          : '\n当前未持有该标的。') +
+      (ctx.holdState === 'unknown'
+        ? '\n持仓未知：不要假设空仓。可给 buy / sell / hold，但必须在 note 里写明该建议依赖持仓情况、需人工确认后再执行。'
+        : ctx.held
         ? '\n持仓中：side 可为 sell（减/清仓）或 hold（维持）；如需加仓用 buy。'
         : '\n未持仓：side 只能为 buy（建仓）或 hold（观望），不可 sell。') +
       '\n【严格输出】只输出一个合法 JSON：{"side":"buy|sell|hold","qty":股数整数,"price":数字或null,"note":"理由(≤40字)"}。' +
@@ -1265,7 +1289,12 @@ export async function runDecision(input: DecisionInput, opts: RunDecisionOptions
   let riskDebate: DecisionRiskDebate | null = null;
   if (cfg.riskEnabled) {
     const views: Partial<Record<keyof Omit<DecisionRiskDebate, 'verdict'>, string>> = {};
-    const positionLine = ctx.positionNote ? `我的持仓：${ctx.positionNote}` : '当前未持有该标的。';
+    const positionLine =
+      ctx.holdState === 'unknown'
+        ? `持仓情况未知：${ctx.positionNote}`
+        : ctx.positionNote
+          ? `我的持仓：${ctx.positionNote}`
+          : '当前未持有该标的。';
     const planLine = `Trader 方案：${traderPlan.note}${traderPlan.warnings.length ? `（校验提示：${traderPlan.warnings.join('；')}）` : ''}`;
     for (let round = 1; round <= cfg.riskRounds; round += 1) {
       const roundTag = cfg.riskRounds > 1 ? `（第${round}/${cfg.riskRounds}轮）` : '';
@@ -1306,7 +1335,12 @@ export async function runDecision(input: DecisionInput, opts: RunDecisionOptions
     '最终决策',
     `${getInstruction(AGENT_KEYS.pm)}\n标的：${ctx.name}(${code})` +
       (input.context ? `\n场景：${input.context}` : '') +
-      (ctx.held ? '\n注意：该标的【已在持仓中】，动作应在 持有/加仓/减仓/卖出 中选择。' : '\n注意：该标的【当前未持有】，动作应在 买入/持有(观望) 中选择，不可给减仓/卖出。') +
+      (ctx.holdState === 'unknown'
+        ? '\n注意：该标的的【持仓情况未知】（账户数据没取到）。不要假设空仓，也不要假设持有；' +
+          '五个动作都可选，但 thesis 里必须写明本建议依赖持仓情况、需人工确认后再执行。'
+        : ctx.held
+        ? '\n注意：该标的【已在持仓中】，动作应在 持有/加仓/减仓/卖出 中选择。'
+        : '\n注意：该标的【当前未持有】，动作应在 买入/持有(观望) 中选择，不可给减仓/卖出。') +
       '\n【严格输出】只输出一个合法 JSON 对象（闭合所有括号），不要任何额外文字或 Markdown 围栏，结构如下：\n' +
       '{"action":"buy|add|hold|reduce|sell","confidence":0-100的整数,' +
       '"targetPrice":数字或null,"stopLoss":数字或null,"positionPct":0-100数字或null,' +
