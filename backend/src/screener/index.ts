@@ -4,6 +4,12 @@ import * as svc from './service';
 import { sendTelegram } from '../notify/telegram';
 import { defineModuleSchedules } from '../scheduling/defineModuleSchedules';
 
+/**
+ * 中线龙头策略的 id，见 screener/strategy.ts。
+ * 写成常量而不是字面量散在定时里，改名时编译期就会发现。
+ */
+const MID_LEADER_STRATEGY_ID = 'mid_leader';
+
 // 挂载选股引擎模块：注册 /api/screener/*。
 // server.ts 仅需 registerScreenerModule(app) 一行接入，删除即整模块下线。
 // 三层漏斗：全市场快照 → 规则硬筛 → 多因子打分 → LLM 横排 → 组合去集中 → TopN。
@@ -38,6 +44,33 @@ export function registerScreenerModule(app: FastifyInstance): void {
           const detail = await svc.runScreen({
             trigger: 'cron',
             taskName: '每日收盘选股',
+          });
+          await sendTelegram(toTelegram(detail)).catch(() => {});
+        },
+      },
+      {
+        id: 'screener.midLeader',
+        label: '每日中线龙头选股（15:12）',
+        defaultCron: '12 15 * * 1-5',
+        /**
+         * **默认开启**，与上面那条默认关的日常选股相反。理由是编排层面的：
+         *
+         * 实测（2026-09-14）系统三个月里自动跑的全是短线策略——尾盘动能套利 51 次定时、
+         * 其余短线策略靠对话触发，而唯一的中线策略「中线龙头」只被手动跑过 3 次、
+         * 共 36 条。使用者的打法是中线主升浪，且明确说过短线不敢上仓位。
+         * 也就是说系统每天在替他做他不做的事。
+         *
+         * 这一条不调模型（纯规则打分链路），开销只有取数与计算；
+         * 它的产出会进判卷机按「选股·多因子」判分，攒够样本就知道值不值钱——
+         * 目前中线那一档只有 17 条可判，样本太小不作结论，但它是唯一与打法一致的。
+         */
+        defaultEnabled: true,
+        run: async () => {
+          const detail = await svc.runScreen({
+            trigger: 'cron',
+            taskName: '每日中线龙头选股',
+            strategyId: MID_LEADER_STRATEGY_ID,
+            horizon: 'mid',
           });
           await sendTelegram(toTelegram(detail)).catch(() => {});
         },
