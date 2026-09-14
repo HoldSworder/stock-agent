@@ -4,7 +4,7 @@ import { getMeta, setMeta } from '../settings';
 import { sendTelegram } from '../notify/telegram';
 import { nowIso } from '../util';
 import { withJobLock } from './locks';
-import { previousScheduledSlot } from './cronSlots';
+import { lastExpectedSlot, previousScheduledSlot } from './cronSlots';
 
 /** 本进程锁持有者标识（区分 dev 双开 / 多进程） */
 const LOCK_OWNER = `module-${process.pid}`;
@@ -115,6 +115,74 @@ export function listModuleJobs(): ModuleJobInfo[] {
     nextRunAt: getNextRun(def.id),
     lastSuccessAt: getLastSuccessAt(def.id),
   }));
+}
+
+/**
+ * 逐项健康状态：这个任务上一次本该什么时候跑、跑了没、落后多久。
+ *
+ * 为什么要有这个：模块定时的失败只会写进服务端日志和一条 Telegram，
+ * 界面上看不出任何异常。实测有任务连续四个交易日没跑、无人察觉；
+ * 也有任务被显式关闭三个月，同样无人察觉。两者都会让后续攒的记录中间出现空洞，
+ * 而空洞是事后发现的——那时整段记录已经作废。
+ *
+ * 三种「没在跑」必须分开，混成一个「没数据」就等于没说：
+ *   disabled 被关掉（预期内）/ overdue 该跑没跑（故障）/ idle 还没到点（正常）。
+ */
+export type ModuleJobHealthStatus = 'ok' | 'overdue' | 'disabled' | 'idle';
+
+export interface ModuleJobHealth {
+  status: ModuleJobHealthStatus;
+  /** 上一次本该触发的时刻（ISO），已跳过节假日；算不出则 null */
+  expectedAt: string | null;
+  /** overdue 时落后的自然天数，四舍五入到天；其余为 0 */
+  staleDays: number;
+}
+
+/**
+ * 宽限期：过了应触发时刻多久才算「该跑没跑」。
+ *
+ * 不留宽限会误报：任务本身要跑一会儿、服务重启会错过一两拍、互斥锁会让本次跳过，
+ * 每十分钟一次的任务只要晚几分钟就变红。红得太容易，人就不看了——
+ * 而这块的全部价值就在于「它一红你就信」。
+ *
+ * 十分钟对每日任务也够灵敏：14:40 的任务 14:50 就会报出来。
+ */
+const OVERDUE_GRACE_MS = 10 * 60 * 1000;
+
+export function jobHealth(def: ModuleJob, now: Date = new Date()): ModuleJobHealth {
+  if (!def.enabled) return { status: 'disabled', expectedAt: null, staleDays: 0 };
+
+  const expected = lastExpectedSlot(def.cronExpr, def.tz, now, (at) =>
+    def.skipHoliday ? shouldSkipForHoliday(at) : false,
+  );
+  // 算不出应触发时刻：表达式太密（秒级）或两周内确实没有槽位，一律不判，避免给出错误结论
+  if (!expected) return { status: 'idle', expectedAt: null, staleDays: 0 };
+
+  const expectedAt = expected.toISOString();
+  const last = getLastSuccessAt(def.id);
+  if (last && new Date(last).getTime() >= expected.getTime()) {
+    return { status: 'ok', expectedAt, staleDays: 0 };
+  }
+  const lateBy = now.getTime() - expected.getTime();
+  if (lateBy < OVERDUE_GRACE_MS) return { status: 'idle', expectedAt, staleDays: 0 };
+  return { status: 'overdue', expectedAt, staleDays: Math.round(lateBy / 86400000) };
+}
+
+/** 全部模块定时的健康状态，按「越该管的排越前」：落后最久 → 落后较短 → 正常 → 被关掉 */
+export function listModuleJobHealth(now: Date = new Date()): (ModuleJobInfo & ModuleJobHealth)[] {
+  const order: Record<ModuleJobHealthStatus, number> = { overdue: 0, idle: 1, ok: 2, disabled: 3 };
+  return [...jobs.values()]
+    .map(({ def }) => ({
+      id: def.id,
+      module: def.module,
+      label: def.label,
+      cronExpr: def.cronExpr,
+      enabled: def.enabled,
+      nextRunAt: getNextRun(def.id),
+      lastSuccessAt: getLastSuccessAt(def.id),
+      ...jobHealth(def, now),
+    }))
+    .sort((a, b) => order[a.status] - order[b.status] || b.staleDays - a.staleDays);
 }
 
 /** 手动触发一次（不过节假日 gate），job 存在返回 true */

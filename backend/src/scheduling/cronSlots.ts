@@ -46,3 +46,36 @@ export function previousScheduledSlot(
   }
   return null; // 槽位打满：last 只是当日靠前的某一槽，给出去会误导，直接判为不可判
 }
+
+/** 往回翻的天数上限。超过两周没跑的任务，具体落后几天已经不重要，都是「早就停了」 */
+const MAX_LOOKBACK_DAYS = 14;
+
+/**
+ * 某 cron 表达式在 now 之前最后一个应触发时刻，跨天回溯，没有则 null。
+ *
+ * 与 previousScheduledSlot 的区别只在范围：后者只看今天，用于「今天该跑的跑了没」；
+ * 本函数往回翻最多两周，用于回答「这个任务上一次本该在什么时候跑」——
+ * 像每周一次或工作日任务在周末这种情形，今天根本没有槽位，只看今天会误判成一切正常。
+ *
+ * skip 回调用于跳过不该触发的日子（法定节假日）。返回 true 表示该时刻不算数，继续往前找。
+ */
+export function lastExpectedSlot(
+  cronExpr: string,
+  tz: string,
+  now: Date = new Date(),
+  skip?: (at: Date) => boolean,
+): Date | null {
+  for (let back = 0; back <= MAX_LOOKBACK_DAYS; back++) {
+    // 第 0 天用真实 now（当天只算已经过去的槽位），更早的日子取当日 23:59:59.999 拿全天最后一槽
+    const probe =
+      back === 0
+        ? now
+        : new Date(`${shanghaiDateStr(new Date(now.getTime() - back * 86400000))}T23:59:59.999+08:00`);
+    if (Number.isNaN(probe.getTime())) continue;
+    const slot = previousScheduledSlot(cronExpr, tz, probe);
+    if (!slot) continue;
+    if (skip?.(slot)) continue;
+    return slot;
+  }
+  return null;
+}

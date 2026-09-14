@@ -1,8 +1,13 @@
 import type { FastifyInstance } from 'fastify';
-import type { ScheduleOverviewItem } from '@stock-agent/shared';
+import type {
+  ScheduleOverviewItem,
+  TaskHealthItem,
+  TaskHealthOverview,
+} from '@stock-agent/shared';
 import { listTasks } from '../tasks';
 import { getNextRun } from '../scheduler';
-import { listModuleJobs } from './moduleScheduler';
+import { listModuleJobHealth, listModuleJobs } from './moduleScheduler';
+import { nowIso } from '../util';
 
 // 调度总览：把两套解耦的调度（中央 scheduled_tasks/任务 + 各模块自管的模块定时）聚合为只读总览。
 // 写操作仍走各自原端点（中央 /api/tasks/*，模块 /api/<module>/schedules/*），本端点仅做统一读视图。
@@ -90,5 +95,29 @@ export function registerSchedulesModule(app: FastifyInstance): void {
     // 去重归属标注：已停用任务标注职能承担方（G2 不静默失联）
     for (const it of items) it.supersededBy = supersededNote(it);
     return { ok: true, data: items };
+  });
+
+  // 任务健康：只回答一个问题——系统自己有没有在干活。
+  // 与上面的调度总览分开，是因为那份是配置视图（谁在什么时候跑），这份是状态视图（跑了没）。
+  // 首页要的是后者，不该让用户在一张配置表里自己比对时间戳。
+  app.get('/api/schedules/health', () => {
+    const items: TaskHealthItem[] = listModuleJobHealth().map((j) => ({
+      id: j.id,
+      module: j.module,
+      name: j.label,
+      cronExpr: j.cronExpr,
+      status: j.status,
+      expectedAt: j.expectedAt,
+      lastSuccessAt: j.lastSuccessAt,
+      nextRunAt: j.nextRunAt,
+      staleDays: j.staleDays,
+    }));
+    const data: TaskHealthOverview = {
+      items,
+      overdueCount: items.filter((i) => i.status === 'overdue').length,
+      disabledCount: items.filter((i) => i.status === 'disabled').length,
+      checkedAt: nowIso(),
+    };
+    return { ok: true, data };
   });
 }
