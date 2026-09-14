@@ -103,8 +103,11 @@ function stale(item: TaskHealthItem): string {
             <el-tag size="small" type="danger" effect="plain">{{ stale(row) }}</el-tag>
           </template>
         </el-table-column>
-        <el-table-column min-width="220">
+        <el-table-column min-width="260">
           <template #default="{ row }">
+            <!-- 失败原因优先于时间戳：知道「卡在哪」才能动手，
+                 光知道「没跑」只会变成又一个看不懂的红点 -->
+            <div v-if="row.lastError" class="why">卡在：{{ row.lastError.message }}</div>
             <span class="dim">
               本该 {{ at(row.expectedAt) }} 跑，最后一次成功是 {{ at(row.lastSuccessAt) }}
             </span>
@@ -155,6 +158,11 @@ function stale(item: TaskHealthItem): string {
 .dim {
   color: var(--el-text-color-secondary);
   font-size: 12px;
+}
+.why {
+  color: var(--el-color-danger);
+  font-size: 12px;
+  line-height: 1.4;
 }
 .fine {
   color: var(--el-text-color-secondary);

@@ -30,15 +30,45 @@ export interface ModuleJob {
 const jobs = new Map<string, { def: ModuleJob; cron: Cron | null }>();
 
 const LAST_SUCCESS_PREFIX = 'modsched_last_';
+const LAST_ERROR_PREFIX = 'modsched_err_';
 const CATCHUP_META_KEY = 'modsched_last_catchup_at';
 
 function lastSuccessKey(id: string): string {
   return LAST_SUCCESS_PREFIX + id;
 }
 
+function lastErrorKey(id: string): string {
+  return LAST_ERROR_PREFIX + id;
+}
+
 /** 最近一次成功执行时间（ISO），无则 null */
 export function getLastSuccessAt(id: string): string | null {
   return getMeta(lastSuccessKey(id)) ?? null;
+}
+
+/**
+ * 最近一次失败的原因与时刻。
+ *
+ * 原来失败只进控制台和一条推送：控制台会滚掉、推送会被划走，
+ * 于是界面上只剩「没数据」。实测两个任务分别因为券商 Cookie 过期、
+ * 取数服务 502 停了三天到三个月，全程没人知道为什么。
+ * 落库之后，「该跑没跑」旁边才能写出它到底卡在哪。
+ * 成功一次即清除，不留陈年旧账。
+ */
+export interface ModuleJobError {
+  at: string;
+  message: string;
+}
+
+export function getLastError(id: string): ModuleJobError | null {
+  const raw = getMeta(lastErrorKey(id));
+  if (!raw) return null;
+  try {
+    const p = JSON.parse(raw) as Partial<ModuleJobError>;
+    return p.at && p.message ? { at: p.at, message: p.message } : null;
+  } catch {
+    return null;
+  }
 }
 
 /** 执行一个 job：cron 触发先过节假日 gate，成功落水位线，失败告警（不抛出，避免压垮定时器） */
@@ -59,8 +89,11 @@ async function execJob(def: ModuleJob, trigger: 'cron' | 'manual'): Promise<void
     );
     if (ran === null) return; // 未抢到锁：同 job 正在运行，本次跳过，不记水位线
     setMeta(lastSuccessKey(def.id), nowIso());
+    setMeta(lastErrorKey(def.id), ''); // 成功即清错，避免旧故障一直挂在界面上
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    // 截断：个别失败会把整段响应体塞进 message，原样落库会撑大 settings 表
+    setMeta(lastErrorKey(def.id), JSON.stringify({ at: nowIso(), message: msg.slice(0, 300) }));
     console.error(`[modsched] ${def.label} 执行失败:`, msg);
     // 仅 cron 触发失败时告警；手动触发用户已在 UI 看到错误
     if (trigger === 'cron') {
@@ -102,6 +135,8 @@ export interface ModuleJobInfo {
   enabled: boolean;
   nextRunAt: string | null;
   lastSuccessAt: string | null;
+  /** 最近一次失败原因；成功即清除。仅健康视图填充，调度总览不带 */
+  lastError?: ModuleJobError | null;
 }
 
 /** 列出全部已注册的模块定时项（跨模块聚合，供中枢·调度页） */
@@ -180,6 +215,7 @@ export function listModuleJobHealth(now: Date = new Date()): (ModuleJobInfo & Mo
       enabled: def.enabled,
       nextRunAt: getNextRun(def.id),
       lastSuccessAt: getLastSuccessAt(def.id),
+      lastError: getLastError(def.id),
       ...jobHealth(def, now),
     }))
     .sort((a, b) => order[a.status] - order[b.status] || b.staleDays - a.staleDays);

@@ -111,6 +111,7 @@ export function registerSchedulesModule(app: FastifyInstance): void {
       lastSuccessAt: j.lastSuccessAt,
       nextRunAt: j.nextRunAt,
       staleDays: j.staleDays,
+      lastError: j.lastError ?? null,
     }));
     const data: TaskHealthOverview = {
       items,
