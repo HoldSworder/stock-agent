@@ -46,12 +46,20 @@ import { applyLiveOverlay, fetchLivePrices } from './liveOverlay';
  * 让每个来源自己去取会把一次批量请求拆成好几次。
  * 只有 `distanceTo`（拿哪条线算距离）由来源自己决定——它知道这条动作在盯什么价。
  */
-type ActionDraft = Omit<CockpitAction, 'live' | 'distancePct' | 'distanceTo'> &
+// provenNote 不进 draft：它按动作类型在出口处统一盖章（见 stampProven），
+// 各生成处不该也不必各写一遍——那样将来新增一种买入类动作就会漏。
+type ActionDraft = Omit<CockpitAction, 'live' | 'distancePct' | 'distanceTo' | 'provenNote'> &
   Partial<Pick<CockpitAction, 'distanceTo'>>;
 
 /** 补齐实时字段的默认值。实时价与距离由 applyLiveOverlay 之后填 */
 function act(d: ActionDraft): CockpitAction {
-  return { ...d, live: null, distancePct: null, distanceTo: d.distanceTo ?? null };
+  return {
+    ...d,
+    live: null,
+    distancePct: null,
+    distanceTo: d.distanceTo ?? null,
+    provenNote: null,
+  };
 }
 
 /**
@@ -706,7 +714,7 @@ export async function buildActionPlan(): Promise<CockpitActionPlan> {
 
   return {
     asOf: nowIso(),
-    actions: kept,
+    actions: kept.map(stampProven),
     emptyReason:
       kept.length > 0
         ? null
@@ -716,6 +724,43 @@ export async function buildActionPlan(): Promise<CockpitActionPlan> {
           ),
     completeness,
     omitted,
+  };
+}
+
+/**
+ * 需要预测能力的动作类型。
+ *
+ * 这个名单的分界线是：**这条动作成立，要不要「猜对后面会怎么走」？**
+ * - 不需要：跌破了你自己设的止损线、仓位超出你自己设的预算。这是在报事实。
+ * - 需要：这只值得买、该从这只换到那只。这是在预测。
+ *
+ * 只有后者要挂「有没有被验证过」，前者不挂——给风险提示加免责声明，
+ * 只会稀释真正该注意的那几条。
+ */
+const PREDICTIVE_KINDS: ReadonlySet<CockpitActionKind> = new Set<CockpitActionKind>([
+  'candidate',
+  'buy_triggered',
+  'near_buy',
+  'rotate',
+]);
+
+/**
+ * 给需要预测能力的动作盖一句「验证到哪一步了」。
+ *
+ * 为什么必须有：2026-09-14 的走出样本考试判死了 ETF 主线轮动的两套规则
+ * （回测第一名与第六名，四个起点全部回撤翻倍且跑输不动持有），
+ * 而信号级判分对 ETF 买点的结论是「尚无证据显示优于随机」（915 条可判样本）。
+ * 这种情况下把买入类动作和止损提示并列摆在首页，等于把已知无效的东西
+ * 和确定有用的东西混在一起推给人看。
+ *
+ * 统一在出口处盖章而不是在各生成处分别写，是为了不漏——将来新增一种买入类动作，
+ * 只要把它加进上面的名单，提示自然跟上。
+ */
+function stampProven(a: CockpitAction): CockpitAction {
+  if (!PREDICTIVE_KINDS.has(a.kind)) return { ...a, provenNote: null };
+  return {
+    ...a,
+    provenNote: '这类买入判断还没有证据显示它优于随机，成绩见说准率页',
   };
 }
 
@@ -729,4 +774,6 @@ export {
   gateOpportunities as __test__gateOpportunities,
   mergeByCode as __test__mergeByCode,
   sortActions as __test__sortActions,
+  stampProven as __test__stampProven,
+  PREDICTIVE_KINDS as __test__PREDICTIVE_KINDS,
 };

@@ -277,6 +277,14 @@ function goSchedules(source: ActionDataSource): void {
         </div>
         <div v-if="a.blockedReason" class="ta-blocked">{{ a.blockedReason }}</div>
         <div class="ta-why">{{ a.why }}</div>
+        <!--
+          买入类动作要说清它验证到哪一步了。
+          走出样本考试判死了 ETF 主线轮动的两套规则，信号级判分对 ETF 买点的结论是
+          「尚无证据显示优于随机」。把这种动作和止损提示并列摆着，等于把已知无效的
+          和确定有用的混在一起。风险类不带这句——「跌破你自己设的线」是报事实，
+          给它加免责声明只会稀释真正该注意的那几条。
+        -->
+        <div v-if="a.provenNote" class="ta-unproven">{{ a.provenNote }}</div>
         <div class="ta-foot">
           <!-- 只写依据来自哪套方法，不带任何准确率数字：安慰剂对照还没证明它们强于随机 -->
           <span v-if="a.basisSources.length" class="ta-basis">
@@ -503,6 +511,16 @@ function goSchedules(source: ActionDataSource): void {
   font-size: 12px;
   color: var(--el-text-color-regular);
   line-height: 1.5;
+}
+/* 提示要看得见但不抢戏：它是「别太当真」，不是「快去操作」 */
+.ta-unproven {
+  margin-top: 4px;
+  padding: 3px 6px;
+  border-left: 2px solid var(--el-color-warning);
+  background: var(--el-color-warning-light-9);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--el-color-warning-dark-2);
 }
 .ta-foot {
   display: flex;

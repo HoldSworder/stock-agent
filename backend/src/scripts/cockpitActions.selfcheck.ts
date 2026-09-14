@@ -24,6 +24,8 @@ import {
   __test__gateOpportunities,
   __test__mergeByCode,
   __test__sortActions,
+  __test__stampProven,
+  __test__PREDICTIVE_KINDS,
 } from '../cockpit/actions';
 import { judgeFreshness, summarizeFreshness, RISK_SOURCES } from '../cockpit/freshness';
 import { applyLiveOverlay, distanceText } from '../cockpit/liveOverlay';
@@ -41,6 +43,7 @@ function mk(p: Partial<CockpitAction> & Pick<CockpitAction, 'priority' | 'kind'>
     blockedReason: null,
     evidence: [],
     basisSources: [],
+    provenNote: null,
     dataAt: null,
     live: null,
     distancePct: null,
@@ -351,6 +354,45 @@ function mk(p: Partial<CockpitAction> & Pick<CockpitAction, 'priority' | 'kind'>
     '「还没查完」与「今天没事做」是两回事，绝不能混为一谈',
   );
   assert.equal(Object.keys(ACTION_DATA_SOURCE_LABELS).length, 6, '六个数据来源都要有中文名');
+}
+
+// ===== 「谁需要预测能力」这条分界线 =====
+//
+// 2026-09-14 的走出样本考试判死了 ETF 主线轮动的两套规则（回测第一名与第六名，
+// 四个起点全部回撤翻倍且跑输不动持有），信号级判分对 ETF 买点的结论是
+// 「尚无证据显示优于随机」（915 条可判样本）。所以买入类动作必须带上这句提示，
+// 不能和止损提示并列摆着——那等于把已知无效的和确定有用的混在一起推给人看。
+//
+// 反过来，风险类**不许**带这句：「跌破你自己设的线」是在报事实、不需要预测能力，
+// 给它加免责声明只会稀释真正该注意的那几条。
+{
+  // 需要预测能力的：买入候选、触发买入、接近买点、轮动换手
+  for (const kind of ['candidate', 'buy_triggered', 'near_buy', 'rotate'] as const) {
+    const a = __test__stampProven(mk({ priority: 'P2', kind, code: '600000' }));
+    assert.ok(
+      a.provenNote && a.provenNote.includes('还没有证据'),
+      `${kind} 是买入类，必须带「还没有证据」提示`,
+    );
+    assert.ok(__test__PREDICTIVE_KINDS.has(kind), `${kind} 必须在需要预测能力的名单里`);
+  }
+
+  // 不需要预测能力的：跌破自己设的线、超出自己设的预算
+  for (const kind of ['stop_loss', 'near_stop', 'overweight'] as const) {
+    const a = __test__stampProven(mk({ priority: 'P0', kind, code: '600519' }));
+    assert.equal(
+      a.provenNote,
+      null,
+      `${kind} 是报事实不是预测，不得加免责声明——那会稀释真正该注意的几条`,
+    );
+    assert.ok(!__test__PREDICTIVE_KINDS.has(kind), `${kind} 不该在需要预测能力的名单里`);
+  }
+
+  // 盖章不得动其他字段：它只负责加一句提示，改别的就是越界
+  const before = mk({ priority: 'P0', kind: 'stop_loss', code: '600519', what: '按纪律止损离场' });
+  const after = __test__stampProven(before);
+  assert.equal(after.what, before.what);
+  assert.equal(after.priority, before.priority);
+  assert.equal(after.kind, before.kind);
 }
 
 console.log('cockpitActions.selfcheck 全部通过');
