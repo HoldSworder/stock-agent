@@ -43,6 +43,7 @@ best_outer、best_cfg）。**在没见过的数据上重新扫参，整场考试
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -255,11 +256,92 @@ def verdict(res: dict, baseline: dict, bh: dict) -> str:
     return ('判死：' if dead else '判活：') + '；'.join(reasons)
 
 
+def load_gate() -> dict:
+    """总开关：全A等权（880008）收盘是否站上 MA60，按交易日给出。
+
+    为什么是这个条件：走出样本考试判死两套规则后，预案是加一个「这段时间不该参与」
+    的总开关。但这个动作极易变成事后拟合——「我知道这两个半月跌，所以加个条件避开」。
+    约束是必须用一个**早就存在、不是为这次翻车发明**的条件。
+
+    「全A等权站上 MA60」正是 backend/src/regime/service.ts 里 classifyPhase
+    判「主升」的必要条件（`a.eqwAboveMa60 === true`），2026-08 之前就在跑。
+
+    **诚实声明**：即便条件本身是既有的，「在若干既有条件里挑这一个」仍然是一种选择。
+    缓解的办法是只试这一个、不比较多个再挑最好的——后者就是拟合。
+    本脚本只接这一个开关，不做候选比较。
+    """
+    import urllib.request
+    import json as _json
+
+    host = os.environ.get('SA_HOST', '192.168.31.144')
+    base = os.environ.get('SA_ASTOCK', f'http://{host}:9119')
+    url = f'{base}/api/call/mootdx_index?symbol=880008&frequency=9&offset=400'
+    # 局域网地址不能走代理，否则本机 7890 会把连接失败包装成 502
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+    # mootdx 有个已知故障形态：服务器节点列表为空时**静默返回空数组、不报错**。
+    # 实测同一个请求连着跑，有时有数据有时空。所以必须重试，
+    # 且空数组不能被当成「该条件不可用」——那会让总开关静默失效、考试结论失真。
+    rows = []
+    for attempt in range(1, 6):
+        with opener.open(url, timeout=60) as resp:
+            rows = _json.loads(resp.read().decode('utf-8'))
+        if rows:
+            break
+        print(f'[oos] 880008 第 {attempt} 次取到空数组，重试...', file=sys.stderr)
+        time.sleep(2)
+    if not rows:
+        raise SystemExit(
+            '880008 连续 5 次返回空数组。这是 mootdx 的已知故障形态（节点列表为空时静默返回空），'
+            '不是没有数据。请检查 sidecar 的 mootdx 节点配置，不要当成「该条件不可用」跳过总开关。'
+        )
+    bars = sorted(
+        (str(r.get('datetime') or r.get('date'))[:10].replace('/', '-'), float(r['close']))
+        for r in rows
+        if r.get('close')
+    )
+    closes = [c for _, c in bars]
+    out = {}
+    for i in range(59, len(closes)):
+        ma60 = sum(closes[i - 59 : i + 1]) / 60
+        out[bars[i][0]] = closes[i] >= ma60
+    return out
+
+
+def gate_segments(gate: dict, days: list, start: str, end: str) -> list:
+    """把考试区间切成「开关打开」的连续片段。
+
+    开关关闭即空仓，所以在实现上等价于：只在每个打开的片段里跑策略，片段之间不持仓。
+    """
+    active = [d for d in days if start <= d <= end]
+    segs, cur = [], []
+    for d in active:
+        if gate.get(d):
+            cur.append(d)
+        elif cur:
+            segs.append((cur[0], cur[-1]))
+            cur = []
+    if cur:
+        segs.append((cur[0], cur[-1]))
+    return segs
+
+
 def main() -> None:
     lines = ['# 走出样本考试', '']
     lines.append(f'考试区间终点 {OOS_END}。收益只报非复利（每笔等额、不滚利）。')
     lines.append('')
     lines.append('判生死不看绝对收益，看两条：回撤是否超出该规则历史最差、能否跑赢拿住最强 ETF 不动。')
+    lines.append('')
+
+    gate = load_gate()
+    on = [d for d, v in gate.items() if v and '2026-06-27' <= d <= OOS_END]
+    tot = [d for d in gate if '2026-06-27' <= d <= OOS_END]
+    ref_on = [d for d, v in gate.items() if v and '2025-01-02' <= d <= '2026-06-26']
+    ref_tot = [d for d in gate if '2025-01-02' <= d <= '2026-06-26']
+    lines.append(f'总开关状态：考试区间内全A等权站上 MA60 的天数 {len(on)}/{len(tot)}'
+                 f'（{len(on) / max(len(tot), 1):.0%}），'
+                 f'而回测区间是 {len(ref_on)}/{len(ref_tot)}（{len(ref_on) / max(len(ref_tot), 1):.0%}）。'
+                 f'**考试区间本身就是回测很少见到的环境。**')
     lines.append('')
 
     for plan in PLANS:
@@ -270,13 +352,16 @@ def main() -> None:
         # 两类入口：build_rank + run（theme-first 那种），或全默认参数的 run_mode
         if plan.get('entry') == 'run_mode':
             run_mode = ns['run_mode']
-            def do(start: str):
-                return run_mode(plan['name'], start=start, end=OOS_END, log=True)
+            def do_range(a: str, b: str, name=plan['name']):
+                return run_mode(name, start=a, end=b, log=True)
         else:
             rank = ns['build_rank'](*plan['outer'])
             cfg = plan['cfg']
-            def do(start: str, rank=rank, cfg=cfg, run=ns['run']):
-                return run(rank, cfg, start, OOS_END, log=True)
+            def do_range(a: str, b: str, rank=rank, cfg=cfg, run=ns['run']):
+                return run(rank, cfg, a, b, log=True)
+
+        def do(start: str):
+            return do_range(start, OOS_END)
 
         lines.append(f"## {plan['name']}")
         lines.append('')
@@ -301,6 +386,45 @@ def main() -> None:
             )
             print(f"[oos] {label}: flat={res['flat']:+.1f}% mdd={res['mdd']:.1f}% "
                   f"trades={res['trades']} bh={bh_cell}", file=sys.stderr)
+        lines.append('')
+
+        # ===== 第二轮：加上「全A等权站上 MA60」总开关 =====
+        lines.append('### 加上总开关（全A等权站上 MA60 才参与）')
+        lines.append('')
+        lines.append('开关关闭即空仓。实现上等价于只在开关打开的连续片段里跑策略、片段之间不持仓。')
+        lines.append('')
+        lines.append('| 起点 | 参与片段 | 参与天数 | 非复利合计 | 最差片段回撤 | 交易 | 同开关下的不动持有 |')
+        lines.append('|---|---:|---:|---:|---:|---:|---|')
+        for label, start in STARTS:
+            segs = gate_segments(gate, ns['days'], start, OOS_END)
+            flat_sum, worst_mdd, trades = 0.0, 0.0, 0
+            for a, b in segs:
+                r = normalize(do_range(a, b))
+                flat_sum += r['flat']
+                worst_mdd = min(worst_mdd, r['mdd'])
+                trades += r['trades']
+            # 基准也必须套同一个开关，否则是「只参与 20 天的策略」跟
+            # 「全程满仓的基准」比，白送策略一个便宜
+            bh_sum = 0.0
+            for a, b in segs:
+                seg_bh = buy_and_hold_strongest(ns, a, b)
+                bh_sum += seg_bh['flat']
+            days_on = sum(len([d for d in ns['days'] if a <= d <= b]) for a, b in segs)
+            lines.append(
+                f"| {label} | {len(segs)} 段 | {days_on} | {flat_sum:+.1f}% | "
+                f"{worst_mdd:.1f}% | {trades} | {bh_sum:+.1f}% |"
+            )
+            print(f"[oos·gated] {label}: segs={len(segs)} days={days_on} "
+                  f"flat={flat_sum:+.1f}% worstMdd={worst_mdd:.1f}% trades={trades}",
+                  file=sys.stderr)
+        lines.append('')
+        lines.append('口径限制，读数时必须知道：')
+        lines.append('')
+        lines.append('- **非复利合计是各片段逐笔收益之和**，这对等权不滚利口径是成立的；'
+                     '但**最差片段回撤不等于整段的最大回撤**——跨片段的累计亏损没有被串起来，'
+                     '所以这一列偏乐观，只能当「单段最深坑有多深」看。')
+        lines.append('- 策略有最短持有天数（8 或 6 个交易日）。短片段装不下一次完整持有，'
+                     '会让交易被片段边界截断，这是这种实现方式的固有失真。')
         lines.append('')
 
     out = OUT / 'oos_exam.md'
