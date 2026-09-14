@@ -6,7 +6,16 @@ import { db, schema } from '../db/client';
 
 const PREFIX = 'etfwatch_';
 
-/** 配置默认值（v2 战法：2:2:1 仓位、大周期+零轴过滤、硬止损、买点调 agent 给置信度） */
+/**
+ * 配置默认值（v2 战法：2:2:1 仓位、大周期+零轴过滤、硬止损）。
+ *
+ * `agentConfirmBuy` 默认关。它原本默认开，让模型给每条买点研判置信度与执行指令，
+ * 单次一万多 token、占全系统近六成开销。关掉的依据不是省钱，是实测无效：
+ * 判卷机在 915 条可判买点上给出「尚无证据显示优于随机」，
+ * 其中被模型标为「建仓」的那批事后表现还差于它标为「放弃」的。
+ * 让模型给结论本身也超出了它该管的范围——它只负责翻译、核查、答追问。
+ * 见 .scratch/provable-advice/issues/10。想恢复到设置页打开即可。
+ */
 export const DEFAULT_CONFIG: EtfWatchConfig = {
   enabled: false,
   pollSec: 60,
@@ -23,7 +32,7 @@ export const DEFAULT_CONFIG: EtfWatchConfig = {
   trailTakeProfitPct: 12,
   chaseGuardPct: 7,
   maxTotalPct: 100,
-  agentConfirmBuy: true,
+  agentConfirmBuy: false,
   minConfidence: 55,
   cooldownMin: 30,
   pushTelegram: true,

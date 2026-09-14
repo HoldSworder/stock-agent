@@ -98,6 +98,7 @@ const form = reactive<WatchConfig>({
   scanEverySec: 60,
   watchEverySec: 15,
   dailyDigest: true,
+  agentFinalVerdict: false,
 });
 
 const enabled = computed(() => store.status?.enabled ?? false);
@@ -504,6 +505,13 @@ watch(
         </el-form-item>
         <el-form-item label="技术指标">
           <el-switch v-model="form.techContext" />
+        </el-form-item>
+        <el-form-item label="让模型下结论">
+          <el-switch v-model="form.agentFinalVerdict" />
+          <span class="form-hint">
+            关掉时只按规则记录触发（标的、方向、触发价、依据），不调模型。
+            同类研判在 915 条 ETF 买点上实测看不出优于随机，且占全系统近六成模型开销。
+          </span>
         </el-form-item>
 
         <el-divider content-position="left">节奏与推送</el-divider>

@@ -366,7 +366,22 @@ async function processSignal(s: WatchSignal, cfg: WatchConfig): Promise<boolean>
   let promptTokens: number | undefined;
   let completionTokens: number | undefined;
   let verdict: Verdict;
-  if (/^[036]\d{5}$/.test(s.code)) {
+  if (!cfg.agentFinalVerdict) {
+    // 纯规则：只落一条可核对的记录（标的 + 方向 + 触发价 + 依据），不让模型给结论。
+    // 记录本身照样进判卷机判分，攒够样本就知道这套触发规则值不值钱——
+    // 而原来花一万多 token 换来的那段文字，事后无法判对错，等于花钱买了个说不清。
+    runId = null;
+    status = 'success';
+    verdict = {
+      // 规则触发不产生「裁决」，这一栏留空；界面据此区分「规则记录」与「研判结论」
+      verdict: '',
+      advice: '',
+      // 规则触发即如实记录，不由这一层决定要不要提醒；
+      // 是否值得打扰由信号自身的等级（severity）与冷却窗口控制
+      shouldAlert: s.severity === 'high',
+      instruction: null,
+    };
+  } else if (/^[036]\d{5}$/.test(s.code)) {
     // 多 agent 辩论终审：内部各 stage 经 gateway oneshot 计量（recordRun:false，无聚合 runId/token）。
     // runDecision 取数已降级、不裸抛业务错误，按 success 处理。
     const decision = await runDecision(

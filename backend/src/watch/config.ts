@@ -33,6 +33,8 @@ export const DEFAULT_CONFIG: WatchConfig = {
   scanEverySec: 60,
   watchEverySec: 15,
   dailyDigest: true,
+  // 默认关：盯盘只出可核对的规则记录，不让模型给买卖结论。理由见 shared 里该字段的注释
+  agentFinalVerdict: false,
 };
 
 type NumKey =
@@ -59,7 +61,8 @@ type BoolKey =
   | 'historyCompare'
   | 'reflection'
   | 'techContext'
-  | 'dailyDigest';
+  | 'dailyDigest'
+  | 'agentFinalVerdict';
 type StrKey = 'watchGroup';
 
 function readRaw(key: string): string | undefined {
