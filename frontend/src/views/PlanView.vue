@@ -987,7 +987,7 @@ onUnmounted(() => {
               <span class="num" :class="pctCls(etfSig(row.code)?.premiumPct)">{{ fmtPct(etfSig(row.code)?.premiumPct) }}</span>
             </template>
           </el-table-column>
-          <el-table-column v-if="isLive" label="估值分位" width="84" align="right">
+          <el-table-column v-if="isLive" label="区间位置" width="84" align="right">
             <template #default="{ row }">
               <span class="num">{{ etfSig(row.code)?.pricePercentile != null ? fmtNum(etfSig(row.code)?.pricePercentile, 0) + '%' : '—' }}</span>
             </template>

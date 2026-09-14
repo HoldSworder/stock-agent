@@ -146,7 +146,9 @@ export function registerAssertionsModule(app: FastifyInstance): void {
         id: 'assertions.freeze',
         label: '技术判断存档（15:50）',
         defaultCron: '50 15 * * 1-5',
-        defaultEnabled: true,
+        // 默认关：说准率页已从导航下沉。存档+核对是为了统计判断准不准，
+        // 它不改变任何当前动作，而 swing 侧已有自己的规则存档与达标检验
+        defaultEnabled: false,
         run: async () => {
           const s = await freezeAll();
           console.log(
@@ -160,7 +162,7 @@ export function registerAssertionsModule(app: FastifyInstance): void {
         id: 'assertions.settle',
         label: '技术判断核对（15:55）',
         defaultCron: '55 15 * * 1-5',
-        defaultEnabled: true,
+        defaultEnabled: false,
         run: async () => {
           const s = await settleDue();
           console.log(

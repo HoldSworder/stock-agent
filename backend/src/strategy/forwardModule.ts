@@ -24,7 +24,8 @@ export function registerStrategyForward(app: FastifyInstance): void {
         id: 'strategy.sample',
         label: '战法前向样本采集（1550）',
         defaultCron: '50 15 * * 1-5',
-        defaultEnabled: true,
+        // 默认关：战法模拟页已从导航下沉，样本采集服务的是它的统计
+        defaultEnabled: false,
         run: async () => {
           await recordDailySamples();
         },
@@ -35,7 +36,8 @@ export function registerStrategyForward(app: FastifyInstance): void {
         id: 'strategy.shadowReplay',
         label: '首板择时影子盘·当日重放（1540）',
         defaultCron: '40 15 * * 1-5',
-        defaultEnabled: true,
+        // 默认关：首板打板是短线打法，与中线赛道轮动无关
+        defaultEnabled: false,
         run: async () => {
           await runShadowDaily();
         },

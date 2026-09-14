@@ -169,6 +169,7 @@ import { registerMoneyEffectModule } from './moneyeffect';
 import { registerRegimeModule } from './regime';
 import { registerIndexFlowModule } from './indexflow';
 import { registerBreadthModule } from './breadth';
+import { registerSwingModule } from './swing';
 import { registerBoardsModule } from './boards';
 import { registerConceptsModule } from './concepts';
 import { registerDragonModule } from './dragon';
@@ -1462,6 +1463,10 @@ async function main() {
 
   // 板块新高宽度主线识别（确定性：各板块创新高个股数横向排名 + 持续性判主线 + 收盘快照，删除此行整模块下线）
   registerBreadthModule(app);
+
+  // 波段试探建议（按规则算：力道衰减两级定级 + 区间与存档止损 + 试探级仓位上限，
+  // 通过前向检验前仓位锁在试探规模，删除此行整模块下线）
+  registerSwingModule(app);
 
   // 热门细分概念主线归纳（确定性：概念涨幅 + 主力净流入 + 新高宽度 合成热度分 + 主题归纳，纯只读，删除此行整模块下线）
   registerConceptsModule(app);

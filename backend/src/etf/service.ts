@@ -26,12 +26,19 @@ import {
 } from './data';
 
 // ETF 买卖信号服务：把确定性指标层综合成可执行的操作建议 + 结构化触发价（对齐今日计划 PlanTrigger），
-// 供 /api/etf/*、agent 工具 etf_signals 与今日计划生成共用。判定阈值依据估值百分位法/均线偏离/
-// 折溢价/双动量轮动等公开方法，仅作研判参考，不构成投资建议、不触发任何下单。
+// 供 /api/etf/*、agent 工具 etf_signals 与今日计划生成共用。判定依据均线偏离/折溢价/双动量轮动
+// 等公开方法，仅作研判参考，不构成投资建议、不触发任何下单。
+//
+// 关于「区间位置」这个指标的用法边界（见 data.ts 的 pricePercentile）：
+// 它算的是现价落在近两年收盘区间的哪个位置，**不是基本面估值**。
+// 这里曾把「位置 > 80」直接判成 reduce、文案写「已进入高估分位，分批止盈/减仓」，
+// 结果是一只刚走出主升浪的赛道 ETF 越涨越被劝减仓——而中线主升浪的钱恰恰全在这一段。
+// 现在它只作为「波动可能加大」的提示信息，不再单独触发任何减仓动作；
+// 减仓/离场只认趋势走弱（绝对动量转负）。
 
 // ===== 阈值（集中维护，便于调参） =====
-const PCT_LOW = 20; // 估值位置低分位（买入区）
-const PCT_HIGH = 80; // 估值位置高分位（止盈/减仓区）
+const ZONE_POS_LOW = 20; // 现价处于近两年区间低位（买入区）
+const ZONE_POS_HIGH = 80; // 现价处于近两年区间高位（仅提示波动，不触发减仓）
 const MA_DEEP_DISCOUNT = -10; // 年线深度偏离（超跌捡漏）
 const PREMIUM_WARN = 1; // 折溢价率 % 追高警戒线
 const GRID_MIN_STEP = 1.5; // 网格最小间距 %
@@ -76,8 +83,8 @@ const trig = (type: EtfTrigger['type'], value: number, note: string): EtfTrigger
   note,
 });
 
-/** 综合指标 → 操作建议 + 触发价 + 要点 */
-function decide(
+/** 综合指标 → 操作建议 + 触发价 + 要点（导出供 etfDecide.selfcheck.ts 钉住卖点来源） */
+export function decide(
   m: EtfMetrics,
   premiumPct: number | null,
   grid: EtfGrid | null,
@@ -102,11 +109,15 @@ function decide(
     };
   }
 
-  const inBuyZone = pct != null && (pct < PCT_LOW || (dev != null && dev < MA_DEEP_DISCOUNT));
-  const inSellZone = pct != null && pct > PCT_HIGH;
+  const inBuyZone = pct != null && (pct < ZONE_POS_LOW || (dev != null && dev < MA_DEEP_DISCOUNT));
   const premiumHigh = premiumPct != null && premiumPct > PREMIUM_WARN;
 
-  if (pct != null) notes.push(`估值位置分位 ${pct.toFixed(0)}%（<20% 低估 / >80% 高估）`);
+  if (pct != null) {
+    notes.push(
+      `现价在近两年区间的位置 ${pct.toFixed(0)}%（0% 是两年最低、100% 是两年最高，衡量的是位置高低，不是贵还是便宜）`,
+    );
+    if (pct > ZONE_POS_HIGH) notes.push('已在区间高位，波动会比平时大，但位置高本身不是卖出理由');
+  }
   if (dev != null) notes.push(`年线偏离 ${dev >= 0 ? '+' : ''}${dev.toFixed(1)}%`);
   if (m.momentum != null)
     notes.push(`动量 ${m.momentum >= 0 ? '+' : ''}${m.momentum.toFixed(1)}%（绝对动量${m.absMomentumPositive ? '正' : '负'}）`);
@@ -114,15 +125,12 @@ function decide(
     notes.push(`折溢价 ${premiumPct >= 0 ? '+' : ''}${premiumPct.toFixed(2)}%`);
 
   let action: EtfAction;
-  if (inSellZone) {
-    action = 'reduce';
-    notes.push('已进入高估分位，分批止盈/减仓');
-  } else if (inBuyZone && m.absMomentumPositive) {
+  if (inBuyZone && m.absMomentumPositive) {
     action = 'buy';
-    notes.push('低估 + 趋势向上，右侧买入区');
+    notes.push('价格在区间低位 + 趋势向上，右侧买入区');
   } else if (inBuyZone && !m.absMomentumPositive) {
     action = 'hold';
-    notes.push('估值低但趋势未企稳，左侧观察、等右侧确认再分批');
+    notes.push('价格在区间低位但趋势未企稳，左侧观察、等右侧确认再分批');
   } else if (m.absMomentumPositive && m.momentum != null && m.momentum > 0) {
     action = 'add';
     notes.push('趋势延续，可顺势持有/逢回踩加');
@@ -139,7 +147,12 @@ function decide(
     notes.push('折溢价偏高，避免高溢价买入，等折价回落');
   }
 
-  // 触发价（基于网格水位 / 年线 / 现价兜底）
+  // 触发价（基于网格水位 / 年线 / 现价兜底）。
+  //
+  // 这里全部是**新交易的参考价**：stopLoss 用的是 `现价 * 0.95` 这类跟着现价走的算法，
+  // 只对「现在按这个价进场」有意义。它绝不能被当成已有持仓的有效止损——
+  // 价格越跌这条线越低，实际亏损永远追不上它，止损就永不触发。
+  // 持仓的有效止损锚定成本，在 positions/discipline.ts 里算。
   let buyTrigger: EtfTrigger | null = null;
   let sellTrigger: EtfTrigger | null = null;
   let stopLoss: EtfTrigger | null = null;
@@ -148,12 +161,13 @@ function decide(
   if (action === 'buy' || action === 'add' || action === 'hold') {
     const buyAt = grid?.nextBuy ?? m.ma250 ?? r3(price * 0.985);
     buyTrigger = trig('pullback', buyAt, grid?.nextBuy ? '网格下一档低吸' : '回踩支撑');
-    stopLoss = trig('price', Math.min(buyAt * 0.96, price * 0.95), '破位止损');
+    stopLoss = trig('price', Math.min(buyAt * 0.96, price * 0.95), '新进场的破位止损参考价');
     takeProfit = trig('breakout', grid?.nextSell ?? price * 1.08, '网格上一档/止盈');
   }
-  if (action === 'reduce') {
-    sellTrigger = trig('price', grid?.nextSell ?? price, '高估分位减仓挂单价');
-    takeProfit = trig('breakout', grid?.nextSell ?? price * 1.05, '冲高止盈');
+  // 卖点只来自趋势走弱，不来自「涨得多」。原先此处挂在「区间高位」上，
+  // 于是主升浪途中反复给减仓价；现在改挂 avoid（绝对动量转负）
+  if (action === 'avoid') {
+    sellTrigger = trig('price', grid?.nextSell ?? price, '趋势已走弱，反弹减仓参考价');
   }
 
   return { action, buyTrigger, sellTrigger, stopLoss, takeProfit, notes };
@@ -170,7 +184,7 @@ export async function computeSignal(item: EtfPoolItem): Promise<EtfSignal> {
   }
   const price = quote?.price ?? null;
   const metrics = await computeMetrics(item.code, price);
-  if (metrics.barCount < 60) warnings.push('历史 K 线不足，估值位置/动量指标可能失真');
+  if (metrics.barCount < 60) warnings.push('历史 K 线不足，区间位置/动量指标可能失真');
 
   const iopv = quote?.iopv ?? null;
   // 优先采用集思录权威折溢价率 discount_rt；缺失则用东财 IOPV 二次计算兜底
@@ -211,34 +225,6 @@ export async function computeSignal(item: EtfPoolItem): Promise<EtfSignal> {
     notes: d.notes,
     warning: warnings.length ? warnings.join('；') : null,
   };
-}
-
-/**
- * 只算指定几只 ETF 的信号，不碰全池。
- *
- * 给持仓纪律这类「只关心手上这几只」的调用方用。
- * 全池 `signals()` 会对池里每只单独拉一次实时行情，实测把 `evaluateDiscipline()` 拖到 9-11 秒；
- * 而纪律只用到每只自己的 `stopLoss` / `takeProfit`，跨池的相对动量排名它根本不看。
- *
- * 为什么不给全池结果加缓存：缓存会让**过期的** ETF 信号参与止损判断。
- * 止损线算错的代价远大于多跑几次取数，宁可每次实算这几只。
- *
- * 不在池中的代码直接跳过——它没有池配置，调用方会退回默认纪律。
- */
-export async function signalsFor(codes: string[]): Promise<Map<string, EtfSignal>> {
-  const want = new Set(codes);
-  const items = repo.listPool().filter((it) => want.has(it.code));
-  const list = await Promise.all(
-    items.map((it) =>
-      computeSignal(it).catch(() => null),
-    ),
-  );
-  const out = new Map<string, EtfSignal>();
-  for (const s of list) {
-    // 单只算失败就当没有信号，调用方退回默认纪律；绝不用别只的结果顶替
-    if (s) out.set(s.code, s);
-  }
-  return out;
 }
 
 /** 全池信号 + 双动量相对排名回填 */
@@ -304,7 +290,7 @@ export function formatForAgent(result: EtfSignalsResult): string {
   if (!result.signals.length) return 'ETF 跟踪池为空，请先在 ETF 页添加标的。';
   const lines: string[] = [
     `ETF 跟踪池买卖信号（${result.signals.length} 只，计算于 ${result.asOf}）`,
-    '说明：估值位置分位<20%偏买/>80%偏卖；折溢价>1%警惕追高；动量/排名体现轮动强弱；触发价为程序化参考，仅研判不下单。',
+    '说明：区间位置<20%偏买（位置高不是卖出理由，卖点只看趋势走弱）；折溢价>1%警惕追高；动量/排名体现轮动强弱；触发价为程序化参考，仅研判不下单。',
   ];
   for (const s of result.signals) {
     const head =
@@ -386,7 +372,7 @@ export const ETF_ANALYZE_TASK_NAME = 'ETF 综合研判';
 export const ETF_ANALYZE_PROMPT =
   '对 ETF 跟踪池做一次综合研判，把「操作信号」与「中线赛道轮动」合并为一份报告，供今日计划直接引用。只研判、不下单。\n\n' +
   '交易日校验（默认放行）：仅周一至周五触发，默认按交易日执行；接口异常一律按交易日继续，不据此判休市。\n\n' +
-  '第1步 量化信号底座：用 etf_signals(action=signals) 取全池量化信号（估值分位/折溢价/动量排名/网格水位/操作建议与结构化触发价）。\n' +
+  '第1步 量化信号底座：用 etf_signals(action=signals) 取全池量化信号（区间位置/折溢价/动量排名/网格水位/操作建议与结构化触发价）。区间位置只说明现价在近两年区间的高低，不是估值，禁止据此说「高估该减仓」。\n' +
   '第2步 中线轮动底座：用 etf_rotation_strength 取「跟踪池 + 主题赛道代表 ETF 的轮动榜」——含 5 态（上升/回踩/加速/过热/破位）、相对沪深300强弱 RS、双动量、周线趋势、主力净流入、综合强度。这是中线赛道研判的事实基础，禁止凭空编造 ETF 或状态。\n' +
   '第3步 持仓与消息：用 real_positions 识别已持有 ETF，结合成本/盈亏；对动量排名靠前或处于买入区的候选，用 mx_finance_data 补折溢价/份额、mx_search 补板块消息（重点找有消息催化的强势赛道）。\n' +
   '纪律（中线右侧介入）：涨幅靠后≠该卖（看趋势与 RS，不看当日涨幅）；过热≠还能涨（过热应等回踩而非追高）；RS 跑赢基准才是真强；只做右侧不抄左侧（破位的不接飞刀）。\n\n' +

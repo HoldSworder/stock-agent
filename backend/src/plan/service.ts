@@ -91,7 +91,7 @@ export const PLAN_GEN_PROMPT_LEGACY =
   '第2步 研报机会：用 research_reports(action=discover, days=1) 取当日新研报聚合，找出被密集上调/覆盖的板块与个股机会线索。\n' +
   '第3步 大盘与板块：用 market_snapshot 读大盘指数/成交额/情绪温度/涨停梯队/板块资金流与领涨领跌，定调今日方向与建议仓位。\n' +
   '第4步 持仓与自选：用 real_positions 读真实持仓（只读）、mx_self_select(get) 读自选股，标注需重点对照的标的。\n' +
-  '第4.5步 ETF 计划项：用 etf_signals(action=signals) 取 ETF 跟踪池量化信号（估值分位/折溢价/动量排名/网格水位/操作建议与结构化触发价）；把命中买入区（建议 buy/add）或减仓·止盈区（建议 reduce）的 ETF 一并纳入下方 items——direction 映射为 buy/hold/reduce/sell，source 填 other，并直接采用 etf_signals 返回的 buyTrigger/sellTrigger/stopLoss/takeProfit 作为结构化触发价（折溢价标注缺失的，可用 mx_finance_data 补 IOPV 再定夺追高风险）。处于持有/规避的 ETF 不必入计划。\n' +
+  '第4.5步 ETF 计划项：用 etf_signals(action=signals) 取 ETF 跟踪池量化信号（区间位置/折溢价/动量排名/网格水位/操作建议与结构化触发价；区间位置不是估值，位置高不构成减仓理由）；把命中买入区（建议 buy/add）或趋势走弱区（建议 avoid）的 ETF 一并纳入下方 items——direction 映射为 buy/hold/reduce/sell，source 填 other，并直接采用 etf_signals 返回的 buyTrigger/sellTrigger/stopLoss/takeProfit 作为结构化触发价（折溢价标注缺失的，可用 mx_finance_data 补 IOPV 再定夺追高风险）。处于持有/规避的 ETF 不必入计划。\n' +
   '第5步 综合落库：把上面信息综合成结构化计划，调用 save_today_plan 一次性落库——\n' +
   '  - marketStance：方向(bias)/建议仓位(positionPct)/关键支撑(support)/压力(resistance)/一句话定调(summary)；\n' +
   '  - focusSectors：今日重点板块（名称+强度阶段+理由）；\n' +
@@ -463,11 +463,13 @@ export async function enrichTodayPlanWithEtfReview(runId: string | null): Promis
         return held
           .map(
             (pos) =>
-              `${pos.name}(${pos.code})：已持有，成本${pos.avgCost}，现价${pos.price}，浮盈${pos.holdRate.toFixed(1)}%，仓位${pos.positionRate.toFixed(1)}%`,
+              `${pos.name}(${pos.code})：已持有，成本${pos.avgCost}，现价${pos.price}，浮盈${pctOf(pos.holdRate)}，仓位${pctOf(pos.positionRate)}`,
           )
           .join('\n');
       })
-      .catch(() => '真实持仓：取数失败（按未持有处理）。'),
+      // 取数失败 ≠ 空仓。写「按未持有处理」会让模型据此给出建仓建议，
+      // 而你可能正满仓拿着这只——必须如实说不知道
+      .catch(() => '真实持仓：账户数据没取到，持仓情况未知，不要当作空仓。'),
   ]);
 
   const itemBlock = etfs
@@ -529,6 +531,15 @@ export async function enrichTodayPlanWithEtfReview(runId: string | null): Promis
 }
 
 /** ETF 操作建议方向：由量化信号 action 映射到计划 direction（持仓视角，缺信号默认持有） */
+/**
+ * 小数比例 → 百分数文案。
+ *
+ * `RealPortfolio` 的 `holdRate` / `positionRate` 存的是小数（见 realPositions.ts 的
+ * `marketValue / totalAsset`），直接 `.toFixed()` 加 `%` 会把 30% 的仓位印成 `0%`。
+ * 这些文案既进页面也进喂给模型的上下文，错的比例会一路影响加减仓判断。
+ */
+const pctOf = (frac: number, digits = 1): string => `${(frac * 100).toFixed(digits)}%`;
+
 function etfActionToDirection(action: EtfAction | undefined): DailyPlanItem['direction'] {
   switch (action) {
     case 'buy':
@@ -585,7 +596,7 @@ export async function ensureHeldEtfCoverage(runId: string | null): Promise<strin
     const dir = etfActionToDirection(sig?.action);
     const noteParts = sig?.notes?.length ? sig.notes.join('；') : '';
     const thesis =
-      `持仓 ETF（系统补充：计划未覆盖该持仓，按量化信号给操作）。当前持仓 ${p.positionRate.toFixed(0)}%、浮盈 ${p.holdRate.toFixed(1)}%` +
+      `持仓 ETF（系统补充：计划未覆盖该持仓，按量化信号给操作）。当前持仓 ${pctOf(p.positionRate, 0)}、浮盈 ${pctOf(p.holdRate)}` +
       (noteParts ? `。信号：${noteParts}` : '');
     return {
       code: p.code,
@@ -597,7 +608,7 @@ export async function ensureHeldEtfCoverage(runId: string | null): Promise<strin
       sellTrigger: sig?.sellTrigger ?? null,
       stopLoss: sig?.stopLoss ?? null,
       takeProfit: sig?.takeProfit ?? null,
-      positionHint: `当前 ${p.positionRate.toFixed(0)}%`,
+      positionHint: `当前 ${pctOf(p.positionRate, 0)}`,
       source: 'position',
       confidence: null,
       priority: 1,

@@ -548,7 +548,7 @@ onUnmounted(() => {
                 </el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="估值分位" width="90">
+            <el-table-column label="区间位置" width="90">
               <template #default="{ row }">
                 {{ row.pricePercentile == null ? '—' : row.pricePercentile + '%' }}
               </template>
@@ -675,7 +675,7 @@ onUnmounted(() => {
                 <span class="num" :class="dir(row.maDeviation)">{{ pct(row.maDeviation) }}</span>
               </template>
             </el-table-column>
-            <el-table-column label="分位" width="72" align="right">
+            <el-table-column label="区间位置" width="80" align="right">
               <template #default="{ row }">
                 {{ row.pricePercentile == null ? '—' : row.pricePercentile + '%' }}
               </template>

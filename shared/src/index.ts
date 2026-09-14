@@ -5160,6 +5160,83 @@ export interface ScheduleOverviewItem {
   supersededBy?: string | null;
 }
 
+/**
+ * 定时任务的健康状态。
+ *
+ * 三种「没在跑」必须分开，混成一句「暂无数据」就等于没说：
+ * - `disabled` 被关掉，预期内
+ * - `overdue` 该跑没跑，是故障
+ * - `idle` 还没到点或本周期内没有触发时刻，正常
+ */
+export type TaskHealthStatus = 'ok' | 'overdue' | 'disabled' | 'idle';
+
+export const TASK_HEALTH_LABELS: Record<TaskHealthStatus, string> = {
+  ok: '正常',
+  overdue: '该跑没跑',
+  disabled: '已关闭',
+  idle: '还没到点',
+};
+
+export interface TaskHealthItem {
+  id: string;
+  /** 模块前缀，如 plan / etfwatch */
+  module: string;
+  /** 人读名称 */
+  name: string;
+  cronExpr: string;
+  status: TaskHealthStatus;
+  /** 上一次本该触发的时刻（ISO），已跳过法定节假日；算不出为 null */
+  expectedAt: string | null;
+  /** 上一次成功执行时刻（ISO），从未成功过为 null */
+  lastSuccessAt: string | null;
+  /** 下一次预计触发时刻（ISO），已关闭为 null */
+  nextRunAt: string | null;
+  /** 该跑没跑时落后的天数，其余为 0 */
+  staleDays: number;
+  /** 最近一次失败的原因；成功一次即清除，从未失败为 null */
+  lastError: { at: string; message: string } | null;
+}
+
+/** 任务健康总览：一眼看出系统自己有没有在干活 */
+export interface TaskHealthOverview {
+  items: TaskHealthItem[];
+  /** 该跑没跑的数量 */
+  overdueCount: number;
+  /** 被关闭的数量 */
+  disabledCount: number;
+  /** 生成时刻 */
+  checkedAt: string;
+}
+
+/**
+ * 从按日持仓快照反推出来的成交，**不是**券商给的成交流水。
+ *
+ * `unknown` 不是错误，是诚实：同日先买后卖、分红送股、部分减仓改成本、T+0 回转
+ * 这几种情形下，快照差分给不出唯一答案。此时必须标为说不清，
+ * 而不是给一个看起来精确的数字——用错的账去评判策略，比没有账更糟。
+ */
+export type RealTradeGuessKind = 'buy' | 'sell' | 'unknown';
+
+export const REAL_TRADE_GUESS_LABELS: Record<RealTradeGuessKind, string> = {
+  buy: '买入',
+  sell: '卖出',
+  unknown: '说不清',
+};
+
+export interface RealTradeGuess {
+  /** 发生日 YYYY-MM-DD */
+  tradeDate: string;
+  code: string;
+  name: string;
+  kind: RealTradeGuessKind;
+  /** 变动股数；说不清时可能为 0 */
+  qty: number;
+  /** 当日价格，仅作参考——真实成交价拿不到 */
+  price: number;
+  /** 为什么这么判，人话 */
+  note: string;
+}
+
 /** 全局安全控制状态（交易/模拟总闸） */
 export interface SafetyState {
   /** 总急停：开启后拒绝一切交易/模拟动作 */
@@ -8303,4 +8380,468 @@ export interface SymbolPlanEvaluation {
   needsNewVersion: boolean;
   summary: string;
   evaluatedAt: string;
+}
+
+// ===== 波段试探建议 =====
+// 命名边界：本模块产出的是「按规则算出的试探建议」，在通过前向验收之前不得放大仓位。
+// 原值用于 DB / API / 条件判断，显示名用于浏览器与复制文本，两者不可互换。
+
+/**
+ * 波段判定级别。
+ *
+ * 拆两级而不是一刀切「到底了」：
+ *  - risk_easing：只是下跌力道在衰减，还没有转折证据。这一级永远只能拿试探仓，
+ *    即便将来验收通过也不放大——力道衰减太常见，单靠它开仓等于接飞刀。
+ *  - turn_confirmed：力道衰减之后又出现了独立的价格反转确认（收盘突破确认K线高点，
+ *    或走出一整笔向上）。只有这一级的样本能参与「是否放大仓位」的验收。
+ *
+ * 不叫「缠论一买/一卖」：本模块只做到笔级别，没做线段与趋势段关系，
+ * 宣称完整级别是不诚实的。
+ */
+export type SwingGrade =
+  | 'none'
+  | 'risk_easing_bottom'
+  | 'turn_confirmed_bottom'
+  | 'risk_easing_top'
+  | 'turn_confirmed_top';
+
+/**
+ * 判定级别的界面显示名。
+ *
+ * 刻意不用「已确认见底」「可以买入」这类说法——那是在替使用者下结论。
+ * 这里只陈述观察到了什么条件，买不买由他自己决定。
+ * 必须穷尽所有成员，禁止 `LABELS[v] ?? v` 兜底，漏一个就把英文原值漏给用户。
+ */
+export const SWING_GRADE_LABELS: Record<SwingGrade, string> = {
+  none: '暂无信号',
+  risk_easing_bottom: '下跌力道在衰减',
+  turn_confirmed_bottom: '出现向上转折确认',
+  risk_easing_top: '上涨力道在衰减',
+  turn_confirmed_top: '出现向下转折确认',
+};
+
+/** 缠论买卖点候选的界面显示名。原值是 DB 存值与判断依据，不改字面量，只加这层映射 */
+export const CHAN_SETUP_LABELS: Record<ChanSetup, string> = {
+  none: '无',
+  first_buy_candidate: '底部转折候选',
+  second_buy_candidate: '回踩转强候选',
+  third_buy_candidate: '突破回踩候选',
+  first_sell_candidate: '顶部转折候选',
+  second_sell_candidate: '反弹转弱候选',
+  third_sell_candidate: '破位反抽候选',
+  insufficient: '数据不足，判不了',
+};
+
+/** 赛道类别：决定页面分组，也决定形态能否互相参照（港股与商品的形态不能当 A 股赛道依据） */
+export type SwingTrackCategory = 'broad' | 'industry' | 'overseas' | 'commodity' | 'own';
+
+export const SWING_TRACK_CATEGORY_LABELS: Record<SwingTrackCategory, string> = {
+  broad: '宽基指数',
+  industry: '行业赛道',
+  overseas: '港股与海外',
+  commodity: '商品',
+  own: '我的持仓与自选',
+};
+
+/** 建议持仓的动作类型 */
+export type SwingAdviceEventKind =
+  | 'open_layer1'
+  | 'open_layer2'
+  | 'reduce_half'
+  | 'exit_stop'
+  | 'exit_time'
+  | 'exit_top'
+  | 'cancel_layer2';
+
+/** 动作类型显示名。「按时间退出」不说「时间止损」——后者会被读成又亏了一笔 */
+export const SWING_ADVICE_EVENT_LABELS: Record<SwingAdviceEventKind, string> = {
+  open_layer1: '建第一层',
+  open_layer2: '加第二层',
+  reduce_half: '减一半',
+  exit_stop: '触发止损，全部退出',
+  exit_time: '等太久没走出预期，退出试探仓',
+  exit_top: '顶部信号，减仓',
+  cancel_layer2: '取消第二层（不再加）',
+};
+
+/** 一条关注价位。注意：距离不等于「预计会回调这么多」，只是到这条线还有多远 */
+export interface SwingWatchLevel {
+  /** 价位 */
+  price: number;
+  /** 'below' 在现价下方 / 'above' 在现价上方 */
+  side: 'below' | 'above';
+  /** 距现价百分比（正数） */
+  distancePct: number;
+  /** 这条线怎么来的，如「上一段回踩的低点」 */
+  basis: string;
+}
+
+/** 单标的波段读数 */
+export interface SwingReading {
+  code: string;
+  name: string;
+  /**
+   * K 线周期。日线与 60 分钟线的结论都要给，且不能互相替代：
+   * 顶部形成之前日线的结构还停在上一段方向上，只有 60 分钟线能给出提前提示。
+   */
+  period: KlinePeriod;
+  assetType: 'etf' | 'stock' | 'index';
+  /** 赛道名；持仓/自选标的为空串 */
+  track: string;
+  category: SwingTrackCategory;
+  /** 是否用这只 ETF 代看某个赛道（页面须标注，否则会被当成赛道指数本身） */
+  isTrackProxy: boolean;
+  /** 同赛道候选只数，用于说明「这个赛道有 N 只，取最活跃的这只」 */
+  peerCount: number;
+  grade: SwingGrade;
+  close: number;
+  /** 背驰强度 0~1；无背驰为 null */
+  divergenceStrength: number | null;
+  /** 建议区间；无有效区间为 null。这个区间解决的是下单容差，不是预测精度 */
+  zone: { low: number; high: number } | null;
+  /** 建议产生时存档的初始止损，永不修改 */
+  initialStop: number | null;
+  /**
+   * 追高线：价格越过它就不该再按这个信号进场了。
+   *
+   * 区间解决的是「不用赌那个精确的点位」，追高线解决的是「什么时候这个信号就不作数了」——
+   * 两者缺一不可。只给区间的话，价格早就跑到天上去了，人还会照着那个区间去追。
+   */
+  chaseGuard: number | null;
+  atr14: number | null;
+  /** 上下方关注价位 */
+  watchLevels: SwingWatchLevel[];
+  /** 判定依据逐条，含相反证据 */
+  rationale: string[];
+  /** 与判定相反的证据，单独列出，避免只看到支持的一面 */
+  counterEvidence: string[];
+  /** 信号 K 线收盘时间 */
+  barTime: string | null;
+  /** 数据不足等原因导致判不了时的说明；正常时为 null */
+  unavailableReason: string | null;
+}
+
+/** 建议持仓的一层 */
+export interface SwingAdviceLayer {
+  layer: 1 | 2;
+  /** 该层建议仓位占总资产 % */
+  pct: number;
+  price: number;
+  at: string;
+}
+
+/** 建议持仓状态。必须与真实持仓分开展示，不能混成一个数 */
+export interface SwingAdvice {
+  id: string;
+  code: string;
+  name: string;
+  direction: 'long_bottom' | 'short_top';
+  status: 'open' | 'closed';
+  zone: { low: number; high: number };
+  /** 存档的初始止损，1R 始终按它算 */
+  initialStop: number;
+  /** 当前保护线，只上移不下调 */
+  currentStop: number;
+  layers: SwingAdviceLayer[];
+  /** 当前建议目标仓位占总资产 % */
+  targetPct: number;
+  avgCost: number;
+  /** 是否已触发过 1R 减半 */
+  firstRHit: boolean;
+  /** 第一层建立的交易日 */
+  firstLayerTradeDate: string | null;
+  /** 与真实持仓的差异说明（未按建议执行时会持续偏离） */
+  realPositionPct: number | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** 覆盖缺口：这个赛道暂时没有可交易标的。页面须与「没信号」区分开 */
+export interface SwingTrackGap {
+  track: string;
+  category: SwingTrackCategory;
+  reason: string;
+}
+
+/** 一轮扫描的运行状态。页面必须同时展示快照日期与今日是否成功，否则会把旧建议当成今天的 */
+export interface SwingRunStatus {
+  runId: string;
+  tradeDate: string;
+  mode: 'live' | 'replay';
+  status: 'running' | 'ok' | 'partial' | 'failed';
+  targetCount: number;
+  okCount: number;
+  failures: Array<{ code: string; reason: string }>;
+  dataAsOf: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+}
+
+/** 仓位上限的来由，逐条给出让使用者知道为什么只能买这么多 */
+export interface SwingSizingExplain {
+  /** 最终可执行增量 % */
+  allowedPct: number;
+  /** 单标的上限 % */
+  singleCapPct: number;
+  /** 未验证建议合计上限 % */
+  totalCapPct: number;
+  /** 已被其他建议占用的额度 % */
+  usedPct: number;
+  /** 按单次风险算出的上限 % */
+  riskCapPct: number;
+  /** 真实持仓已有比例 % */
+  realPct: number;
+  /** ETF 盯盘已建议比例 % */
+  etfWatchPct: number;
+  /** 哪一项是最终生效的约束 */
+  binding: 'single' | 'total' | 'risk' | 'already_held';
+  /** 白话说明 */
+  note: string;
+}
+
+/** 波段页整体数据 */
+export interface SwingOverview {
+  run: SwingRunStatus | null;
+  /**
+   * 是否有一轮正在扫。
+   *
+   * 页面必须据此区分「今天还没扫过，去点一下」和「正在扫，等一会」——
+   * 两者显示成同一句话会让人以为功能坏了，然后重复触发扫描。
+   */
+  scanning: boolean;
+  /** 赛道代表标的读数 */
+  tracks: SwingReading[];
+  /** 我的持仓与自选读数 */
+  mine: SwingReading[];
+  /** 当前建议持仓 */
+  advices: SwingAdvice[];
+  /** 暂无可交易标的的赛道 */
+  gaps: SwingTrackGap[];
+  /** 验收状态：未通过时页面须常显提示 */
+  validation: {
+    /** 是否已通过前向验收（未通过则仓位锁在试探级） */
+    passed: boolean;
+    /** 还差什么，逐条白话 */
+    shortfalls: string[];
+    /** 已积累的独立信号次数 */
+    eventCount: number;
+    /** 通过所需次数 */
+    requiredEventCount: number;
+  };
+}
+
+// ===== 赛道轮动看板（驾驶舱首屏）=====
+//
+// 这块只回答三个问题，顺序固定：
+//  1) 我手上这几只赛道 ETF 现在在哪一段
+//  2) 有没有该走的
+//  3) 有没有该进的
+//
+// 它服务的打法是「拿着强赛道，弱了就换到强的去」，一年只有几次动作。
+// 所以默认状态是「继续拿着，什么都不用做」，而这个状态必须被明确写出来——
+// 空白或者「暂无数据」会让人以为系统没算。
+
+/** 底仓的当前动作。与试探仓的动作（减半/按时间退出）是两套，不要混 */
+export type CoreHoldingAction = 'hold' | 'exit_turn_confirmed' | 'exit_structure_broken';
+
+/** 底仓动作显示名。必须穷尽，禁止 `LABELS[v] ?? v` 兜底 */
+export const CORE_HOLDING_ACTION_LABELS: Record<CoreHoldingAction, string> = {
+  hold: '继续拿着',
+  exit_turn_confirmed: '该走了：走势转向已确认',
+  exit_structure_broken: '该走了：结构已破',
+};
+
+/** 看板上的一只持仓 */
+export interface RotationBoardHolding {
+  code: string;
+  name: string;
+  /** 赛道名；取不到赛道归属时为空串 */
+  track: string;
+  /** 占总资产 % */
+  realPct: number;
+  /** 浮动盈亏 % */
+  holdRatePct: number;
+  grade: SwingGrade;
+  close: number;
+  /**
+   * 存档的结构线：跌破它就该走。
+   *
+   * 它取自现价下方最近的那个摆动低点，只上移不下移。
+   * 给不出时为 null（此时 blockedReason 会说明原因），页面不得显示成「没有风险」。
+   */
+  structureLine: number | null;
+  /** 这条线取自哪一波的低点 */
+  structureBasis: string | null;
+  /** 现价距结构线还有多远 %；给不出结构线时为 null */
+  distanceToLinePct: number | null;
+  action: CoreHoldingAction;
+  /** 为什么是这个动作 */
+  reason: string;
+  /** 下一次会改变动作的条件——继续拿着的时候，这一条是最有用的信息 */
+  nextTrigger: string;
+  /** 这一轮没能检查的原因；正常为 null。不得因为它为空就推断「安全」 */
+  blockedReason: string | null;
+}
+
+/**
+ * 一条波段机会的信号依据周期。
+ *
+ * 日线与 60 分钟都要看，但职责不同，不能混为一谈：
+ * 日线噪声少，用它定动作；顶部形成之前日线的结构还停在上一段方向上，
+ * 只有 60 分钟能提前看出苗头，所以它只作提前提示，不单独给可执行数量。
+ */
+export type SwingOpportunityBasis = 'day' | 'intraday_only';
+
+export const SWING_OPPORTUNITY_BASIS_LABELS: Record<SwingOpportunityBasis, string> = {
+  day: '日线信号',
+  intraday_only: '60分钟线先出现，日线还没确认',
+};
+
+/** 机会的来源，页面要能看出「这是我自选里的」还是「系统从全市场扫出来的」 */
+export type SwingOpportunityOrigin = 'track' | 'watchlist';
+
+export const SWING_OPPORTUNITY_ORIGIN_LABELS: Record<SwingOpportunityOrigin, string> = {
+  track: '赛道扫描',
+  watchlist: '我的自选',
+};
+
+/** 一条波段机会：回答「买哪只、什么价位、买多少、什么时候走」 */
+export interface SwingOpportunity {
+  code: string;
+  name: string;
+  track: string;
+  peerCount: number;
+  /** 是否拿这只 ETF 代看整个赛道 */
+  isTrackProxy: boolean;
+  origin: SwingOpportunityOrigin;
+  basis: SwingOpportunityBasis;
+  /** 主判断定级（basis 为 intraday_only 时取自 60 分钟线） */
+  grade: SwingGrade;
+  /** 60 分钟线的提前提示；没有或与主判断同源时为 null */
+  intradayHint: { grade: SwingGrade; barTime: string | null } | null;
+  close: number;
+  /** 下单容差区间，不是预测它会走到哪 */
+  zone: { low: number; high: number } | null;
+  /** 涨过这条线就别按这个信号追了 */
+  chaseGuard: number | null;
+  /** 现价是否已越过追高线。为 true 时不给买入数量 */
+  chaseBlocked: boolean;
+  /** 存档的初始止损 */
+  initialStop: number | null;
+  /** 赚到的钱等于当初打算亏的钱时的价位，到这里减一半 */
+  firstRTarget: number | null;
+  /** 建仓后多少个交易日没走出预期就撤 */
+  timeStopTradeDays: number;
+  /**
+   * 买多少。走的是波段观察那套仓位规则（单标的最多 10%、未验证建议合计最多 20%、
+   * 单笔止损最多亏总资产 0.25%），算不出时为 null，此时 sizingUnavailable 说明原因。
+   */
+  sizing: {
+    allowedPct: number;
+    /** 估算金额（元） */
+    amount: number;
+    /** 估算份数，按 100 份取整 */
+    shares: number;
+    /** 为什么只能买这么多 */
+    note: string;
+    binding: SwingSizingExplain['binding'];
+  } | null;
+  /** 给不出数量的原因；正常为 null。不得显示成「买 0 份」 */
+  sizingUnavailable: string | null;
+  watchLevels: SwingWatchLevel[];
+  rationale: string[];
+  counterEvidence: string[];
+  barTime: string | null;
+}
+
+/** 看板上的一个换入候选 */
+export interface RotationBoardCandidate {
+  code: string;
+  name: string;
+  track: string;
+  /** 同赛道有几只，说明「取最活跃的这只」 */
+  peerCount: number;
+  /** 是否拿这只 ETF 代看整个赛道 */
+  isTrackProxy: boolean;
+  grade: SwingGrade;
+  close: number;
+  /** 下单容差区间，不是预测精度 */
+  zone: { low: number; high: number } | null;
+  /** 建议产生时存档的初始止损 */
+  initialStop: number | null;
+  /** 判定依据逐条 */
+  rationale: string[];
+  /** 相反的证据，必须一起给 */
+  counterEvidence: string[];
+}
+
+/**
+ * 一组换仓：卖哪只、买哪只、先后顺序。
+ *
+ * 现金不够时买入必须等卖出到账，这个先后依赖要写在脸上——
+ * 不写的话两条建议会被当成可以同时执行，而账户里并没有那么多钱。
+ */
+export interface RotationSwap {
+  out: RotationBoardHolding;
+  into: RotationBoardCandidate;
+  /** 卖出后预计释放的金额 */
+  freedAmount: number;
+  /** 是否必须等卖出到账才能买 */
+  needsSaleFirst: boolean;
+  /** 白话说明执行顺序 */
+  note: string;
+}
+
+/**
+ * 大盘那一行：阶段说该拿几成，对上我实际拿了几成。
+ *
+ * 阶段结论来自收盘快照（纯规则、不调模型）；`gapNote` 是这一行的重点——
+ * 「我现在该加还是该减」这个答案只在两个数字碰到一起时才出现。
+ */
+export interface RotationBoardMarket {
+  /** 快照对应的交易日；页面要显示，否则会把上周的结论当今天的 */
+  tradeDate: string | null;
+  phase: MarketRegimePhase | null;
+  /** 该阶段建议的仓位区间原文，如 `60-90%`、`≤30%` */
+  positionRange: string | null;
+  tomorrowBias: MarketRegimeBias | null;
+  suggestedFrequency: MarketRegimeFrequency | null;
+  advice: string;
+  /** 我实际的总仓位 %；读不到为 null */
+  actualPct: number | null;
+  /** over 偏重了 / inside 在区间里 / under 还能加 / unknown 算不出 */
+  stance: 'over' | 'inside' | 'under' | 'unknown';
+  /** 一句话结论，如「你现在 80%，在建议区间里，最多还能加 10 个点」 */
+  gapNote: string;
+  /** 给不出大盘结论的原因；正常为 null */
+  unavailableReason: string | null;
+}
+
+/** 赛道轮动看板 */
+export interface RotationBoard {
+  /** 快照日期与今日运行状态。页面必须显示，否则会把昨天的结论当成今天的 */
+  run: SwingRunStatus | null;
+  /** 是否有一轮正在扫 */
+  scanning: boolean;
+  /** 第零问：大盘现在能不能做、我的仓位是偏重还是还能加 */
+  market: RotationBoardMarket;
+  /** 第一问：手上这几只在哪一段（含继续拿着的，这是默认状态） */
+  holdings: RotationBoardHolding[];
+  /** 第二问：该走的（holdings 里 action 不是 hold 的那些） */
+  exits: RotationBoardHolding[];
+  /**
+   * 第三问：最近有什么机会，每条带完整操作指引（买哪只/什么价位/买多少/何时走）。
+   * 已持有的不在这里，它们在 holdings。
+   */
+  opportunities: SwingOpportunity[];
+  /** 机会太多时截断掉的条数，页面须如实说明有多少没列出来 */
+  opportunitiesOmitted: number;
+  /** 换入候选（换仓配对用的简版，与 opportunities 同源但不带数量） */
+  entries: RotationBoardCandidate[];
+  /** 换仓配对 */
+  swaps: RotationSwap[];
+  /** 账户现金情况；取不到为 null，此时不得按空仓或满仓假设 */
+  cash: { available: number; totalAsset: number; cashPct: number } | null;
+  /** 各来源取数失败说明，页面须如实展示而非静默漏掉 */
+  failures: Array<{ source: string; reason: string }>;
 }

@@ -5,11 +5,16 @@ import { buildPanorama, buildPanoramaLive } from './panorama';
 import { buildActionPlan } from './actions';
 import { addFocus, listFocus, removeFocus, updateFocus } from './focus';
 import { getQuotes } from '../market/eastmoney';
+import { buildRotationBoard } from '../swing/rotationBoard';
 
 // 驾驶舱模块：一屏概览 + 事件时间线（纯只读聚合）。急停沿用 /api/safety/*，此处不重复。
 // server.ts 仅需 registerCockpitModule(app) 一行接入，删除此行整模块下线。
 
 export function registerCockpitModule(app: FastifyInstance): void {
+  // 赛道轮动看板：首屏主位，回答「手上这几只在哪一段 / 有没有该走的 / 有没有该进的」。
+  // 要读真实账户与最近一份波段快照，与实时层同级，前端并行请求
+  app.get('/api/cockpit/rotation', async () => ({ ok: true, data: await buildRotationBoard() }));
+
   app.get('/api/cockpit/overview', () => ({ ok: true, data: buildCockpitOverview() }));
 
   // 今日全景·秒开层：纯本地读取，无网络调用，首屏立刻可见

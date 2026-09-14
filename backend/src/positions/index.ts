@@ -131,7 +131,7 @@ export function registerPositionsModule(app: FastifyInstance): void {
     return { ok: true, data: { enabled: isPushMediumEnabled() } };
   });
 
-  // 日终持仓归因：取某日已落库归因；无 date 取最近一日
+
   app.get<{ Querystring: { date?: string } }>('/api/positions/attribution', (req, reply) => {
     try {
       return { ok: true, data: getAttribution(req.query.date) };

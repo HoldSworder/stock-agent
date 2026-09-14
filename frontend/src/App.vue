@@ -1,23 +1,23 @@
 <script setup lang="ts">
 import {
   Histogram,
+  Wallet,
+  Setting,
+  TrendCharts,
+  Odometer,
+  Bell,
   Memo,
   ChatDotRound,
-  Wallet,
   DataAnalysis,
-  Setting,
   Aim,
-  TrendCharts,
   Files,
   PieChart,
   Opportunity,
   Cpu,
   Compass,
-  Odometer,
   Grid,
   Collection,
-  // Stopwatch,  // 回测下沉后暂未使用，恢复回测导航时一并取消注释
-  Bell,
+  Stopwatch,
   Calendar,
   DataLine,
   ChatLineSquare,
@@ -51,56 +51,52 @@ onUnmounted(() => {
   notifications.dispose();
 });
 
-// 侧边栏按「投资工作流生命周期」分组：行情(输入) → 研判(发现+决策) → 交易(计划+执行) → 复盘(复盘+验证) → 系统(基础设施)
+// 全部页面都在导航里，按「日常 → 加仓前 → 研究 → 系统」由近及远排列。
+//
+// 曾经把导航收到 5 项、其余二十多页只留路由不留入口，那是一次误操作：
+// 这些模块是使用者在学习交易过程中一项项建起来的，找不到等于没有。
+//
+// 处理未经验证的模块，用的是明码标价而不是藏起来——「研究与实验」组的每一项
+// 将在标题旁显示自己的成绩（样本数 + 比随机好多少），成绩不及格的照常能点开看图，
+// 但不进操作台的建议区。显示和采信是两件事。见 docs/adr/0003。
 const groups = [
   {
-    label: '总览',
-    desc: 'COCKPIT',
-    items: [{ to: '/', title: '驾驶舱', desc: 'Cockpit', icon: Odometer }],
+    label: '每天看这里',
+    desc: 'DAILY',
+    items: [
+      { to: '/', title: '驾驶舱', desc: 'Cockpit', icon: Odometer },
+      // 驾驶舱三问的证据层：点进来看「凭什么说该走 / 该进」
+      { to: '/swing', title: '波段观察', desc: 'Swing', icon: TrendCharts },
+      { to: '/positions', title: '持仓与自选', desc: 'Account', icon: Wallet },
+      { to: '/plan', title: '今日计划', desc: 'Plan', icon: Files },
+    ],
   },
   {
-    label: '行情',
+    label: '要加仓时看',
     desc: 'MARKET',
     items: [
       { to: '/market', title: '大盘', desc: 'Market', icon: Histogram },
       { to: '/etf', title: 'ETF', desc: 'ETF', icon: PieChart },
-      { to: '/intel', title: '情报', desc: 'Intel', icon: TrendCharts },
-      { to: '/kol', title: '大V观点', desc: 'KOL', icon: ChatLineSquare },
-    ],
-  },
-  {
-    label: '研判',
-    desc: 'ANALYZE',
-    items: [
       { to: '/screener', title: '选股', desc: 'Screener', icon: Compass },
-      { to: '/decision', title: '决策', desc: 'Decision', icon: Opportunity },
-      { to: '/chat', title: '对话', desc: 'Agent', icon: ChatDotRound },
+      { to: '/intel', title: '情报', desc: 'Intel', icon: Notebook },
     ],
   },
   {
-    label: '交易',
-    desc: 'TRADE',
+    label: '研究与实验',
+    desc: 'RESEARCH',
     items: [
-      { to: '/plan', title: '今日计划', desc: 'War Room', icon: Files },
-      // 归「交易」而非「复盘」：它答的是未来几天在哪转折，是盘前要看的东西
-      { to: '/calendar', title: '转折日历', desc: 'Turning', icon: Calendar },
-      { to: '/watch', title: '实时盯盘', desc: 'Watch', icon: Aim },
-      { to: '/etf-watch', title: 'ETF多周期盯盘', desc: 'ETF Watch', icon: DataLine },
-      { to: '/positions', title: '持仓与自选', desc: 'Account', icon: Wallet },
-    ],
-  },
-  {
-    label: '复盘',
-    desc: 'REVIEW',
-    items: [
-      { to: '/review', title: '复盘', desc: 'Review', icon: Memo },
-      { to: '/accuracy', title: '说准率', desc: 'Accuracy', icon: Aim },
-      { to: '/strategy', title: '战法模拟', desc: 'Strategy', icon: DataAnalysis },
-      { to: '/playbooks', title: '战法库', desc: 'Playbooks', icon: Notebook },
-      { to: '/factors', title: '因子探索', desc: 'Factors', icon: Grid },
+      { to: '/etf-watch', title: 'ETF 盯盘', desc: 'EtfWatch', icon: DataLine },
+      { to: '/watch', title: '个股盯盘', desc: 'Watch', icon: Aim },
       { to: '/modes', title: '模式库', desc: 'Modes', icon: Collection },
-      // 回测下沉：14 天 0 调用且需量化知识维护，移出主导航（路由 /backtest 仍可直达，恢复=取消下行注释）
-      // { to: '/backtest', title: '回测', desc: 'Backtest', icon: Stopwatch },
+      { to: '/backtest', title: '回测', desc: 'Backtest', icon: Stopwatch },
+      { to: '/strategy', title: '战法模拟', desc: 'Strategy', icon: DataAnalysis },
+      { to: '/playbooks', title: '战法库', desc: 'Playbook', icon: Memo },
+      { to: '/factors', title: '因子', desc: 'Factor', icon: Grid },
+      { to: '/accuracy', title: '说准率', desc: 'Accuracy', icon: Opportunity },
+      { to: '/calendar', title: '转折日历', desc: 'Calendar', icon: Calendar },
+      { to: '/kol', title: '大V观点', desc: 'KOL', icon: ChatLineSquare },
+      { to: '/decision', title: '决策复核', desc: 'Decision', icon: Opportunity },
+      { to: '/review', title: '收盘复盘', desc: 'Review', icon: Memo },
     ],
   },
   {
@@ -108,6 +104,7 @@ const groups = [
     desc: 'SYSTEM',
     items: [
       { to: '/core', title: '智能体中枢', desc: 'Core', icon: Cpu },
+      { to: '/chat', title: '对话', desc: 'Chat', icon: ChatDotRound },
       { to: '/settings', title: '系统设置', desc: 'Config', icon: Setting },
     ],
   },

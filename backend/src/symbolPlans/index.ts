@@ -202,6 +202,9 @@ export function registerSymbolPlansModule(app: FastifyInstance): void {
 
   // bar 级条件求值：技术条件只在新 bar 收出后算，不进 10 秒轮询（R19 分频）。
   // 盘中 30 分钟一次覆盖 15m/60m 新 bar；收盘后一次做日线口径复核。
+  //
+  // 四项默认关：标的计划是逐票的短周期计划链路，与「赛道 ETF 中线轮动」不是一回事。
+  // 盘中每 30 分钟一轮复核 + 收盘重算是常态开销，需要时在设置页的定时里逐项打开。
   defineModuleSchedules({
     app,
     module: 'symbolPlans',
@@ -210,7 +213,7 @@ export function registerSymbolPlansModule(app: FastifyInstance): void {
         id: 'symbolPlans.intradayBarEval',
         label: '标的计划盘中 bar 级复核（每 30 分钟）',
         defaultCron: '5,35 9-11,13-14 * * 1-5',
-        defaultEnabled: true,
+        defaultEnabled: false,
         run: async () => {
           await evaluateAllLivePlans();
         },
@@ -219,7 +222,7 @@ export function registerSymbolPlansModule(app: FastifyInstance): void {
         id: 'symbolPlans.closeEval',
         label: '标的计划收盘复核（15:20）',
         defaultCron: '20 15 * * 1-5',
-        defaultEnabled: true,
+        defaultEnabled: false,
         run: async () => {
           await evaluateAllLivePlans();
         },
@@ -230,7 +233,7 @@ export function registerSymbolPlansModule(app: FastifyInstance): void {
         id: 'symbolPlans.closeRegenerate',
         label: '标的计划收盘后自动重算失效计划（15:30）',
         defaultCron: '30 15 * * 1-5',
-        defaultEnabled: true,
+        defaultEnabled: false,
         run: async () => {
           const s = await regenerateStalePlans();
           console.log(
@@ -245,7 +248,7 @@ export function registerSymbolPlansModule(app: FastifyInstance): void {
         id: 'symbolPlans.settleForecasts',
         label: '情景概率预测核对（15:45）',
         defaultCron: '45 15 * * 1-5',
-        defaultEnabled: true,
+        defaultEnabled: false,
         run: async () => {
           const s = await settleDueForecasts();
           console.log(

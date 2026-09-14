@@ -234,7 +234,8 @@ export function registerDecisionModule(app: FastifyInstance): void {
         id: 'decision.reflection',
         label: '决策反思复盘',
         defaultCron: '30 16 * * 1-5',
-        defaultEnabled: true,
+        // 默认关：决策页已从导航下沉
+        defaultEnabled: false,
         run: async () => {
           await reviewPending();
         },

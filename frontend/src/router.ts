@@ -35,6 +35,7 @@ export const router = createRouter({
     { path: '/radar', redirect: '/market' },
     // 研报已并入情报页（研报 Tab）
     { path: '/research', redirect: { path: '/intel', query: { tab: 'research' } } },
+    { path: '/swing', name: 'swing', component: () => import('./views/SwingView.vue') },
     { path: '/etf', name: 'etf', component: () => import('./views/EtfView.vue') },
     { path: '/review', name: 'review', component: () => import('./views/ReviewView.vue') },
     { path: '/accuracy', name: 'accuracy', component: () => import('./views/AccuracyView.vue') },

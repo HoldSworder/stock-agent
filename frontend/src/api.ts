@@ -11,6 +11,7 @@ import type {
   SymbolMark,
   SymbolPlanEvaluation,
   SymbolPlanProjection,
+  SwingOverview,
   SymbolPlanEvent,
   SymbolTradePlan,
   DailyPlanDetail,
@@ -107,6 +108,7 @@ import type {
   CockpitFocusItem,
   CockpitPanorama,
   CockpitPanoramaLive,
+  RotationBoard,
   SafetyState,
   SafetyUpdate,
   DisciplineConfig,
@@ -120,6 +122,7 @@ import type {
   MarketThemeStatus,
   ThemesRefreshResult,
   ScheduleOverviewItem,
+  TaskHealthOverview,
   ResearchAiAnalysis,
   ResearchAnnouncementItem,
   ResearchQuery,
@@ -733,6 +736,17 @@ export const api = {
       unwrap<MarketRegimeHistoryItem[]>(http.get('/market/regime/history', { params: { limit } })),
   },
 
+  // 波段观察（按规则算：力道衰减两级定级 + 区间与存档止损 + 试探级仓位上限）
+  swing: {
+    // 只读最近一份完整快照，不现场重算（一轮扫描要几分钟）
+    overview: () => unwrap<SwingOverview>(http.get('/swing/overview', { timeout: 30000 })),
+    // 手动重扫。几百个标的两个周期，给足超时
+    scan: () =>
+      unwrap<{ runId: string; status: string; targetCount: number; okCount: number }>(
+        http.post('/swing/scan', {}, { timeout: 600000 }),
+      ),
+  },
+
   // 板块新高宽度主线识别（确定性：各板块创新高个股数横向排名 + 持续性判主线）
   breadth: {
     overview: () =>
@@ -879,6 +893,8 @@ export const api = {
   // 调度总览（聚合中央任务 + 模块定时的只读视图）
   schedules: {
     list: () => unwrap<ScheduleOverviewItem[]>(http.get('/schedules', { timeout: 20000 })),
+    // 任务健康：系统自己有没有在干活。与 list 分开——那份是配置视图，这份是状态视图
+    health: () => unwrap<TaskHealthOverview>(http.get('/schedules/health', { timeout: 20000 })),
   },
 
   // 安全控制台（交易/模拟总闸：kill switch + 自动开关）
@@ -891,6 +907,8 @@ export const api = {
 
   // 驾驶舱（一屏概览 + 跨模块事件时间线，纯只读聚合）
   cockpit: {
+    // 赛道轮动看板：首屏主位。要读真实账户与最近一份波段快照，给足超时
+    rotation: () => unwrap<RotationBoard>(http.get('/cockpit/rotation', { timeout: 45000 })),
     overview: () => unwrap<CockpitOverview>(http.get('/cockpit/overview', { timeout: 20000 })),
     timeline: (limit = 40) =>
       unwrap<CockpitEvent[]>(http.get('/cockpit/timeline', { params: { limit } })),

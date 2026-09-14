@@ -2,14 +2,16 @@
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue';
 import dayjs from 'dayjs';
 import { useRoute, useRouter } from 'vue-router';
-import { ElMessage, ElMessageBox } from 'element-plus';
-import { Refresh, Warning, VideoPause, VideoPlay } from '@element-plus/icons-vue';
+import { ElMessage } from 'element-plus';
+import { Refresh } from '@element-plus/icons-vue';
 import { api } from '@/api';
 import { useWatchStore } from '@/stores/watch';
 import AiAnalysisHub from '@/components/AiAnalysisHub.vue';
 import StockLink from '@/components/StockLink.vue';
 import MoneyEffectBadge from '@/components/MoneyEffectBadge.vue';
 import PanoramaPanel from '@/components/PanoramaPanel.vue';
+import RotationBoardPanel from '@/components/RotationBoardPanel.vue';
+import TaskHealthPanel from '@/components/TaskHealthPanel.vue';
 import TodayActionPanel from '@/components/TodayActionPanel.vue';
 import IndexFundFlowPanel from '@/components/IndexFundFlowPanel.vue';
 import CockpitFocusPanel from '@/components/CockpitFocusPanel.vue';
@@ -20,7 +22,6 @@ import type {
   CockpitModuleSummary,
   CockpitOverview,
   PositionAttributionReport,
-  SafetyState,
   TurningCalendar,
   TurningExpect,
   AssertionAccuracyReport,
@@ -29,7 +30,6 @@ import { TURNING_MIN_STREAK, turningActionText } from '@stock-agent/shared';
 
 const data = ref<CockpitOverview | null>(null);
 const loading = ref(false);
-const acting = ref(false);
 // 当日盈亏归因（只读旁路，收盘后落库；驾驶舱仅显示账户贡献 + 最大赢/输家）
 const attribution = ref<PositionAttributionReport | null>(null);
 // 今日主线作战台（旁路：投影自主线共识，含操盘动作标签）
@@ -55,8 +55,6 @@ watch(
 watch(tab, (v) => {
   if (route.query.tab !== v) router.replace({ query: { ...route.query, tab: v } });
 });
-
-const safety = computed<SafetyState | null>(() => data.value?.safety ?? null);
 
 // 自动成交实时流（auto_buy/auto_sell/rejected），经盯盘总线 /ws/watch 推送
 const watchStore = useWatchStore();
@@ -220,83 +218,6 @@ const contribText = (v: number) => (v >= 0 ? '+' : '') + (v * 100).toFixed(2) + 
 // A股 红涨绿跌：正 -> up(红)，负 -> down(绿)
 const dir = (v: number) => (v > 0 ? 'up' : v < 0 ? 'down' : '');
 
-async function doKill() {
-  try {
-    const { value } = await ElMessageBox.prompt(
-      '拉下安全总闸后，系统自己下的模拟动作（本地战法、妙想模拟、盯盘自动卖出）将被立即拒绝。\n注意：它管不到你在券商的真实持仓，该止损的还是要自己去止损。可填写原因：',
-      '急停确认',
-      { confirmButtonText: '确认急停', cancelButtonText: '取消', inputPlaceholder: '急停原因（可选）' },
-    );
-    acting.value = true;
-    const s = await api.safety.kill(value || undefined);
-    if (data.value) data.value.safety = s;
-    ElMessage.success('已拉下安全总闸');
-  } catch (e) {
-    if (e !== 'cancel') ElMessage.error(e instanceof Error ? e.message : String(e));
-  } finally {
-    acting.value = false;
-  }
-}
-
-async function doResume() {
-  try {
-    await ElMessageBox.confirm('确认解除安全总闸？解除后将恢复受各自动开关约束的交易/模拟。', '解除急停', {
-      confirmButtonText: '解除',
-      cancelButtonText: '取消',
-    });
-    acting.value = true;
-    const s = await api.safety.resume();
-    if (data.value) data.value.safety = s;
-    ElMessage.success('已解除安全总闸');
-  } catch (e) {
-    if (e !== 'cancel') ElMessage.error(e instanceof Error ? e.message : String(e));
-  } finally {
-    acting.value = false;
-  }
-}
-
-// 自动本地模拟总闸：开启后才允许 cron/agent 定时任务（尾盘 1445 / 妙想 0933）自动建仓
-async function toggleAutoLocalSim(on: boolean) {
-  try {
-    acting.value = true;
-    const s = await api.safety.update({ autoLocalSimEnabled: on });
-    if (data.value) data.value.safety = s;
-    ElMessage.success(on ? '已开启自动本地模拟' : '已关闭自动本地模拟');
-  } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : String(e));
-  } finally {
-    acting.value = false;
-  }
-}
-
-// 自动外部（妙想）模拟总闸：开启后才允许妙想模拟盘自动下单
-async function toggleAutoExternalSim(on: boolean) {
-  try {
-    acting.value = true;
-    const s = await api.safety.update({ autoExternalSimEnabled: on });
-    if (data.value) data.value.safety = s;
-    ElMessage.success(on ? '已开启自动外部（妙想）模拟' : '已关闭自动外部（妙想）模拟');
-  } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : String(e));
-  } finally {
-    acting.value = false;
-  }
-}
-
-// 手动强制成交闸：开启后手动单可跳过「非交易日/非交易时段」校验（如收盘后按收盘价补录）；关闭则手动强制单亦被拒。急停时一票否决，与本闸无关。
-async function toggleManualForce(on: boolean) {
-  try {
-    acting.value = true;
-    const s = await api.safety.update({ allowManualForceTrade: on });
-    if (data.value) data.value.safety = s;
-    ElMessage.success(on ? '已允许手动强制成交' : '已禁用手动强制成交');
-  } catch (e) {
-    ElMessage.error(e instanceof Error ? e.message : String(e));
-  } finally {
-    acting.value = false;
-  }
-}
-
 const TRADE_KIND_LABEL: Record<'auto_buy' | 'auto_sell' | 'rejected', string> = {
   auto_buy: '自动买入',
   auto_sell: '自动卖出',
@@ -326,121 +247,44 @@ onUnmounted(() => {
       </div>
     </div>
     <div class="page-sub">
-      系统唯一入口：各页结论都汇总在这里，明细点各块「查看 →」展开；急停与跨模块事件时间线常驻。
+      今天做什么，从上往下看一遍就够：大盘能不能做 → 手上这几只 → 最近的机会 → 换仓怎么排。
+      再往下是依据和明细，平时不用展开。
       <span v-if="data" class="as-of">更新于 {{ dayjs(data.asOf).format('MM-DD HH:mm:ss') }}</span>
     </div>
 
     <el-tabs v-model="tab" class="cockpit-tabs">
       <el-tab-pane label="驾驶舱" name="cockpit">
         <div v-loading="loading">
-          <!-- ===== L0 今日总纲：不可折叠。安全状态与数据完整性看不见，
-               整份清单就没法判断可不可信 ===== -->
-          <!-- 安全总闸 / 急停 -->
-          <div v-if="safety" class="safety-bar" :class="{ killed: safety.killSwitch }">
-            <div class="safety-state">
-              <el-icon class="safety-ic">
-                <Warning v-if="safety.killSwitch" />
-                <VideoPlay v-else />
-              </el-icon>
-              <div>
-                <div class="safety-title">
-                  {{ safety.killSwitch ? '安全总闸已拉下（急停中）' : '安全总闸正常' }}
-                  <!-- 必须点明管辖范围：这个闸只拦系统自己下的模拟单，
-                       券商里的真实持仓它一点都管不到。以为拉了闸就不用管止损，是会亏钱的误解 -->
-                  <span class="safety-scope">只管系统下的模拟单，管不到你在券商的真实持仓</span>
-                </div>
-                <div class="safety-meta">
-                  <span class="sw">
-                    自动本地模拟
-                    <el-switch
-                      :model-value="safety.autoLocalSimEnabled"
-                      :disabled="acting || safety.killSwitch"
-                      size="small"
-                      @change="(v: boolean) => toggleAutoLocalSim(v)"
-                    />
-                  </span>
-                  <span class="sep">/</span>
-                  <span class="sw">
-                    自动外部模拟
-                    <el-switch
-                      :model-value="safety.autoExternalSimEnabled"
-                      :disabled="acting || safety.killSwitch"
-                      size="small"
-                      @change="(v: boolean) => toggleAutoExternalSim(v)"
-                    />
-                  </span>
-                  <span class="sep">/</span>
-                  <span class="sw">
-                    手动强制成交
-                    <el-switch
-                      :model-value="safety.allowManualForceTrade"
-                      :disabled="acting || safety.killSwitch"
-                      size="small"
-                      @change="(v: boolean) => toggleManualForce(v)"
-                    />
-                  </span>
-                  <span class="sep">/</span>
-                  <el-popover placement="bottom-start" :width="440" trigger="hover">
-                    <template #reference>
-                      <span class="gate-help">闸门流向 &amp; 全部开关位置 ⓘ</span>
-                    </template>
-                    <div class="gate-map">
-                      <div class="gm-title">自动模拟下单 —— 逐层放行（任一层关 = 拒单）</div>
-                      <ol>
-                        <li>① <b>未急停</b><span class="gm-loc">本驾驶舱 · 急停按钮</span></li>
-                        <li>② <b>自动本地 / 外部模拟</b> 开<span class="gm-loc">本驾驶舱 · 安全条开关</span></li>
-                        <li>
-                          ③ <b>自动模拟总闸</b> + 该战法 <b>白名单</b> 同时开
-                          <span class="gm-loc">「战法」页 · 总闸在「用之后的新数据检验」区，白名单在战法编辑弹窗</span>
-                        </li>
-                        <li>④ <b>交易日 + 交易时段</b><span class="gm-loc">系统自动判定，无开关</span></li>
-                      </ol>
-                      <div class="gm-title">手动强制成交（本驾驶舱开关）</div>
-                      <div class="gm-note">
-                        仅放开「非交易日 / 非交易时段」校验，供收盘后按收盘价补录手动单；急停拉下时仍一票否决，与本闸无关。
-                      </div>
-                    </div>
-                  </el-popover>
-                  <template v-if="safety.killSwitch && safety.killReason">
-                    <span class="sep">/</span><span>原因 {{ safety.killReason }}</span>
-                  </template>
-                </div>
-                <div v-if="!safety.autoLocalSimEnabled" class="safety-hint">
-                  开启后，定时任务（尾盘 1445 / 妙想 0933）方可自动为本地战法账户建仓；还需在「中枢 · 调度」启用对应任务，并在「战法」页开自动模拟总闸 + 战法白名单。仅影响虚拟战法账户，绝不触及真实持仓。
-                </div>
-              </div>
-            </div>
-            <el-button
-              v-if="!safety.killSwitch"
-              type="danger"
-              :icon="VideoPause"
-              :loading="acting"
-              @click="doKill"
-            >
-              急停
-            </el-button>
-            <el-button v-else type="success" :icon="VideoPlay" :loading="acting" @click="doResume">
-              解除急停
-            </el-button>
-          </div>
 
-          <!-- ===== L1 今日动作清单：驾驶舱的主体 =====
-               下面所有区块都降级成它的证据。先回答「今天按顺序做什么」，
-               再让想深究的人往下翻「凭什么这么说」——而不是把几十个读数摊开让人自己合成 -->
+          <!-- ===== L-1 系统在干活吗：排在所有内容之前 =====
+               下面每一块的结论，都建立在「产出它的那个任务真的跑过」这个前提上。
+               而这个前提实测会悄悄不成立：有任务连续四个交易日缺席、有任务被关掉三个月，
+               界面上都看不出来。所以先回答前提，再看结论。
+               正常时它只占一行，不抢位置 -->
+          <TaskHealthPanel />
+
+          <!-- ===== L0 赛道轮动看板：首屏主位 =====
+               打法是「拿着强赛道，弱了就换到强的去」，一年只有几次动作，
+               所以第一眼只该看到三件事：手上这几只在哪一段、有没有该走的、有没有该进的。
+               它用的是底仓规则（swing/coreHolding.ts），不是试探仓那套减半/按天退。 -->
+          <RotationBoardPanel />
+
+          <!-- ===== L1 今日动作清单 =====
+               上面那块只管赛道 ETF 的进出，这里补个股纪律、板块退潮之类的其余动作。
+               再往下所有区块都降级成证据 -->
           <TodayActionPanel ref="actionPanel" />
-
-          <!-- 宽基指数资金流：只常驻一行结论，明细点开才看。
-               放在动作清单之后、证据区之前——它不是买卖动作，但每天值得扫一眼，
-               收进默认折叠的证据区等于看不见 -->
-          <IndexFundFlowPanel compact class="cockpit-flow" />
 
           <!-- ===== L2 证据区：默认折叠 =====
                这些是上面每条动作的依据。折叠不是嫌它们没用，而是它们回答的是
-               「为什么」而不是「做什么」，同时摊开会把动作淹掉 -->
+               「为什么」而不是「做什么」，同时摊开会把动作淹掉。
+               资金流与首板赚钱效应也收进来了：前者要连续记录满 20 个交易日才敢给方向，
+               后者是打板用的温度计，两者都不改变赛道轮动的当天动作 -->
           <div class="ev-bar">
             <button class="ev-toggle" @click="toggleEvidence">
               {{ evidenceOpen ? '收起' : '展开' }}证据区
-              <span class="ev-hint">{{ evidenceOpen ? '' : '全景 · 关注 · 板块 · 归因 · 转折日' }}</span>
+              <span class="ev-hint">
+                {{ evidenceOpen ? '' : '全景 · 资金流 · 关注 · 板块 · 归因 · 转折日' }}
+              </span>
             </button>
           </div>
 
@@ -450,6 +294,9 @@ onUnmounted(() => {
             <div id="ev-panorama" class="ev-block">
               <PanoramaPanel />
             </div>
+
+            <!-- 宽基指数资金流：明细点开才看 -->
+            <IndexFundFlowPanel compact class="cockpit-flow" />
 
             <!-- 首板赚钱效应（883994·最近一次快照，完整趋势见大盘页情绪 tab） -->
             <MoneyEffectBadge v-if="moneyEffect" :money-effect="moneyEffect" class="cockpit-me" />
@@ -888,120 +735,8 @@ onUnmounted(() => {
   margin: 12px 0 4px;
 }
 
-/* ---- 安全总闸 / 急停 ---- */
 .cockpit-me {
   margin: 0 0 12px;
-}
-.safety-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 14px 18px;
-  margin-bottom: 18px;
-  border-radius: var(--radius);
-  border: 1px solid var(--border);
-  background:
-    linear-gradient(90deg, rgba(31, 199, 127, 0.08), transparent 70%),
-    var(--bg-2);
-  border-left: 3px solid var(--status-ok);
-}
-.safety-bar.killed {
-  border-color: var(--border);
-  border-left-color: var(--status-err);
-  background:
-    linear-gradient(90deg, rgba(246, 70, 93, 0.1), transparent 70%),
-    var(--bg-2);
-}
-.safety-state {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-}
-.safety-ic {
-  font-size: 22px;
-  color: var(--status-ok);
-}
-.safety-bar.killed .safety-ic {
-  color: var(--status-err);
-}
-.safety-title {
-  font-family: var(--font-display);
-  font-weight: 600;
-  font-size: 14.5px;
-  color: var(--text-0);
-}
-.safety-scope {
-  margin-left: 8px;
-  font-family: var(--font-body, inherit);
-  font-weight: 400;
-  font-size: 12px;
-  color: var(--text-2, var(--el-text-color-secondary));
-}
-.safety-meta {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  color: var(--text-2);
-  margin-top: 3px;
-}
-.safety-meta .sep {
-  color: var(--border);
-}
-.safety-meta b {
-  font-weight: 600;
-  font-family: var(--font-mono);
-}
-.safety-meta b.on {
-  color: var(--status-warn);
-}
-.safety-meta b.off {
-  color: var(--text-1);
-}
-.safety-meta .sw {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-.safety-hint {
-  margin-top: 6px;
-  font-size: 12px;
-  color: var(--text-2);
-  line-height: 1.5;
-  max-width: 760px;
-}
-.gate-help {
-  cursor: help;
-  color: var(--brand, #409eff);
-  border-bottom: 1px dashed currentColor;
-}
-.gate-map {
-  font-size: 12px;
-  line-height: 1.6;
-  color: var(--text-1);
-}
-.gate-map .gm-title {
-  font-weight: 600;
-  margin: 2px 0 4px;
-}
-.gate-map ol {
-  margin: 0 0 8px;
-  padding-left: 4px;
-  list-style: none;
-}
-.gate-map ol li {
-  margin-bottom: 4px;
-}
-.gate-map .gm-loc {
-  display: block;
-  font-size: 11px;
-  color: var(--text-2);
-  padding-left: 14px;
-}
-.gate-map .gm-note {
-  color: var(--text-2);
 }
 
 /* ---- 自动成交实时流 ---- */

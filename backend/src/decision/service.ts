@@ -1977,7 +1977,7 @@ export async function runIndexDecision(def: IndexDef, opts: RunDecisionOptions =
 
 // ===== ETF 辩论决策（独立精简链路，方向研判）=====
 // ETF 是普通 6 位 secid，K线/技术指标/资金流/分时均直接复用个股取数；只把个股基本面块（财报/筹码/
-// 龙虎榜/解禁/估值/连板）换成 ETF 专属块（折溢价/规模/动量/年线偏离/价格分位/波动）。与指数链路同构：
+// 龙虎榜/解禁/估值/连板）换成 ETF 专属块（折溢价/规模/动量/年线偏离/区间位置/波动）。与指数链路同构：
 // 只给方向研判（看多加仓/中性/看空减仓 + 建议仓位 + 目标/止损价），不拟单、不联动持仓、不进反思闭环。
 
 /** ETF 动作语义标签 */
@@ -2005,7 +2005,7 @@ function formatEtfQuote(q: Awaited<ReturnType<typeof fetchEtfQuote>>): string {
   return parts.length ? parts.join('\n') : 'ETF 实时行情/折溢价不可用。';
 }
 
-/** ETF 确定性指标文本（年线偏离/价格分位/动量/波动/年内区间） */
+/** ETF 确定性指标文本（年线偏离/区间位置/动量/波动/年内区间） */
 function formatEtfMetrics(m: EtfMetrics): string {
   if (m.barCount < 20) return 'ETF 历史指标数据不足。';
   const f2 = (v: number | null): string => (v != null ? v.toFixed(2) : '—');
@@ -2014,7 +2014,12 @@ function formatEtfMetrics(m: EtfMetrics): string {
     `均线：MA20 ${f2(m.ma20)} / MA60 ${f2(m.ma60)} / MA250 ${f2(m.ma250)}${m.maDeviation != null ? `（年线偏离 ${fp(m.maDeviation)}）` : ''}`,
     `区间收益：近20日 ${fp(m.ret20)}，近60日 ${fp(m.ret60)}，近120日 ${fp(m.ret120)}；动量打分 ${m.momentum != null ? m.momentum.toFixed(2) : '—'}（绝对动量${m.absMomentumPositive ? '为正' : '为负/缺失'}）`,
   ];
-  if (m.pricePercentile != null) lines.push(`价格分位（近2年）约 ${m.pricePercentile.toFixed(0)}%（越低越便宜）`);
+  // 这是现价在近两年区间的位置，不是估值。原文案写「越低越便宜」，
+  // 会让分析师把创新高读成高估、把下跌读成便宜
+  if (m.pricePercentile != null)
+    lines.push(
+      `现价在近两年区间的位置约 ${m.pricePercentile.toFixed(0)}%（0=两年最低，100=两年最高；只说位置，不代表贵或便宜）`,
+    );
   if (m.volatility != null) lines.push(`年化波动率 ${m.volatility.toFixed(1)}%`);
   if (m.yearLow != null && m.yearHigh != null) lines.push(`年内区间 [${f2(m.yearLow)}, ${f2(m.yearHigh)}]`);
   return lines.join('\n');
@@ -2035,7 +2040,7 @@ interface EtfPrefetchContext {
   name: string;
   /** 实时行情 + IOPV/折溢价 */
   quoteNote: string;
-  /** 确定性指标：年线偏离/价格分位/动量/波动/年内区间 */
+  /** 确定性指标：年线偏离/区间位置/动量/波动/年内区间 */
   metricsNote: string;
   /** 规模/成交额/换手/当日主力净流入 */
   sizeNote: string;
@@ -2213,7 +2218,7 @@ interface EtfAnalystMeta {
 const ETF_ANALYST_ROLES: EtfAnalystMeta[] = [
   {
     role: '趋势分析师',
-    focus: '判断 ETF 当前所处的中线趋势阶段（上升/震荡/下降、主升浪/回调/筑底），结合均线排列、年线偏离、价格分位、动量与量价配合给出趋势强弱与拐点信号',
+    focus: '判断 ETF 当前所处的中线趋势阶段（上升/震荡/下降、主升浪/回调/筑底），结合均线排列、年线偏离、区间位置、动量与量价配合给出趋势强弱与拐点信号',
     dataKeys: ['kline', 'series', 'metrics', 'quote'],
   },
   {
@@ -2256,7 +2261,7 @@ function buildEtfAnalystPrompt(meta: EtfAnalystMeta, code: string, ctx: EtfPrefe
   };
   const header: Record<EtfDataKey, string> = {
     quote: '=== ETF 实时行情/折溢价 ===',
-    metrics: '=== 按规则计算的指标：年线偏离/价格分位/动量/波动/年内区间 ===',
+    metrics: '=== 按规则计算的指标：年线偏离/区间位置/动量/波动/年内区间 ===',
     size: '=== 规模/成交/资金 ===',
     kline: '=== K线技术位（东财60日线）===',
     series: '=== 近20日逐日量价序列 ===',

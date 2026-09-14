@@ -6,6 +6,7 @@ import { api, clearToken } from '@/api';
 import type { AppSettings } from '@stock-agent/shared';
 import DataSourceView from './DataSourceView.vue';
 import OpsView from './OpsView.vue';
+import SafetyGatePanel from '@/components/SafetyGatePanel.vue';
 
 const router = useRouter();
 const route = useRoute();
@@ -150,6 +151,11 @@ onMounted(load);
     <div class="page-sub">
       数据源凭据 / 模型与推送 / 数据库维护都集中在这里。三类配置各自独立保存。
     </div>
+
+    <!-- 安全总闸：从驾驶舱首屏挪过来的。它只拦系统自己下的模拟单，
+         管不到你在券商的真实持仓，所以不该占着首屏的位置；
+         但拉闸是出事时要立刻找得到的东西，所以放在设置页最上方常显，不进 Tab -->
+    <SafetyGatePanel />
 
     <el-tabs v-model="tab" class="settings-tabs">
       <el-tab-pane label="数据源" name="datasource" lazy>

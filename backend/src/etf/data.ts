@@ -92,7 +92,13 @@ export interface EtfMetrics {
   ma250: number | null;
   /** 年线（MA250）偏离度 % */
   maDeviation: number | null;
-  /** 现价在窗口收盘区间的百分位 0-100 */
+  /**
+   * 现价落在近两年收盘区间的位置 0-100（0 = 两年最低，100 = 两年最高）。
+   *
+   * 它是 `(现价 - 区间最低) / (区间最高 - 区间最低)`，只是个**位置**，
+   * 既不是基本面估值，也不是「历史上有多少时间比现在便宜」那种真百分位。
+   * 不要拿它当低估/高估的依据，更不要单独用它触发减仓。
+   */
   pricePercentile: number | null;
   /** 20 日收益 % */
   ret20: number | null;
@@ -115,7 +121,7 @@ export interface EtfMetrics {
 }
 
 const YEAR_DAYS = 244;
-/** 估值位置代理窗口：约 2 年 */
+/** 区间位置的回看窗口：约 2 年 */
 const PERCENTILE_WINDOW = YEAR_DAYS * 2;
 
 function mean(arr: number[]): number {

@@ -1539,6 +1539,7 @@ export const positionAttributions = sqliteTable(
   }),
 );
 
+
 /** 回测运行记录（单标的信号级 / 组合级）：曲线与流水以 JSON 列内联存储 */
 export const backtestRuns = sqliteTable(
   'backtest_runs',
@@ -1711,5 +1712,281 @@ export const kolPosts = sqliteTable(
   (t) => ({
     byTime: index('idx_kol_posts_time').on(t.createdAt),
     byUid: index('idx_kol_posts_uid').on(t.uid),
+  }),
+);
+
+// ===== 波段试探建议模块 =====
+// 表分五组：规则版本 / 运行批次 / 读数快照 / 建议持仓（状态 + 事件）/ 验收（样本 + 结果）。
+//
+// 为什么规则版本要单独一张表：这套判定规则在通过前向验收之前只能给试探仓位，
+// 而「验收用的样本必须产生于规则定版之后」是这件事唯一的防作弊约束。
+// 把版本与生效交易日落库，样本才有资格判定的依据，否则调完参数拿旧数据给自己验收，
+// 算出来的胜率没有任何意义。
+
+/** 波段规则版本：任何会改变信号/动作/仓位/退出结果的改动都必须升版 */
+export const swingRuleVersions = sqliteTable('swing_rule_versions', {
+  version: text('version').primaryKey(),
+  /** 规则清单的内容哈希，用于识别「参数变了但版本号忘了升」 */
+  ruleHash: text('rule_hash').notNull(),
+  /** 规则清单 JSON：背驰阈值/笔确认/周期/区间与 ATR 参数/两层比例/追高线/止损止盈/时间止损/风险上限/事件去重/对照方式/结果判定/门槛 */
+  ruleManifest: text('rule_manifest').notNull(),
+  activatedAt: text('activated_at').notNull(),
+  /** 验收样本资格起始交易日 = activatedAt 所在交易日的下一个交易日 */
+  eligibleFromTradeDate: text('eligible_from_trade_date').notNull(),
+  /** active | superseded */
+  status: text('status').notNull().default('active'),
+});
+
+/** 一轮扫描的运行批次：使「保留上一份完整快照」与「今天哪些标的失败」可同时表达 */
+export const swingRuns = sqliteTable(
+  'swing_runs',
+  {
+    id: text('id').primaryKey(),
+    tradeDate: text('trade_date').notNull(),
+    ruleVersion: text('rule_version').notNull(),
+    /** live | replay：replay 永久不得用于验收放行 */
+    mode: text('mode').notNull().default('live'),
+    /** running | ok | partial | failed */
+    status: text('status').notNull().default('running'),
+    targetCount: integer('target_count').notNull().default(0),
+    okCount: integer('ok_count').notNull().default(0),
+    /** 失败标的与原因 JSON，页面须如实展示而非静默漏掉 */
+    failures: text('failures').notNull().default('[]'),
+    /** 数据截止时刻，判断快照新鲜度用 */
+    dataAsOf: text('data_as_of'),
+    startedAt: text('started_at').notNull(),
+    finishedAt: text('finished_at'),
+  },
+  (t) => ({
+    byDate: index('idx_swing_runs_date').on(t.tradeDate),
+  }),
+);
+
+/** 每轮每标的的结构读数快照 */
+export const swingSnapshots = sqliteTable(
+  'swing_snapshots',
+  {
+    id: text('id').primaryKey(),
+    runId: text('run_id').notNull(),
+    tradeDate: text('trade_date').notNull(),
+    code: text('code').notNull(),
+    name: text('name').notNull(),
+    /**
+     * K 线周期。日线与 60 分钟线的结论都要存，且不能互相替代：
+     * 顶部形成前，日线的结构还停在上一段方向上，只有 60 分钟线能给出提前提示；
+     * 而日线的结论噪声更少、更适合作为主判断。两者各存一条。
+     */
+    period: text('period').notNull().default('day'),
+    /** etf | stock | index */
+    assetType: text('asset_type').notNull().default('etf'),
+    /** 赛道名；标的为持仓/自选时为空串 */
+    track: text('track').notNull().default(''),
+    /** broad | industry | overseas | commodity | own */
+    category: text('category').notNull().default('own'),
+    /** 该标的是否作为某赛道的代表被扫（用 ETF 代看板块时页面要标注） */
+    isTrackProxy: integer('is_track_proxy', { mode: 'boolean' }).notNull().default(false),
+    /** 判定级别：none | risk_easing_bottom | turn_confirmed_bottom | risk_easing_top | turn_confirmed_top */
+    grade: text('grade').notNull().default('none'),
+    /** 底/顶背驰强度 0~1，无背驰为 null */
+    divergenceStrength: real('divergence_strength'),
+    /** 区间下沿/上沿；无有效区间为 null */
+    zoneLow: real('zone_low'),
+    zoneHigh: real('zone_high'),
+    /** 建议产生时存档的初始止损，永不修改 */
+    initialStop: real('initial_stop'),
+    atr14: real('atr14'),
+    close: real('close').notNull().default(0),
+    /** 下方/上方关注位及距离 JSON（不是「预计回调幅度」，两者语义不同） */
+    watchLevels: text('watch_levels').notNull().default('[]'),
+    /** 判定依据逐条 JSON，含相反证据 */
+    rationale: text('rationale').notNull().default('[]'),
+    /** 信号 K 线收盘时间，与发现时刻区分，验收按此对齐 */
+    barTime: text('bar_time'),
+    /** 当时市场阶段（主升/反弹/震荡/退潮），验收按阶段分层统计用 */
+    marketPhase: text('market_phase'),
+    ruleVersion: text('rule_version').notNull(),
+    ruleHash: text('rule_hash').notNull(),
+    /** 是否有资格进入验收样本 */
+    validationEligible: integer('validation_eligible', { mode: 'boolean' })
+      .notNull()
+      .default(false),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({
+    byRun: index('idx_swing_snapshots_run').on(t.runId),
+    byCodeDate: index('idx_swing_snapshots_code_date').on(t.code, t.tradeDate, t.period),
+    byGrade: index('idx_swing_snapshots_grade').on(t.grade),
+  }),
+);
+
+/** 建议持仓当前状态（与真实持仓分开，页面不得混成一个数） */
+export const swingAdviceState = sqliteTable(
+  'swing_advice_state',
+  {
+    id: text('id').primaryKey(),
+    code: text('code').notNull(),
+    name: text('name').notNull(),
+    /** 信号来源，固定 'swing'；留字段是为了将来多来源时不必改主键 */
+    source: text('source').notNull().default('swing'),
+    ruleVersion: text('rule_version').notNull(),
+    /** long_bottom | short_top（本模块只做多，top 仅用于减仓） */
+    direction: text('direction').notNull().default('long_bottom'),
+    /** open | closed */
+    status: text('status').notNull().default('open'),
+    zoneLow: real('zone_low').notNull().default(0),
+    zoneHigh: real('zone_high').notNull().default(0),
+    /** 建议产生时存档，永不修改。1R 始终按它算 */
+    initialStop: real('initial_stop').notNull().default(0),
+    /** 只能上移，禁止下调 */
+    currentStop: real('current_stop').notNull().default(0),
+    /** 各层建议比例与触发价 JSON，如 {"1":{"pct":4,"price":1.23,"at":"..."}} */
+    layers: text('layers').notNull().default('{}'),
+    /** 当前建议目标仓位占总资产 %（占用未验证额度按此计） */
+    targetPct: real('target_pct').notNull().default(0),
+    /** 建议成本均价 */
+    avgCost: real('avg_cost').notNull().default(0),
+    /** 建仓以来最高价，跟踪保护线用 */
+    peakPrice: real('peak_price').notNull().default(0),
+    /** 是否已触发过 1R 减半（触发后取消未建的第二层） */
+    firstRHit: integer('first_r_hit', { mode: 'boolean' }).notNull().default(false),
+    /** 第一层建立的交易日，时间止损按它数 10 个交易日 */
+    firstLayerTradeDate: text('first_layer_trade_date'),
+    /** 乐观锁，防同轮多次写入串号 */
+    stateVersion: integer('state_version').notNull().default(1),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => ({
+    byCode: index('idx_swing_advice_state_code').on(t.code),
+    byStatus: index('idx_swing_advice_state_status').on(t.status),
+  }),
+);
+
+/** 建议持仓事件流：与状态变更同一事务写入，用信号 ID 防重复 */
+export const swingAdviceEvents = sqliteTable(
+  'swing_advice_events',
+  {
+    id: text('id').primaryKey(),
+    stateId: text('state_id').notNull(),
+    code: text('code').notNull(),
+    /** open_layer1 | open_layer2 | reduce_half | exit_stop | exit_time | exit_top | cancel_layer2 */
+    kind: text('kind').notNull(),
+    /** 幂等键：同一信号重复投递不产生第二条事件 */
+    signalKey: text('signal_key').notNull(),
+    pctBefore: real('pct_before').notNull().default(0),
+    pctAfter: real('pct_after').notNull().default(0),
+    price: real('price').notNull().default(0),
+    /** 触发依据文本 */
+    reason: text('reason').notNull().default(''),
+    /** 数据日期，事后核对用 */
+    dataDate: text('data_date'),
+    tradeDate: text('trade_date').notNull(),
+    ruleVersion: text('rule_version').notNull(),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({
+    uniqSignal: uniqueIndex('idx_swing_advice_events_signal').on(t.signalKey),
+    byState: index('idx_swing_advice_events_state').on(t.stateId),
+    byCode: index('idx_swing_advice_events_code').on(t.code),
+  }),
+);
+
+/**
+ * 底仓结构线存档：一条 = 一只被纳入中长线管理的持仓。
+ *
+ * 为什么必须落库而不是每天重算：结构线取「现价下方最近的摆动低点」，
+ * 每天重算的话价格一跌、下方最近的低点就换成更低的那个，线跟着往下走——
+ * 那正是 ETF 持仓止损曾经踩过的坑（引用按现价生成的参考价，止损永不触发）。
+ * 存档 + 只上移，才能让这条线成为真的保护线。
+ */
+export const swingCoreHoldings = sqliteTable(
+  'swing_core_holdings',
+  {
+    code: text('code').primaryKey(),
+    name: text('name').notNull(),
+    /** 赛道名，页面分组用 */
+    track: text('track').notNull().default(''),
+    /** 存档的结构线价格，只上移 */
+    structureLine: real('structure_line').notNull(),
+    /** 这条线取自哪一波的低点，页面要能说清「凭什么是这个价」 */
+    structureBasis: text('structure_basis').notNull().default(''),
+    /** 首次存档的交易日 */
+    archivedAt: text('archived_at').notNull(),
+    /** 结构线最近一次上移的交易日 */
+    raisedAt: text('raised_at'),
+    /** 产生这条线的规则版本，改规则后要能分辨哪些线是老规则给的 */
+    ruleVersion: text('rule_version').notNull().default(''),
+    createdAt: text('created_at').notNull(),
+    updatedAt: text('updated_at').notNull(),
+  },
+  (t) => ({
+    byTrack: index('idx_swing_core_holdings_track').on(t.track),
+  }),
+);
+
+/** 验收样本：一条 = 一个独立信号事件或其配对的随机对照日 */
+export const swingValidationSamples = sqliteTable(
+  'swing_validation_samples',
+  {
+    id: text('id').primaryKey(),
+    ruleVersion: text('rule_version').notNull(),
+    ruleHash: text('rule_hash').notNull(),
+    code: text('code').notNull(),
+    /** bottom | top */
+    direction: text('direction').notNull(),
+    /** real | control：control 为匹配的随机非信号日 */
+    kind: text('kind').notNull(),
+    /** 同一真实事件与其对照共享的分组键 */
+    eventKey: text('event_key').notNull(),
+    /** 重采样分块键，按自然周（按交易日分块处理不了跨日连续行情） */
+    blockKey: text('block_key').notNull(),
+    tradeDate: text('trade_date').notNull(),
+    /** 信号 K 线收盘时间；观察窗口起点必须晚于它 */
+    barTime: text('bar_time').notNull(),
+    basePrice: real('base_price').notNull(),
+    atr14: real('atr14').notNull(),
+    targetPrice: real('target_price').notNull(),
+    invalidPrice: real('invalid_price').notNull(),
+    marketPhase: text('market_phase'),
+    track: text('track').notNull().default(''),
+    /** hit | miss | timeout | pending；timeout 计失败，不得排除 */
+    outcome: text('outcome').notNull().default('pending'),
+    settledAt: text('settled_at'),
+    createdAt: text('created_at').notNull(),
+  },
+  (t) => ({
+    byVersion: index('idx_swing_val_samples_version').on(t.ruleVersion, t.direction),
+    byEvent: index('idx_swing_val_samples_event').on(t.eventKey),
+    byOutcome: index('idx_swing_val_samples_outcome').on(t.outcome),
+  }),
+);
+
+/** 验收结果：仓位计算侧查「当前版本+哈希是否存在 passed」来决定能否放大 */
+export const swingValidationResults = sqliteTable(
+  'swing_validation_results',
+  {
+    id: text('id').primaryKey(),
+    ruleVersion: text('rule_version').notNull(),
+    ruleHash: text('rule_hash').notNull(),
+    direction: text('direction').notNull(),
+    /** passed | rejected | insufficient */
+    verdict: text('verdict').notNull(),
+    eventCount: integer('event_count').notNull().default(0),
+    tradeDateCount: integer('trade_date_count').notNull().default(0),
+    blockCount: integer('block_count').notNull().default(0),
+    /** 真实命中率 % */
+    realRate: real('real_rate').notNull().default(0),
+    /** 对照命中率 % */
+    controlRate: real('control_rate').notNull().default(0),
+    /** 点估计领先百分点 */
+    edge: real('edge').notNull().default(0),
+    /** 95% 保守下界领先百分点 */
+    edgeLower: real('edge_lower').notNull().default(0),
+    /** 未达标原因逐条 JSON */
+    shortfalls: text('shortfalls').notNull().default('[]'),
+    computedAt: text('computed_at').notNull(),
+  },
+  (t) => ({
+    byVersion: index('idx_swing_val_results_version').on(t.ruleVersion, t.direction),
   }),
 );

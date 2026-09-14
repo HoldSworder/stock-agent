@@ -960,6 +960,162 @@ CREATE TABLE IF NOT EXISTS kol_posts (
 );
 CREATE INDEX IF NOT EXISTS idx_kol_posts_time ON kol_posts(created_at);
 CREATE INDEX IF NOT EXISTS idx_kol_posts_uid ON kol_posts(uid);
+
+CREATE TABLE IF NOT EXISTS swing_rule_versions (
+  version TEXT PRIMARY KEY,
+  rule_hash TEXT NOT NULL,
+  rule_manifest TEXT NOT NULL,
+  activated_at TEXT NOT NULL,
+  eligible_from_trade_date TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'active'
+);
+
+CREATE TABLE IF NOT EXISTS swing_runs (
+  id TEXT PRIMARY KEY,
+  trade_date TEXT NOT NULL,
+  rule_version TEXT NOT NULL,
+  mode TEXT NOT NULL DEFAULT 'live',
+  status TEXT NOT NULL DEFAULT 'running',
+  target_count INTEGER NOT NULL DEFAULT 0,
+  ok_count INTEGER NOT NULL DEFAULT 0,
+  failures TEXT NOT NULL DEFAULT '[]',
+  data_as_of TEXT,
+  started_at TEXT NOT NULL,
+  finished_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_swing_runs_date ON swing_runs(trade_date);
+
+CREATE TABLE IF NOT EXISTS swing_snapshots (
+  id TEXT PRIMARY KEY,
+  run_id TEXT NOT NULL,
+  trade_date TEXT NOT NULL,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  period TEXT NOT NULL DEFAULT 'day',
+  asset_type TEXT NOT NULL DEFAULT 'etf',
+  track TEXT NOT NULL DEFAULT '',
+  category TEXT NOT NULL DEFAULT 'own',
+  is_track_proxy INTEGER NOT NULL DEFAULT 0,
+  grade TEXT NOT NULL DEFAULT 'none',
+  divergence_strength REAL,
+  zone_low REAL,
+  zone_high REAL,
+  initial_stop REAL,
+  atr14 REAL,
+  close REAL NOT NULL DEFAULT 0,
+  watch_levels TEXT NOT NULL DEFAULT '[]',
+  rationale TEXT NOT NULL DEFAULT '[]',
+  bar_time TEXT,
+  market_phase TEXT,
+  rule_version TEXT NOT NULL,
+  rule_hash TEXT NOT NULL,
+  validation_eligible INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_swing_snapshots_run ON swing_snapshots(run_id);
+CREATE INDEX IF NOT EXISTS idx_swing_snapshots_code_date ON swing_snapshots(code, trade_date, period);
+CREATE INDEX IF NOT EXISTS idx_swing_snapshots_grade ON swing_snapshots(grade);
+
+CREATE TABLE IF NOT EXISTS swing_advice_state (
+  id TEXT PRIMARY KEY,
+  code TEXT NOT NULL,
+  name TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'swing',
+  rule_version TEXT NOT NULL,
+  direction TEXT NOT NULL DEFAULT 'long_bottom',
+  status TEXT NOT NULL DEFAULT 'open',
+  zone_low REAL NOT NULL DEFAULT 0,
+  zone_high REAL NOT NULL DEFAULT 0,
+  initial_stop REAL NOT NULL DEFAULT 0,
+  current_stop REAL NOT NULL DEFAULT 0,
+  layers TEXT NOT NULL DEFAULT '{}',
+  target_pct REAL NOT NULL DEFAULT 0,
+  avg_cost REAL NOT NULL DEFAULT 0,
+  peak_price REAL NOT NULL DEFAULT 0,
+  first_r_hit INTEGER NOT NULL DEFAULT 0,
+  first_layer_trade_date TEXT,
+  state_version INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_swing_advice_state_code ON swing_advice_state(code);
+CREATE INDEX IF NOT EXISTS idx_swing_advice_state_status ON swing_advice_state(status);
+
+CREATE TABLE IF NOT EXISTS swing_advice_events (
+  id TEXT PRIMARY KEY,
+  state_id TEXT NOT NULL,
+  code TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  signal_key TEXT NOT NULL,
+  pct_before REAL NOT NULL DEFAULT 0,
+  pct_after REAL NOT NULL DEFAULT 0,
+  price REAL NOT NULL DEFAULT 0,
+  reason TEXT NOT NULL DEFAULT '',
+  data_date TEXT,
+  trade_date TEXT NOT NULL,
+  rule_version TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_swing_advice_events_signal ON swing_advice_events(signal_key);
+CREATE INDEX IF NOT EXISTS idx_swing_advice_events_state ON swing_advice_events(state_id);
+CREATE INDEX IF NOT EXISTS idx_swing_advice_events_code ON swing_advice_events(code);
+
+CREATE TABLE IF NOT EXISTS swing_core_holdings (
+  code TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  track TEXT NOT NULL DEFAULT '',
+  structure_line REAL NOT NULL,
+  structure_basis TEXT NOT NULL DEFAULT '',
+  archived_at TEXT NOT NULL,
+  raised_at TEXT,
+  rule_version TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_swing_core_holdings_track ON swing_core_holdings(track);
+
+CREATE TABLE IF NOT EXISTS swing_validation_samples (
+  id TEXT PRIMARY KEY,
+  rule_version TEXT NOT NULL,
+  rule_hash TEXT NOT NULL,
+  code TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  event_key TEXT NOT NULL,
+  block_key TEXT NOT NULL,
+  trade_date TEXT NOT NULL,
+  bar_time TEXT NOT NULL,
+  base_price REAL NOT NULL,
+  atr14 REAL NOT NULL,
+  target_price REAL NOT NULL,
+  invalid_price REAL NOT NULL,
+  market_phase TEXT,
+  track TEXT NOT NULL DEFAULT '',
+  outcome TEXT NOT NULL DEFAULT 'pending',
+  settled_at TEXT,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_swing_val_samples_version ON swing_validation_samples(rule_version, direction);
+CREATE INDEX IF NOT EXISTS idx_swing_val_samples_event ON swing_validation_samples(event_key);
+CREATE INDEX IF NOT EXISTS idx_swing_val_samples_outcome ON swing_validation_samples(outcome);
+
+CREATE TABLE IF NOT EXISTS swing_validation_results (
+  id TEXT PRIMARY KEY,
+  rule_version TEXT NOT NULL,
+  rule_hash TEXT NOT NULL,
+  direction TEXT NOT NULL,
+  verdict TEXT NOT NULL,
+  event_count INTEGER NOT NULL DEFAULT 0,
+  trade_date_count INTEGER NOT NULL DEFAULT 0,
+  block_count INTEGER NOT NULL DEFAULT 0,
+  real_rate REAL NOT NULL DEFAULT 0,
+  control_rate REAL NOT NULL DEFAULT 0,
+  edge REAL NOT NULL DEFAULT 0,
+  edge_lower REAL NOT NULL DEFAULT 0,
+  shortfalls TEXT NOT NULL DEFAULT '[]',
+  computed_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_swing_val_results_version ON swing_validation_results(rule_version, direction);
 `;
 
 /**
@@ -1256,6 +1412,16 @@ function warnOnSchemaDrift(): void {
     symbol_plan_forecasts: ['secid', 'settle_note'],
     symbol_trade_plan_events: ['plan_version', 'condition_id', 'note'],
     playbook_backtests: ['source', 'metrics', 'trades', 'equity', 'notes', 'spec'],
+    // 波段模块：这几列都是「漏了会静默出错」的类型——
+    // initial_stop 与 current_stop 混用会让 1R 随保护线上移而缩水，
+    // validation_eligible 缺失会让定版前的数据混进验收，rule_hash 缺失则识别不出偷偷改参数。
+    swing_snapshots: ['rule_hash', 'validation_eligible', 'bar_time', 'market_phase', 'period'],
+    swing_advice_state: ['initial_stop', 'current_stop', 'first_r_hit', 'state_version'],
+    swing_advice_events: ['signal_key', 'pct_before', 'pct_after'],
+    // structure_line 缺失会让底仓退回「每天重算」，而重算的线会随价格下跌而放低
+    swing_core_holdings: ['structure_line', 'structure_basis', 'raised_at'],
+    swing_validation_samples: ['event_key', 'block_key', 'target_price', 'invalid_price'],
+    swing_validation_results: ['edge_lower', 'block_count', 'shortfalls'],
   };
   for (const [table, cols] of Object.entries(required)) {
     try {

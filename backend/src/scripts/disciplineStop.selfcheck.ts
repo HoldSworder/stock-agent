@@ -10,7 +10,7 @@ process.env.DATABASE_PATH = join(tmpDir, 'test.sqlite');
 
 const { ensureSchema } = await import('../db/migrate');
 const { db, schema } = await import('../db/client');
-const { getPendingStopMap, isEtfPosition } = await import('../positions/discipline');
+const { getPendingStopMap, isEtfPosition, resolveRule } = await import('../positions/discipline');
 
 ensureSchema();
 
@@ -68,5 +68,32 @@ assert.equal(isEtfPosition('113050', '南银转债'), false, '沪市可转债不
 assert.equal(isEtfPosition('123123', '某某转债'), false, '深市可转债不得按 ETF 放宽风控');
 assert.equal(isEtfPosition('110059', '浦发转债'), false, '110 开头可转债同样不得命中');
 
+// 持仓生效止损必须只依赖成本与配置，**不依赖现价**。
+// 这里曾引用 etf/service 按现价生成的新交易参考止损（min(下一档买价*0.96, 现价*0.95)），
+// 于是价格越跌止损线越低、实际亏损永远追不上它，止损永不触发。
+const etfPos = (price: number): Parameters<typeof resolveRule>[0] => ({
+  code: '512880',
+  name: '证券ETF',
+  market: 'SH',
+  qty: 10000,
+  price,
+  avgCost: 10,
+  marketValue: price * 10000,
+  holdProfit: (price - 10) * 10000,
+  holdRate: (price - 10) / 10,
+  todayProfit: 0,
+  todayRate: 0,
+  positionRate: 0.3,
+  holdDays: 40,
+});
+const cfg = { stopLossPct: 8, takeProfitPct: 25, maxHoldDays: null, singleMaxWeightPct: 30, totalMaxPositionPct: 90 };
+const atCost = resolveRule(etfPos(10), 'etf', cfg, new Map());
+const down20 = resolveRule(etfPos(8), 'etf', cfg, new Map());
+assert.equal(atCost.stopLossPct, down20.stopLossPct, '现价下跌不得改变持仓生效止损线');
+assert.equal(atCost.takeProfitPct, down20.takeProfitPct, '现价变动不得改变持仓生效止盈线');
+assert.equal(down20.stopLossPct, 12, 'ETF 持仓止损应为成本口径的趋势级默认 12%');
+
 rmSync(tmpDir, { recursive: true, force: true });
-console.log('✅ 止损未执行窗口自检通过：建仓日下界 / 本轮最早一次 / 当日不计 / ETF 口径不含可转债');
+console.log(
+  '✅ 止损自检通过：建仓日下界 / 本轮最早一次 / 当日不计 / ETF 口径不含可转债 / 生效止损不随现价漂移',
+);

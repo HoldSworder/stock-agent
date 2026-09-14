@@ -55,7 +55,9 @@ export function registerResearchModule(app: FastifyInstance): void {
         id: 'research.dailyAnalysis',
         label: '情报研判·研报+热点（8:00）',
         defaultCron: '0 8 * * 1-5',
-        defaultEnabled: true,
+        // 默认关：情报页已从导航下沉。它产出的是每天一份 AI 叙述，
+        // 而中线赛道轮动的动作只由趋势与持仓决定，多一份叙述反而是又一个发声源
+        defaultEnabled: false,
         run: async () => {
           // 周末由 cron 1-5 排除，节假日由 skipHoliday gate，周一窗口由聚合层 discoverWindowDays 补齐
           await runIntelReview({ trigger: 'cron', channels: ['webui', 'telegram'] });

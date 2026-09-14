@@ -17,6 +17,9 @@ export function registerKolModule(app: FastifyInstance): void {
 
   // 模块内定时：微博盘中高频跟进发声，收盘后补一轮并清理过期；
   // 小红书风控严、逐篇拉正文请求量大，单独一个每小时的低频任务，不跟微博共用。
+  //
+  // 三项默认关：大V观点已从导航下沉（做中线赛道轮动时它不改变「该不该走 / 换到哪只」），
+  // 而盘中每 10 分钟 + 小红书每小时的抓取是纯开销。要用就在设置页的定时里打开。
   defineModuleSchedules({
     app,
     module: 'kol',
@@ -25,7 +28,7 @@ export function registerKolModule(app: FastifyInstance): void {
         id: 'kol.intraday',
         label: '微博大V抓取·盘中（9-15 点每 10 分钟）',
         defaultCron: '*/10 9-15 * * 1-5',
-        defaultEnabled: true,
+        defaultEnabled: false,
         run: async () => {
           const r = await svc.refreshAll(undefined, 'weibo');
           console.log(`[kol] 微博盘中抓取完成：${r.accounts} 个大V，新增 ${r.inserted} 条`);
@@ -35,7 +38,7 @@ export function registerKolModule(app: FastifyInstance): void {
         id: 'kol.evening',
         label: '微博大V抓取·盘后（18:00）+ 清理过期',
         defaultCron: '0 18 * * 1-5',
-        defaultEnabled: true,
+        defaultEnabled: false,
         run: async () => {
           const r = await svc.refreshAll(undefined, 'weibo');
           const pruned = svc.pruneOldPosts();
@@ -50,7 +53,7 @@ export function registerKolModule(app: FastifyInstance): void {
         id: 'kol.xhs',
         label: '小红书博主抓取（每小时整点）',
         defaultCron: '0 * * * *',
-        defaultEnabled: true,
+        defaultEnabled: false,
         run: async () => {
           const r = await svc.refreshAll(undefined, 'xiaohongshu');
           console.log(`[kol] 小红书抓取完成：${r.accounts} 个博主，新增 ${r.inserted} 条`);

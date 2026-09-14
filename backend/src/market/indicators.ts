@@ -19,26 +19,52 @@ import { getKline, getQuotes } from './eastmoney';
 const MIN_BARS = 35;
 const r2 = (n: number): number => Math.round(n * 100) / 100;
 
-/** MACD（12,26,9）：迭代喂收盘，捕获末两根用于金叉/死叉判断（CN 口径 DIF/DEA/MACD柱） */
-export function calcMacd(closes: number[]): MacdReadout | null {
+/**
+ * MACD 序列上的一个点。
+ *
+ * `index` 是它对应输入数组的下标，**必须带着走**：MACD 前二十几根未成型（EMA26 要凑够样本），
+ * 所以序列长度短于输入，按序列自身下标去对齐 K 线会整体错位。
+ * 背驰要按缠论笔切段比对柱面积，段的起止是 K 线下标，对齐错一根结论就变了。
+ */
+export interface MacdPoint {
+  /** 对应输入 closes 的下标 */
+  index: number;
+  dif: number;
+  dea: number;
+  /** CN 口径柱值 =（DIF − DEA）× 2，与国内看盘软件一致 */
+  bar: number;
+}
+
+/**
+ * MACD（12,26,9）完整序列。
+ *
+ * 与 calcMacd 的分工：本函数给全序列（背驰要算柱面积），calcMacd 只取末两根算读数。
+ * 两者共用这一份计算，避免出现第二份 MACD 实现——参数或口径要改时只改一处。
+ */
+export function calcMacdSeries(closes: number[]): MacdPoint[] {
   const macd = new MACD(new EMA(12), new EMA(26), new EMA(9));
-  let prevDiff: number | null = null;
-  let last: { dif: number; dea: number } | null = null;
-  let prevHistDiff: number | null = null;
-  for (const c of closes) {
+  const out: MacdPoint[] = [];
+  closes.forEach((c, i) => {
     const res = macd.add(c) as { macd: number; signal: number; histogram: number } | null;
-    if (!res) continue;
-    if (last) prevDiff = prevHistDiff;
-    prevHistDiff = res.macd - res.signal;
-    last = { dif: res.macd, dea: res.signal };
-  }
+    if (!res) return;
+    out.push({ index: i, dif: res.macd, dea: res.signal, bar: (res.macd - res.signal) * 2 });
+  });
+  return out;
+}
+
+/** MACD（12,26,9）末根读数：金叉/死叉判断（CN 口径 DIF/DEA/MACD柱） */
+export function calcMacd(closes: number[]): MacdReadout | null {
+  const series = calcMacdSeries(closes);
+  const last = series[series.length - 1];
   if (!last) return null;
+  const prev = series[series.length - 2];
   const diff = last.dif - last.dea;
+  const prevDiff = prev ? prev.dif - prev.dea : null;
   let state: MacdReadout['state'];
   if (prevDiff != null && prevDiff <= 0 && diff > 0) state = '金叉';
   else if (prevDiff != null && prevDiff >= 0 && diff < 0) state = '死叉';
   else state = diff >= 0 ? '多头' : '空头';
-  return { dif: r2(last.dif), dea: r2(last.dea), bar: r2(diff * 2), state };
+  return { dif: r2(last.dif), dea: r2(last.dea), bar: r2(last.bar), state };
 }
 
 /** RSI 6/12/24 */

@@ -286,7 +286,7 @@ function normalizeFund(h: RawFund, totalAsset: number): FundPosition {
   };
 }
 
-/** 把真实持仓镜像写入 positions 表（先清旧 real 行，再写当前快照） */
+
 function persist(portfolio: RealPortfolio): void {
   db.delete(schema.positions).where(eq(schema.positions.account, 'real')).run();
   const rows = [
