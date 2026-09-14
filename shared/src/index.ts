@@ -4586,6 +4586,14 @@ export interface EtfWatchStatus {
   lastSignalCount: number;
   /** 当前跟踪标的数 */
   trackedCount: number;
+  /**
+   * 上一轮**没能判断**的标的与原因。
+   *
+   * 「盯了 20 只，其中 3 只判不了」和「盯了 20 只都没事」是完全不同的两件事。
+   * 取不到现价时不再用 0 元或昨收顶上继续判买卖——那会让禁追高护栏失效、
+   * 让硬止损拿昨收比较从而该卖不卖，而界面上一切正常。现在判不了就说判不了。
+   */
+  unjudged: Array<{ code: string; name: string; reason: string }>;
   config: EtfWatchConfig;
 }
 

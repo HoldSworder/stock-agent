@@ -296,9 +296,19 @@ export async function confirmBuy(
   );
 
   if (!cfg.agentConfirmBuy) {
-    const pass = !(cfg.minConfidence > 0 && det < cfg.minConfidence);
+    // 量价确认取不到时**不许判「建仓」**。
+    //
+    // 改前：确认失败返回 null，confirmScoreDelta(null) 给 0，即本该有的扣分归零。
+    // 派发、量价背离这些该降权的情形被当成「没有问题」，确定性分虚高从而过门槛，
+    // 于是发出建仓指令与具体仓位，而界面上置信度看起来正常。
+    //
+    // 现在降为「观察」并说明原因。少一次建仓的代价，远小于基于虚高分数买进去。
+    const pass = !(cfg.minConfidence > 0 && det < cfg.minConfidence) && confirm !== null;
     const agentAction: BuyAction = pass ? '建仓' : '观察';
-    const instruction = buildInstruction(s, cfg, heldPct, pass, {}, `${TF_LABEL[s.timeframe]}金叉，按规则建层`);
+    const note = confirm
+      ? `${TF_LABEL[s.timeframe]}金叉，按规则建层`
+      : `${TF_LABEL[s.timeframe]}金叉，但资金量价确认取不到，先观察不建层`;
+    const instruction = buildInstruction(s, cfg, heldPct, pass, {}, note);
     return {
       confidence: det,
       action: finalActionOf(instruction, agentAction),

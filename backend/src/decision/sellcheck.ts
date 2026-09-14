@@ -123,18 +123,38 @@ export async function debateRealEtfPositions(
   }
 
   const verdicts = results.map((r) => ({ r, v: mapDecisionToVerdict(r) }));
-  const alerts = verdicts.filter((x) => x.v.shouldAlert);
-  const summaryLines = verdicts.map(
-    ({ r, v }) => `- ${r.name}(${r.code})：${v.verdict}（置信度 ${r.confidence}）`,
+  // 研判失败的必须进「需重点处理」，不能混进「持有」。
+  //
+  // DecisionAction 只有 buy/add/hold/reduce/sell 五个取值，失败时只能填 hold，
+  // 于是概览写「持有、置信度 0」，头部还会显示「整体可持有观察」——
+  // 真该减仓的那只被静默当成了持有。这类判不了的必须单独点出来让人自己看。
+  const failed = results.filter((r) => r.thesis.startsWith('ETF 研判失败'));
+  const failedCodes = new Set(failed.map((r) => r.code));
+  const alerts = verdicts.filter((x) => x.v.shouldAlert && !failedCodes.has(x.r.code));
+  const summaryLines = verdicts.map(({ r, v }) =>
+    failedCodes.has(r.code)
+      ? `- ${r.name}(${r.code})：**没判出来**（不是「可以持有」，请自己看一眼）`
+      : `- ${r.name}(${r.code})：${v.verdict}（置信度 ${r.confidence}）`,
   );
+  const attentionBlocks: string[] = [];
+  if (alerts.length > 0) {
+    attentionBlocks.push(
+      `减/清仓信号 ${alerts.length} 只：\n` +
+        alerts.map((x) => `- ${x.r.name}(${x.r.code})：${x.v.verdict}`).join('\n'),
+    );
+  }
+  if (failed.length > 0) {
+    attentionBlocks.push(
+      `没判出来 ${failed.length} 只（判不了不等于可以持有）：\n` +
+        failed.map((r) => `- ${r.name}(${r.code})：${r.thesis}`).join('\n'),
+    );
+  }
   const head =
     `# 持仓 ETF 卖点复核（ETF 方向研判，共 ${results.length} 只）\n\n` +
     `## 处置概览\n${summaryLines.join('\n')}\n\n` +
-    (alerts.length > 0
-      ? `## 需重点处理（${alerts.length} 只）\n${alerts
-          .map((x) => `- ${x.r.name}(${x.r.code})：${x.v.verdict}`)
-          .join('\n')}\n\n`
-      : '## 需重点处理\n暂无明确减/清仓信号，整体可持有观察。\n\n');
+    (attentionBlocks.length > 0
+      ? `## 需重点处理\n${attentionBlocks.join('\n\n')}\n\n`
+      : '## 需重点处理\n暂无明确减/清仓信号，且全部研判成功，整体可持有观察。\n\n');
   const detail = results.map((r) => r.narrative).join('\n\n---\n\n');
 
   return {

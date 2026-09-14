@@ -207,11 +207,23 @@ function rowToState(r: StateRow): EtfWatchLayerState {
   let heldLayers: EtfWatchLayer[] = [];
   let layerEntryPrice: Record<string, number> = {};
   let layerEntryAt: Record<string, string> = {};
+  // 已建层号解析失败**不能当成空仓**。
+  //
+  // 改前这里 catch 后置空数组，于是系统认为一层都没建，已持仓的标的照样触发
+  // 第一层「建仓」与加仓指令，可能重复买入同一只。这与「持仓取不到当空仓」
+  // 是同一类错误，只是换了一个数据源。
+  //
+  // 解析不出来时抛错，交由上层按「本轮判不了这只」处理——engine 的 tick 会把它
+  // 收进 unjudged 并留痕。数据坏了要让人知道，不能自己脑补一个空仓。
   try {
     const arr = JSON.parse(r.heldLayers) as number[];
-    heldLayers = Array.isArray(arr) ? (arr.filter((n) => n >= 1 && n <= 3) as EtfWatchLayer[]) : [];
-  } catch {
-    heldLayers = [];
+    if (!Array.isArray(arr)) throw new Error('层号不是数组');
+    heldLayers = arr.filter((n) => n >= 1 && n <= 3) as EtfWatchLayer[];
+  } catch (e) {
+    throw new Error(
+      `${r.code} 的已建层号存坏了（${r.heldLayers}），本轮不判这只——` +
+        `当成空仓会重复买入。原始错误：${e instanceof Error ? e.message : e}`,
+    );
   }
   try {
     const obj = JSON.parse(r.layerEntryPrice) as Record<string, number>;

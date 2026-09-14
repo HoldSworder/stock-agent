@@ -27,6 +27,8 @@ let epoch = 0;
 let lastPollAt: string | null = null;
 let lastSignalCount = 0;
 let trackedCount = 0;
+/** 上一轮没能判断的标的与原因，进 status 供界面显示 */
+let lastUnjudged: Array<{ code: string; name: string; reason: string }> = [];
 let lastRetryAt = 0;
 let seenDay = '';
 /** 按 bar 去重：保证每根收盘 K 的同一动作仅触发一次（key 由 buildCandidates 给出） */
@@ -409,13 +411,36 @@ async function tick(cfg: EtfWatchConfig): Promise<void> {
   void snapshotEtfShares(codes).catch(() => {});
 
   let signalCount = 0;
+  // 本轮没能判断的标的。**取不到数据必须跳过并留痕，不能用一个看起来正常的值顶上。**
+  //
+  // 改前这里是 `q?.price ?? 0`：取不到行情就按 0 元现价继续评估，后果是
+  // 禁追高护栏按 0% 涨幅判断从而失效、硬止损与移动止盈拿昨收比较从而该卖不卖，
+  // 而界面上一切正常。异常分支也只打一行日志，那只 ETF 本轮的卖点、止损、买点
+  // 全部静默跳过，同样看不出来。
+  //
+  // 现在的规矩：判不了就明确判不了，并且让它可见。宁可少一条提示，
+  // 不可给一条基于错数据的提示——后者会让人以为系统看过了。
+  const unjudged: Array<{ code: string; name: string; reason: string }> = [];
   for (const t of targets) {
     const q = qMap.get(t.code);
-    try {
-      signalCount += await evalTarget(t, q?.price ?? 0, q?.pct ?? 0, cfg);
-    } catch (e) {
-      console.warn('[etfwatch] 标的评估异常:', t.code, e instanceof Error ? e.message : e);
+    if (!q || !(q.price > 0)) {
+      unjudged.push({ code: t.code, name: t.name, reason: '现价取不到，本轮不判买卖' });
+      continue;
     }
+    try {
+      signalCount += await evalTarget(t, q.price, q.pct, cfg);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      console.warn('[etfwatch] 标的评估异常:', t.code, msg);
+      unjudged.push({ code: t.code, name: t.name, reason: `评估出错：${msg.slice(0, 80)}` });
+    }
+  }
+  lastUnjudged = unjudged;
+  if (unjudged.length > 0) {
+    console.warn(
+      `[etfwatch] 本轮有 ${unjudged.length} 只没能判断：` +
+        unjudged.map((u) => `${u.name}(${u.code}) ${u.reason}`).join('；'),
+    );
   }
 
   primed = true; // 本拍已评估过标的：完成热启动，后续拍开始正常发出买点
@@ -433,6 +458,9 @@ function buildStatus(cfg: EtfWatchConfig): EtfWatchStatus {
     lastPollAt,
     lastSignalCount,
     trackedCount,
+    // 本轮没能判断的标的要能被看到。「盯了 20 只、其中 3 只判不了」和
+    // 「盯了 20 只都没事」是完全不同的两件事，混在一起就又变成静默失败
+    unjudged: lastUnjudged,
     config: cfg,
   };
 }
