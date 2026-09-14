@@ -30,6 +30,14 @@ export interface SignalSource {
    * 模块级正好——它就是这套规则实际工作的标的范围。
    */
   poolKey: string;
+  /**
+   * 显式指定对照池。不给则取同 poolKey 各来源涉及标的的并集。
+   *
+   * 什么时候必须显式给：该来源面向的范围**大于**它实际选中的标的。
+   * 选股就是这种情况——它面向全市场，若拿「被它选中的几百只」当池子，
+   * 就又变成拿信号偏爱的标的做基准。
+   */
+  pool?: () => string[];
   load: () => ScorableSignal[];
 }
 
@@ -89,6 +97,43 @@ function loadSwing(dir: 'bottom' | 'top'): ScorableSignal[] {
   }));
 }
 
+/**
+ * 选股结果。按引擎分开登记，因为这直接回答一个值钱的问题：
+ * **规则选股（multifactor）和模型选股（nl）哪个更行，还是都不行。**
+ *
+ * 分组标签用持有期（短线/中线）——同一个引擎在不同持有期上的表现本来就该分开看。
+ */
+function loadScreener(engine: string): ScorableSignal[] {
+  const rows = sqlite
+    .prepare(
+      `select p.code, p.created_at, r.horizon from screen_picks p
+       join screen_runs r on r.id = p.run_id
+       where r.engine = ? order by p.created_at`,
+    )
+    .all(engine) as Array<{ code: string; created_at: string; horizon: string }>;
+  return rows
+    .map((r) => ({
+      code: r.code,
+      tradeDate: shanghaiDate(r.created_at),
+      side: 'long' as const,
+      tag: r.horizon === 'mid' ? '中线' : '短线',
+    }))
+    .filter((s) => s.tradeDate !== '');
+}
+
+/**
+ * 选股的对照池：本地日线覆盖的全部标的（约 1600 只），**不是被选中的那几百只**。
+ *
+ * 用被选中的标的当池子就又踩了那个坑——等于拿信号偏爱的标的做基准，
+ * 会低估它的优势。选股面向全市场，基准就该是「那天在全市场随便买一只」。
+ */
+function screenerPool(): string[] {
+  const rows = sqlite
+    .prepare(`select distinct code from kline_daily where provisional = 0`)
+    .all() as Array<{ code: string }>;
+  return rows.map((r) => r.code);
+}
+
 export const SIGNAL_SOURCES: readonly SignalSource[] = [
   {
     id: 'etfwatch.buy',
@@ -130,6 +175,24 @@ export const SIGNAL_SOURCES: readonly SignalSource[] = [
     poolKey: 'swing',
     load: () => loadSwing('top'),
   },
+  {
+    id: 'screener.multifactor',
+    label: '选股·多因子（按规则打分）',
+    side: 'long',
+    origin: '全市场规则打分排序（screener/scorer.ts、ranker.ts），不经模型',
+    poolKey: 'screener',
+    pool: screenerPool,
+    load: () => loadScreener('multifactor'),
+  },
+  {
+    id: 'screener.nl',
+    label: '选股·模型挑选',
+    side: 'long',
+    origin: '模型按自然语言条件挑选（screener 的 nl 引擎）',
+    poolKey: 'screener',
+    pool: screenerPool,
+    load: () => loadScreener('nl'),
+  },
 ];
 
 export function findSource(id: string): SignalSource | undefined {
@@ -143,6 +206,7 @@ export function findSource(id: string): SignalSource | undefined {
  * 它接近这套规则实际工作的标的范围，而不是「信号偏爱的那些」。
  */
 export function poolFor(source: SignalSource): string[] {
+  if (source.pool) return source.pool();
   const codes = new Set<string>();
   for (const s of SIGNAL_SOURCES) {
     if (s.poolKey !== source.poolKey) continue;
