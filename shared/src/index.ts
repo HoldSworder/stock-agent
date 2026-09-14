@@ -5237,6 +5237,70 @@ export interface RealTradeGuess {
   note: string;
 }
 
+// ===== 判卷机：给一批信号打分 =====
+
+/**
+ * 一条待判分的信号。
+ *
+ * 任何模块只要能产出这四样，就能被判卷机打分——这是「明码标价」的入场券：
+ * 说不出标的、日期、方向的东西，没法被证伪，也就没法标价。
+ */
+export interface ScorableSignal {
+  /** 6 位标的代码 */
+  code: string;
+  /** 信号发出的交易日 YYYY-MM-DD */
+  tradeDate: string;
+  /** 方向：看涨 / 看跌。卖出类信号的价值方向是反的，判分时会自动换算 */
+  side: 'long' | 'short';
+  /** 可选分组标签，如信号等级、模型裁决，用于分组出分 */
+  tag?: string;
+}
+
+/** 某个持有期上的一组统计 */
+export interface ScoreRow {
+  /** 持有的交易日数 */
+  horizon: number;
+  /** 可判样本数（未来 K 线足够的） */
+  judged: number;
+  /** 信号后续走势均值（小数） */
+  mean: number;
+  /** 后续上涨占比（小数） */
+  upRatio: number;
+  /** 对照一：同标的随机日的均值 */
+  baselineSameCode: number;
+  /** 对照二：同一天买全池任意一只的均值 */
+  baselineSameDate: number;
+  /** 相对同标的随机日的价值，已按信号方向换算 */
+  edgeVsSameCode: number;
+  /** 相对同日全池的价值，已按信号方向换算 */
+  edgeVsSameDate: number;
+}
+
+/** 一个信号来源的成绩单 */
+export interface Scorecard {
+  /** 来源标识，如 etfwatch.buy */
+  source: string;
+  /** 人读名称 */
+  label: string;
+  /** 原始信号数 */
+  rawCount: number;
+  /** 同标的同日合并后的信号数 */
+  count: number;
+  /** 样本覆盖的交易日区间 */
+  from: string;
+  to: string;
+  /** 涉及标的数 */
+  poolSize: number;
+  rows: ScoreRow[];
+  /** 按 tag 分组的结果，仅首个持有期；无 tag 时为空 */
+  byTag: Array<{ tag: string; judged: number; mean: number; upRatio: number }>;
+  /**
+   * 一句人话结论。三种口径：样本不足 / 尚无证据显示优于随机 / 稳定领先 X 个百分点。
+   * 这句话就是「明码标价」里挂在模块名旁边的那一行。
+   */
+  verdict: string;
+}
+
 /** 全局安全控制状态（交易/模拟总闸） */
 export interface SafetyState {
   /** 总急停：开启后拒绝一切交易/模拟动作 */

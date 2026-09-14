@@ -146,6 +146,7 @@ import { registerKlineCacheModule } from './datasource/klineCacheModule';
 import { registerToolsModule } from './agent/toolsModule';
 import { registerPromptsModule } from './agent/promptsModule';
 import { registerSchedulesModule } from './scheduling/schedulesModule';
+import { registerScorecardModule } from './scorecard';
 import { registerOpsModule } from './ops';
 import { registerReviewModule } from './review';
 import { registerAnalyzeModule } from './analyze';
@@ -1536,6 +1537,9 @@ async function main() {
 
   // 调度总览（聚合中央任务 + 模块定时的只读视图，独立，删除此行整模块下线）
   registerSchedulesModule(app);
+
+  // 判卷机（给各模块的信号打分，纯只读本地计算，独立，删除此行整模块下线）
+  registerScorecardModule(app);
 
   // 运维模块（SQLite 体积治理 + 自动清理定时，独立，删除此行整模块下线）
   registerOpsModule(app);

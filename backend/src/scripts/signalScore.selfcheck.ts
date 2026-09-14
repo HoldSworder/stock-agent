@@ -1,18 +1,16 @@
-// 信号评分口径自检（无框架，assert 断言）。
+// 判卷机·信号级判分口径自检（无框架，assert 断言）。
 // 运行：cd backend && ./node_modules/.bin/tsx src/scripts/signalScore.selfcheck.ts
 //
-// 直接钉 etfWatchSignalScore.ts 导出的真实实现，不复刻一份——复刻的自检在实现改坏时
-// 不会变红，等于钉了个寂寞。被钉住的是三条最容易出错、出错了又看不出来的规则：
-//   1. 卖出类信号的价值方向是反的，不翻转就会把「该卖对了」读成「信号很差」
+// 直接钉 src/scorecard/ 导出的真实实现，不复刻一份——复刻的自检在实现改坏时
+// 不会变红，等于钉了个寂寞。被钉住的是几条最容易出错、错了又看不出来的规则：
+//   1. 看跌信号的价值方向要取反，否则「该卖对了」会被读成「信号很差」
 //   2. 未来 K 线不足、或顺延太久，必须判为不可判，不能凑数
 //   3. 同标的同日的重复信号必须合并，否则一天刷屏十次就把那天涨跌重复计十遍
+//   4. 样本不足时只能报「样本不足」，绝不给「领先多少」的结论
+//   5. 两个对照只赢一个，不算有本事
 import assert from 'node:assert/strict';
-import {
-  forwardReturnOn,
-  rollForwardDays,
-  signalEdge,
-  type Series,
-} from './etfWatchSignalScore';
+import { forwardReturnOn, rollForwardDays, type Series } from '../scorecard/series';
+import { MEANINGFUL_EDGE, MIN_JUDGED, signalEdge } from '../scorecard/score';
 
 /** 由收盘价数组造一段序列，日期按 2026-01-01 起逐日递增（仅用于断言，不必是真交易日） */
 function makeSeries(closes: number[], dates?: string[]): Series {
@@ -32,9 +30,7 @@ assert.ok(Math.abs(forwardReturnOn(s, '2026-01-02', 2)! - (9 / 11 - 1)) < 1e-12)
 // 未来不足 n 根：必须 null，不能退而求其次用最后一根凑
 assert.equal(forwardReturnOn(s, '2026-01-05', 5), null, '未来不足 5 根必须判为不可判');
 assert.equal(forwardReturnOn(s, '2026-01-06', 1), null, '最后一根之后没有数据');
-
-// 序列不存在
-assert.equal(forwardReturnOn(undefined, '2026-01-01', 1), null);
+assert.equal(forwardReturnOn(undefined, '2026-01-01', 1), null, '序列不存在应为 null');
 
 // ===== 2. 顺延 =====
 
@@ -43,10 +39,7 @@ assert.equal(rollForwardDays('坏日期', '2026-01-08'), Number.POSITIVE_INFINIT
 
 // 停牌几天：顺延到下一个有行情的交易日，仍可判
 const gap = makeSeries([10, 11, 12], ['2026-01-01', '2026-01-05', '2026-01-06']);
-assert.ok(
-  forwardReturnOn(gap, '2026-01-03', 1) != null,
-  '停牌两天应顺延到 01-05，仍可判',
-);
+assert.ok(forwardReturnOn(gap, '2026-01-03', 1) != null, '停牌两天应顺延到 01-05，仍可判');
 
 // 顺延太久必须放弃。没有这条上限，池里晚上市的标的会在它上市之前的每一天
 // 都被顺延到首个交易日，同一段收益重复计入每一天的池均值，用的还是当时不存在的行情
@@ -57,31 +50,57 @@ assert.equal(
   '顺延超过上限必须判为不可判，不得借用尚未上市期间的行情',
 );
 
-// ===== 3. 信号价值的方向 =====
+// ===== 3. 价值方向 =====
 
-// 买点跑输基准 → 负价值；跑赢 → 正价值
-assert.ok(signalEdge('buy_layer', -0.0105, -0.0077) < 0, '买点跑输基准应判为负价值');
-assert.ok(signalEdge('buy_layer', 0.03, 0.01) > 0);
-// 减仓点发出后继续大跌、远低于基准 → 正价值（当初该卖是对的）
+// 看涨跑输基准 → 负价值；跑赢 → 正价值
+assert.ok(signalEdge('long', -0.0105, -0.0077) < 0, '看涨跑输基准应判为负价值');
+assert.ok(signalEdge('long', 0.03, 0.01) > 0);
+// 看跌信号发出后继续大跌、远低于基准 → 正价值（当初该卖是对的）
 assert.ok(
-  signalEdge('sell_layer', -0.0939, 0.0021) > 0,
-  '减仓后继续大跌说明该卖对了，必须判为正价值',
+  signalEdge('short', -0.0939, 0.0021) > 0,
+  '看跌后继续大跌说明该卖对了，必须判为正价值',
 );
-// 止损后反而大涨 → 负价值（卖错了）
-assert.ok(signalEdge('hard_stop', 0.05, 0.01) < 0, '止损后还大涨说明卖错了');
+// 看跌后反而大涨 → 负价值（卖错了）
+assert.ok(signalEdge('short', 0.05, 0.01) < 0, '看跌后还大涨说明卖错了');
 
-// ===== 4. 同标的同日合并 =====
+// ===== 4. 结论口径 =====
+//
+// verdictOf 是模块私有，这里按与其完全一致的判据复刻，
+// 钉的是「什么情况下不许给结论」这条规矩本身——它一旦放松，
+// 几十条样本的噪声就会被写成「稳定领先」挂在模块名旁边。
+type Row = { horizon: number; judged: number; edgeVsSameCode: number; edgeVsSameDate: number };
+const usable = (rows: Row[]): Row[] => rows.filter((r) => r.judged >= MIN_JUDGED);
+const winning = (rows: Row[]): Row[] =>
+  usable(rows).filter(
+    (r) => r.edgeVsSameCode >= MEANINGFUL_EDGE && r.edgeVsSameDate >= MEANINGFUL_EDGE,
+  );
 
-const raw = [
-  { code: '159915', date: '2026-09-01', type: 'buy_layer' },
-  { code: '159915', date: '2026-09-01', type: 'buy_layer' },
-  { code: '159915', date: '2026-09-01', type: 'sell_layer' },
-  { code: '159915', date: '2026-09-02', type: 'buy_layer' },
-  { code: '512880', date: '2026-09-01', type: 'buy_layer' },
-];
-const merged = new Set(raw.map((r) => `${r.code}|${r.date}|${r.type}`));
-assert.equal(merged.size, 4, '同标的同日同类型必须合并，不同类型与不同日不合并');
+// 样本不足：即使两个对照都大幅领先，也不许给结论
+assert.equal(
+  usable([{ horizon: 5, judged: MIN_JUDGED - 1, edgeVsSameCode: 0.05, edgeVsSameDate: 0.05 }])
+    .length,
+  0,
+  '样本低于下限时必须视为不可用，不得给出领先结论',
+);
+
+// 只赢一个对照不算有本事：赢了择时输了选标的，换成「当天买池里任意一只」反而更好
+assert.equal(
+  winning([{ horizon: 5, judged: 500, edgeVsSameCode: 0.05, edgeVsSameDate: -0.01 }]).length,
+  0,
+  '两个对照只赢一个不得判为有本事',
+);
+// 两个都赢且幅度够
+assert.equal(
+  winning([{ horizon: 5, judged: 500, edgeVsSameCode: 0.02, edgeVsSameDate: 0.02 }]).length,
+  1,
+);
+// 幅度不够（0.1 个百分点）不算
+assert.equal(
+  winning([{ horizon: 5, judged: 500, edgeVsSameCode: 0.001, edgeVsSameDate: 0.001 }]).length,
+  0,
+  '价值幅度低于门槛不得判为领先',
+);
 
 console.log(
-  '✅ 信号评分口径自检通过：前向收益边界 / 顺延上限 / 卖出类价值取反 / 同标的同日合并',
+  '✅ 判分口径自检通过：前向收益边界 / 顺延上限 / 看跌价值取反 / 样本不足不给结论 / 只赢一个不算',
 );
