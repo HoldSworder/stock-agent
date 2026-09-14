@@ -5,7 +5,7 @@
   GET /api/call/{endpoint}?<params>  按端点名透传（统一 JSON 返回）
   GET /api/manifest                  端点目录（name/layer/params/desc）
   GET /selfcheck                     逐个跑端点打真实接口，OK/失败明细
-  GET /health                        mootdx 连通探活
+  GET /health                        通达信行情探活（取不到真数据即 503）
 
 上游升级只动 vendor/SKILL.md + 重跑 extract.py，本文件的薄路由层基本不变。
 mootdx 的 K线/盘口/逐笔/财务/F10 在上游是「内联片段（无 def）」，由本文件 wrapper 实现。
@@ -15,6 +15,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import threading
 from datetime import datetime, timedelta
 from typing import Any, Callable
 
@@ -81,32 +82,164 @@ def _with_tdx(call: Callable[[Any], Any], market: str = "std") -> Any:
     连接会被线程池里的多个线程共用，pytdx 的有状态协议在并发下会串包、静默返回
     另一只标的的数据——所以「取 client + 调用 + 出错作废」必须整体在锁内完成，
     这一段收口在 af.tdx_call 里，不要在这里自己拆开做。
+
+    仅剩财务与 F10 走这条路：通达信 2026-07-17 更新了**实时行情**协议，
+    pytdx/tdxpy 系的 K线/报价/逐笔全网返空（mootdx#157，上游未修），
+    行情四个端点已改走 opentdx，见下方 _with_otdx。财务与 F10 不受该次协议变更影响，
+    实测仍正常，故留在原路上——能用的东西不动，换了反而要重新验一遍口径。
     """
     return af.tdx_call(call, market)
 
 
-# category: 4=日 5=周 6=月 7=1m 8=5m 9=15m 10=30m 11=60m
+# ── 通达信行情：opentdx 通道（替代失效的 mootdx 行情）────────────────────────
+# 端点名与返回字段一律保持 mootdx 时代的形状，调用方（后端 astock/market.ts、
+# regime/client.ts、mode 回测脚本）不需要任何改动。字段改名的代价是所有调用方
+# 一起改，而这些字段名同时印在回测结果与缓存里，换名等于让历史数据对不上。
+_OTDX_LOCK = threading.RLock()
+_otdx_client: Any = None
+
+# mootdx 频率码 → opentdx PERIOD。外部契约仍是 mootdx 码（后端 CATEGORY 表就是它）。
+_OTDX_PERIOD: dict[int, str] = {
+    0: "MIN_5", 1: "MIN_15", 2: "MIN_30", 3: "MIN_60",
+    4: "DAILY", 5: "WEEKLY", 6: "MONTHLY",
+    7: "MIN_1", 8: "MIN_1", 9: "DAILY", 10: "QUARTERLY", 11: "YEARLY",
+}
+
+
+def _otdx_market(symbol: str) -> Any:
+    """6 位代码 → opentdx MARKET。88xxxx/999999 等通达信自建指数归沪市（实测 880008 只在沪市有）。"""
+    from opentdx.const import MARKET
+
+    if symbol.startswith(("6", "9", "5", "88")):
+        return MARKET.SH
+    if symbol.startswith(("4", "8")):
+        return MARKET.BJ
+    return MARKET.SZ
+
+
+def _with_otdx(call: Callable[[Any], Any]) -> Any:
+    """opentdx 调用统一出口：持锁复用缓存 client，出错即作废。
+
+    锁与作废的理由同 af.tdx_call：通达信是「发请求→读定长响应头→读 body」的有状态
+    TCP 协议，两个线程交错读写同一 socket 不报错，而是各自拿到对方的响应体——
+    静默返回另一只标的的数据，比报错危险得多。
+
+    返回 None 视为失败并作废连接：opentdx 默认 raise_exception=False，节点半死时
+    不抛错只给 None，不在这里翻译成异常的话，上层会把「取数失败」当成「没有数据」。
+    空列表则原样放行——收盘后查逐笔本来就该是空的。
+    """
+    global _otdx_client
+    with _OTDX_LOCK:
+        if _otdx_client is None:
+            from opentdx.tdxClient import TdxClient
+
+            client = TdxClient()
+            client.q_client().connect().login()
+            _otdx_client = client
+        try:
+            result = call(_otdx_client)
+        except Exception:
+            _otdx_drop()
+            raise
+        if result is None:
+            _otdx_drop()
+            raise RuntimeError("opentdx 返回空响应（节点可能已失效），已作废连接待下次重连")
+        return result
+
+
+def _otdx_drop() -> None:
+    """作废缓存连接。必须在锁内调用。"""
+    global _otdx_client
+    try:
+        if _otdx_client is not None:
+            _otdx_client.__exit__(None, None, None)
+    except Exception:  # noqa
+        pass
+    _otdx_client = None
+
+
+# category: 0=5分 1=15分 2=30分 3=60分 4=日 5=周 6=月 7/8=1分 9=日 10=季 11=年
 def mootdx_kline(symbol: str, category: int = 4, offset: int = 100) -> Any:
-    # 注意：mootdx Quotes.bars 的周期参数名是 frequency（默认 9=日K）；
-    # 传 category=... 会落进 **kwargs 被静默忽略 → 所有周期都返回日线。必须用 frequency=。
-    # mootdx 频率码：0=5分 1=15分 2=30分 3=60分 4=日 5=周 6=月 7/8=1分 9=日 10=季 11=年
-    return _with_tdx(lambda c: c.bars(symbol=symbol, frequency=category, offset=offset))
+    from opentdx.const import PERIOD
+
+    period = getattr(PERIOD, _OTDX_PERIOD.get(int(category), "DAILY"))
+    market = _otdx_market(symbol)
+    return _with_otdx(
+        lambda c: c.stock_kline(market, symbol, period, 0, min(max(int(offset), 1), 800))
+    )
 
 
 def mootdx_index(symbol: str, frequency: int = 9, offset: int = 100) -> Any:
-    # 通达信板块/自建指数（如 880008 全A等权、880003 平均股价）走 client.index；
-    # 个股/ETF 用 mootdx_kline(client.bars)——板块指数走 bars 会返回空。
-    # frequency 频率码同 bars：4/9=日 5=周 6=月 7/8=1分 0=5分 1=15分 2=30分 3=60分。
-    # 返回除 OHLC/量额外，含 up_count/down_count 成分股涨跌家数（等权宽度可直接用）。
-    return _with_tdx(lambda c: c.index(symbol=symbol, frequency=frequency, offset=offset))
+    """通达信自建指数（880008 全A等权、880003 平均股价等）日线 + 最新涨跌家数。
+
+    涨跌家数（up_count/down_count）只有实时接口给，K线里没有，所以取两次再并到
+    最后一根 bar 上——大盘阶段的等权宽度读的就是最后一根这两个字段。
+    并不到（收盘后接口返空等）时不补零：0 家上涨与「取不到」在下游是两回事。
+    """
+    bars = mootdx_kline(symbol, frequency, offset)
+    if not bars:
+        return bars
+    try:
+        info = _with_otdx(lambda c: c.index_info(_otdx_market(symbol), symbol))
+    except Exception:  # noqa
+        return bars
+    if info:
+        last = dict(bars[-1])
+        last["up_count"] = info[0].get("up_count")
+        last["down_count"] = info[0].get("down_count")
+        bars = [*bars[:-1], last]
+    # 指数没有流通股本，接口回来的 float_shares/turnover 是拿点位当股价除出来的
+    # 天文数字（实测 turnover 9.2e39）。留着迟早有人当真，直接删掉。
+    return [{k: v for k, v in bar.items() if k not in ("float_shares", "turnover")} for bar in bars]
 
 
 def mootdx_quote(symbols: list[str]) -> Any:
-    return _with_tdx(lambda c: c.quotes(symbol=symbols))
+    """批量实时报价（含五档盘口），字段名沿用 mootdx 形状：price / last_close / bid1.. / ask1..。"""
+    # 用 stock_quotes_detail 而不是 stock_quotes：后者只给一档，而本端点是系统里
+    # 唯一的五档来源（个股计划的买卖价差就读它），少四档下游算出来的价差会失真。
+    pairs = [(_otdx_market(s), s) for s in symbols]
+    rows = _with_otdx(lambda c: c.stock_quotes_detail(pairs))
+    return [_otdx_quote_row(r) for r in (rows or [])]
+
+
+def _otdx_quote_row(row: dict) -> dict:
+    """opentdx 报价行 → mootdx 字段形状。
+
+    opentdx 把现价叫 close、昨收叫 pre_close、五档收在 handicap 里；调用方按
+    mootdx 的 price / last_close / bid1..bid5 读。差异消化在这一层，
+    而不是让后端认两套字段名——认两套就等于以后每加一个源都要改一次后端。
+    """
+    out: dict = {
+        "code": str(row.get("code", "")),
+        "price": row.get("close"),
+        "last_close": row.get("pre_close"),
+        "open": row.get("open"),
+        "high": row.get("high"),
+        "low": row.get("low"),
+        "vol": row.get("vol"),
+        "amount": row.get("amount"),
+        "cur_vol": row.get("cur_vol"),
+        "turnover": row.get("turnover"),
+        "servertime": row.get("server_time"),
+    }
+    handicap = row.get("handicap") or {}
+    for side, key in (("bid", "bid"), ("ask", "ask")):
+        for i, level in enumerate(handicap.get(key) or [], start=1):
+            if i > 5:
+                break
+            out[f"{side}{i}"] = level.get("price")
+            out[f"{side}_vol{i}"] = level.get("vol")
+    return out
 
 
 def mootdx_transaction(symbol: str, date: str) -> Any:
-    return _with_tdx(lambda c: c.transaction(symbol=symbol, date=date))
+    """逐笔成交。date 为 YYYYMMDD 或 YYYY-MM-DD；非交易时段/非交易日返回空。"""
+    from datetime import date as _date
+
+    digits = date.replace("-", "")
+    day = _date(int(digits[0:4]), int(digits[4:6]), int(digits[6:8]))
+    market = _otdx_market(symbol)
+    return _with_otdx(lambda c: c.stock_transaction(market, symbol, day))
 
 
 def mootdx_finance(symbol: str) -> Any:
@@ -336,7 +469,7 @@ _SPEC: list[dict] = [
      "desc": "mootdx 通达信板块/自建指数K线（880008全A等权、880003平均股价等，走 client.index；板块指数用 mootdx_kline 会返回空）。frequency:4/9=日 5=周 6=月，返回含 up_count/down_count 涨跌家数", "sample": {"symbol": "880008"}},
     {"name": "mootdx_quote", "fn": mootdx_quote, "layer": "行情",
      "params": [("symbols", "codes", True, None)],
-     "desc": "mootdx 实时报价含五档盘口（46字段）", "sample": {"symbols": "688017,300476"}},
+     "desc": "通达信实时报价含五档盘口（price/last_close/open/high/low/amount/bid1..5/ask1..5）", "sample": {"symbols": "688017,300476"}},
     {"name": "mootdx_transaction", "fn": mootdx_transaction, "layer": "行情",
      "params": [("symbol", "str", True, None), ("date", "str", True, None)],
      "desc": "mootdx 逐笔成交（非交易时间返回空），date=YYYYMMDD", "sample": None},
@@ -503,12 +636,19 @@ def _build_kwargs(spec: dict, query: dict) -> dict:
 
 @app.get("/health")
 def health() -> dict:
+    """通达信行情探活：必须真的拿到一根 K 线才算健康。
+
+    原先判的是 `bars is not None`，而行情通道坏掉时返回的是**空**而不是 None，
+    于是 2026-07 通达信改协议后这里一直报健康，取数其实两个月没回过一行数据，
+    直到有人手点界面才发现。空数据在这个服务里就是故障，不能算通过。
+    """
     try:
-        bars = _with_tdx(lambda c: c.bars(symbol="000001", category=4, offset=1))
-        ok = bars is not None
-        return {"ok": ok, "mootdx": ok, "endpoints": len(ENDPOINTS)}
+        bars = mootdx_kline("000001", 4, 1)
     except Exception as e:  # noqa
-        raise HTTPException(status_code=503, detail=f"mootdx 不可用：{e}")
+        raise HTTPException(status_code=503, detail=f"通达信行情不可用：{e}")
+    if not bars:
+        raise HTTPException(status_code=503, detail="通达信行情返回空数据（节点失效或协议变更）")
+    return {"ok": True, "quotes": True, "endpoints": len(ENDPOINTS)}
 
 
 @app.get("/api/manifest")

@@ -6,6 +6,10 @@
 # mootdx 不锁死具体版本：按上游 README V3.2.4，靠 tdx_client() helper 规避 0.11.x BESTIP
 # 空串崩溃，锁 0.10.12 反而在部分 Python 下 import 崩。
 mootdx>=0.10,<0.12
+# 通达信 2026-07-17 换了实时行情协议，pytdx/tdxpy 系（mootdx 依赖它）的 K线/报价/逐笔
+# 全网返空且上游未修（mootdx#157）。opentdx 重新解析了新协议，行情四个端点改走它；
+# mootdx 留着是因为财务与 F10 不受该次变更影响、实测仍正常。
+opentdx>=0.2.4,<0.3
 requests>=2.31,<3
 certifi>=2024.0
 pandas>=2.0,<3
