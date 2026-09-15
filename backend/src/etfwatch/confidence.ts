@@ -63,7 +63,6 @@ interface AgentScore {
   ins: Partial<{
     entryLow: number;
     entryHigh: number;
-    sizePct: number;
     stopLoss: number;
     invalidation: string;
     reason: string;
@@ -222,7 +221,6 @@ function parseAgentScore(text: string, fallbackAdvice: string): AgentScore {
       ins: {
         entryLow: numOr(raw.entryLow),
         entryHigh: numOr(raw.entryHigh),
-        sizePct: numOr(raw.sizePct),
         stopLoss: numOr(raw.stopLoss),
         invalidation: typeof raw.invalidation === 'string' ? raw.invalidation.trim() : undefined,
         reason: typeof raw.reason === 'string' ? raw.reason.trim() : undefined,
@@ -239,6 +237,10 @@ const TF_LABEL: Record<EtfWatchSignal['timeframe'], string> = {
 };
 
 /** 组装并经护栏校验的买点执行指令 */
+// 「推送的仓位数是否等于层位记账的数」是这层唯一会让两个页面各说一套的地方，
+// 单独导出供自检喂构造数据验证。
+export { buildInstruction as __test__buildInstruction };
+
 function buildInstruction(
   s: EtfWatchSignal,
   cfg: EtfWatchConfig,
@@ -253,8 +255,19 @@ function buildInstruction(
     layer: s.layer,
     entryLow: ag.entryLow ?? null,
     entryHigh: ag.entryHigh ?? null,
-    sizePct: build ? (ag.sizePct ?? s.positionPct) : 0,
-    totalAfterPct: build ? heldPct + (ag.sizePct ?? s.positionPct) : heldPct,
+    // 仓位比例只认规则给的本层目标，**不采纳模型的 sizePct**。
+    //
+    // 两个理由：
+    // 1. 记账口径必须闭合。层状态（applyMutation）只增删层号、从不读 sizePct，
+    //    下一轮 heldPct 按层配置全额计入。模型说买 10% 而第三层配置是 40% 时，
+    //    推送给使用者的是 10%、模拟层位按 40% 记账——两个数永远对不上。
+    //    此前这靠「模型不参与了所以碰巧对上」维持，不是定义。
+    // 2. 仓位是个要照着下单的数，属于结论。按既定原则模型只做翻译与事实核对，
+    //    不产结论（见 ADR 0001/0002：规则定版后不改参数）。
+    //
+    // 模型仍可在 advice 里说它觉得该轻一点，但记账与推送都以规则为准。
+    sizePct: build ? s.positionPct : 0,
+    totalAfterPct: build ? heldPct + s.positionPct : heldPct,
     stopLoss: ag.stopLoss ?? null,
     invalidation: ag.invalidation || `日线收盘跌破 MA20 或跌破建仓价 ${cfg.hardStopPct}%`,
     reason: ag.reason || fallbackReason,
@@ -339,11 +352,14 @@ export async function confirmBuy(
     `仅当日冲上而中长期主线未确立的按「短期异动」降权。必要时用 mx_finance_data 核验实时量价/资金流。\n\n` +
     `以下为系统各模块最新研判上下文（按时效自行降权）：\n${context}\n\n` +
     `【动作裁决】action：建仓 / 观察 / 放弃，务必与 advice 自洽。\n` +
-    `【执行指令】给出 instruction：entryLow/entryHigh（建议买入价区间）、sizePct（本次占总仓位%，参考本层目标 ${s.positionPct}%）、` +
+    `【执行指令】给出 instruction：entryLow/entryHigh（建议买入价区间）、` +
+    // 不要 sizePct：仓位比例由规则定版（本层目标 ${s.positionPct}%），模型给了也不采纳。
+    // 仍向它要一个不用的数，只会让它的其余回答围着那个数偏移。
+
     `stopLoss（止损价，必给）、invalidation（失效条件一句话）、reason（一句话依据）。放弃/观察时指令可留空价位但仍给 invalidation/reason。\n` +
     `【严格输出】只输出一个 JSON，无任何额外文字或代码围栏：\n` +
     `{"action":"建仓|观察|放弃","confidence":0到100的整数,"advice":"一句话结论+关键依据(竖排要点,禁用表格)",` +
-    `"instruction":{"entryLow":数字,"entryHigh":数字,"sizePct":数字,"stopLoss":数字,"invalidation":"...","reason":"..."}}`;
+    `"instruction":{"entryLow":数字,"entryHigh":数字,"stopLoss":数字,"invalidation":"...","reason":"..."}}`;
 
   const res = await gateway.call({
     mode: 'agent',

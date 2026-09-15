@@ -92,7 +92,6 @@ function buildProbeInstruction(
   ag: Partial<{
     entryLow: number;
     entryHigh: number;
-    sizePct: number;
     stopLoss: number;
     invalidation: string;
     reason: string;
@@ -107,7 +106,21 @@ function buildProbeInstruction(
     : isReduce
       ? action
       : '观望';
-  const sizePct = ag.sizePct ?? (isAdd ? 20 : isReduce ? (action === '清仓' ? heldPct : 20) : 0);
+  // 仓位比例按规则算，**不采纳模型的 sizePct**，也不用硬编码的 20%。
+  //
+  // 与盯盘那一路同一个道理（见 confidence.ts 的同名字段）：层状态只增删层号、
+  // 不读 sizePct，记账永远按层配置算。让模型或一个拍出来的 20% 决定推送的数字，
+  // 等于推送和记账各说一套。这里统一改成：
+  //   建仓/加仓 → 目标层的配置比例；清仓 → 当前全部；减仓 → 撤一层（最高层的比例）
+  const layerPctOf = (l: number | null): number =>
+    l === 1 ? cfg.layer1Pct : l === 2 ? cfg.layer2Pct : l === 3 ? cfg.layer3Pct : 0;
+  const sizePct = isAdd
+    ? layerPctOf(layer)
+    : isReduce
+      ? action === '清仓'
+        ? heldPct
+        : Math.min(heldPct, layerPctOf(layer))
+      : 0;
   const draft: EtfExecInstruction = {
     action: insAction,
     layer,
@@ -177,11 +190,13 @@ export async function aiVerdict(
     `若已持仓则结合死叉/破位/移动止盈判断是否减/清仓。必要时用 mx_finance_data 核验实时量价/资金流。\n\n` +
     `以下为系统各模块最新研判上下文（按时效自行降权）：\n${context}\n\n` +
     `【动作裁决】action 取：建仓 / 加仓 / 观察 / 减仓 / 清仓 / 放弃，务必与 advice 自洽。\n` +
-    `【执行指令】给出 instruction：entryLow/entryHigh（建/加仓买入价区间）、sizePct（本次占总仓位%）、` +
+    `【执行指令】给出 instruction：entryLow/entryHigh（建/加仓买入价区间）、` +
+    // 同 confidence.ts：仓位比例由规则定版，不向模型要这个数
+
     `stopLoss（止损价）、invalidation（失效条件一句话）、reason（一句话依据）。\n` +
     `【严格输出】只输出一个 JSON，无任何额外文字或代码围栏：\n` +
     `{"action":"建仓|加仓|观察|减仓|清仓|放弃","confidence":0到100的整数,"advice":"一句话结论+关键依据(竖排要点,禁用表格)",` +
-    `"instruction":{"entryLow":数字,"entryHigh":数字,"sizePct":数字,"stopLoss":数字,"invalidation":"...","reason":"..."}}`;
+    `"instruction":{"entryLow":数字,"entryHigh":数字,"stopLoss":数字,"invalidation":"...","reason":"..."}}`;
 
   const res = await gateway.call({
     mode: 'agent',
@@ -235,7 +250,6 @@ export async function aiVerdict(
         {
           entryLow: numOr(raw.entryLow),
           entryHigh: numOr(raw.entryHigh),
-          sizePct: numOr(raw.sizePct),
           stopLoss: numOr(raw.stopLoss),
           invalidation: typeof raw.invalidation === 'string' ? raw.invalidation.trim() : undefined,
           reason: typeof raw.reason === 'string' ? raw.reason.trim() : undefined,
