@@ -150,16 +150,43 @@ function verdictOf(rows: readonly ScoreRow[]): string {
       `但也别当成「不知道」`
     );
   }
+  /** 某持有期两个对照里更差的那个（结论一律取更保守的一侧） */
+  const worseEdge = (r: ScoreRow): number => Math.min(r.edgeVsSameCode, r.edgeVsSameDate);
+  const losingOf = (rows: readonly ScoreRow[]): ScoreRow[] =>
+    rows.filter((r) => worseEdge(r) <= -MEANINGFUL_EDGE);
+  const pickWorst = (rows: ScoreRow[]): ScoreRow =>
+    rows.reduce((a, b) => (worseEdge(a) <= worseEdge(b) ? a : b));
+
   const winning = usable.filter(
     (r) => r.edgeVsSameCode >= MEANINGFUL_EDGE && r.edgeVsSameDate >= MEANINGFUL_EDGE,
   );
-  if (winning.length === 0) return '尚无证据显示优于随机';
+  if (winning.length === 0) {
+    // 样本够了却没有一个持有期领先，分两种情况，**不能都说成「尚无证据」**：
+    //
+    // 「尚无证据显示优于随机」读起来是「还不知道」，适合真的分不出高下的情形。
+    // 但样本充足且明确为负时，事实是「已有证据显示它更差」——把后者说成前者，
+    // 就是上面那条不对称在另一个分支上重演：漏报亏损是真亏钱。
+    //
+    // 真实例子（2026-09-15 的消息面催化剂）：111 条样本，持有 5 日落后 1.4 个
+    // 百分点、10 日落后 2.6、20 日落后 4.4，三个持有期全负且越拿越差。
+    // 这种成绩说成「尚无证据」，使用者会以为它中性可用。
+    const losing = losingOf(usable);
+    if (losing.length === 0) return '尚无证据显示优于随机';
+    const worst = pickWorst(losing);
+    const pts = Math.abs(worseEdge(worst) * 100);
+    const allNeg = losing.length === usable.length;
+    return (
+      `弱于随机：持有 ${worst.horizon} 日落后 ${pts.toFixed(1)} 个百分点` +
+      `（${worst.judged} 条样本）` +
+      (allNeg ? '，且每个持有期都是负的' : '')
+    );
+  }
   const best = winning.reduce((a, b) =>
     Math.min(a.edgeVsSameCode, a.edgeVsSameDate) >= Math.min(b.edgeVsSameCode, b.edgeVsSameDate)
       ? a
       : b,
   );
-  const pts = Math.min(best.edgeVsSameCode, best.edgeVsSameDate) * 100;
+  const pts = worseEdge(best) * 100;
   const head = `持有 ${best.horizon} 日时领先随机 ${pts.toFixed(1)} 个百分点（${best.judged} 条样本）`;
 
   // 只报最好的那个持有期是在骗人。
@@ -168,17 +195,11 @@ function verdictOf(rows: readonly ScoreRow[]): string {
   // 而同一批信号 20 日是**落后 6.6 个百分点**。只印前半句，
   // 使用者会当成「这套选股有本事」，然后按他自己的中线打法拿 20 天以上——
   // 正好踩在它亏钱的那一段。报好看的、省掉打脸的，跟没判一样。
-  const losing = usable.filter(
-    (r) => Math.min(r.edgeVsSameCode, r.edgeVsSameDate) <= -MEANINGFUL_EDGE,
-  );
+  const losing = losingOf(usable);
   if (losing.length === 0) return head;
 
-  const worst = losing.reduce((a, b) =>
-    Math.min(a.edgeVsSameCode, a.edgeVsSameDate) <= Math.min(b.edgeVsSameCode, b.edgeVsSameDate)
-      ? a
-      : b,
-  );
-  const wpts = Math.min(worst.edgeVsSameCode, worst.edgeVsSameDate) * 100;
+  const worst = pickWorst(losing);
+  const wpts = worseEdge(worst) * 100;
   return (
     `${head}；但持有 ${worst.horizon} 日反而落后 ${Math.abs(wpts).toFixed(1)} 个百分点` +
     `（${worst.judged} 条样本）——只在短持有期有效，拿久了会亏回去`

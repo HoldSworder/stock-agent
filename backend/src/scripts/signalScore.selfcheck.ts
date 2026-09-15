@@ -220,7 +220,48 @@ assert.equal(
   assert.ok(!smallAndFine.includes('方向是负的'), '方向没问题时不该加负面提示');
 }
 
+// ===== 样本充足且明确为负：要说「弱于随机」，不许说成「尚无证据」 =====
+//
+// 「尚无证据显示优于随机」读起来是「还不知道」，适合真的分不出高下的情形。
+// 样本充足且明确为负时，事实是「已有证据显示它更差」——说成前者，
+// 就是上面那条不对称在另一个分支上重演：漏报优势只是错过，漏报亏损是真亏钱。
+//
+// 触发这条的真实例子：2026-09-15 首次给消息面催化剂判分，111 条样本，
+// 持有 5 日落后 1.4 个百分点、10 日落后 2.6、20 日落后 4.4，三个持有期全负，
+// 而当时的结论只有「尚无证据显示优于随机」，会被当成中性可用。
+{
+  const row = (horizon: number, judged: number, edge: number) => ({
+    horizon,
+    judged,
+    mean: 0,
+    upRatio: 0.5,
+    baselineSameCode: 0,
+    baselineSameDate: 0,
+    edgeVsSameCode: edge,
+    edgeVsSameDate: edge,
+  });
+
+  const allNeg = __test__verdictOf([row(5, 111, -0.014), row(10, 104, -0.026), row(20, 81, -0.044)]);
+  assert.ok(allNeg.includes('弱于随机'), '样本充足且为负必须直说弱于随机');
+  assert.ok(
+    !allNeg.includes('尚无证据'),
+    '已有证据显示更差，不能说成「尚无证据」——那会被读成中性可用',
+  );
+  // 取两个对照里更差的那一侧，且只在达到样本量的持有期里挑最差
+  assert.ok(allNeg.includes('10 日') && allNeg.includes('2.6'), '要指出最差的那个持有期与幅度');
+  assert.ok(allNeg.includes('每个持有期都是负的'), '全负是重要事实，要说出来');
+
+  // 只有部分持有期为负 → 报最差那个，但不说「每个都是负的」
+  const partial = __test__verdictOf([row(5, 200, 0.001), row(20, 200, -0.03)]);
+  assert.ok(partial.includes('弱于随机') && partial.includes('20 日'));
+  assert.ok(!partial.includes('每个持有期都是负的'), '有一个不是负的就不许说全负');
+
+  // 真的分不出高下（都在噪声带内）→ 保留「尚无证据」这句
+  const flat = __test__verdictOf([row(5, 200, 0.001), row(20, 200, -0.002)]);
+  assert.equal(flat, '尚无证据显示优于随机', '噪声带内应保留原措辞，别把中性说成弱于随机');
+}
+
 console.log(
   '✅ 判分口径自检通过：前向收益边界 / 顺延上限 / 看跌价值取反 / ' +
-    '样本不足不给结论 / 只赢一个不算 / 对照池按模块归拢 / 结论不报单一持有期',
+    '样本不足不给结论 / 只赢一个不算 / 对照池按模块归拢 / 结论不报单一持有期 / 样本足且为负要直说弱于随机',
 );

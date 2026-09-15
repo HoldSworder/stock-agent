@@ -122,12 +122,65 @@ function loadScreener(engine: string): ScorableSignal[] {
 }
 
 /**
- * 选股的对照池：本地日线覆盖的全部标的（约 1600 只），**不是被选中的那几百只**。
+ * 消息面催化剂。
+ *
+ * `news_catalysts` 有 380 条、覆盖 2026-06-14 起三个月，是情报类模块里
+ * 唯一结构化落库的，所以拿它当「把情报变成可判分信号」的试点。
+ *
+ * **不需要模型抽取，这一点与原先的判断不同。** 原以为得让模型把自由文本转成
+ * 看涨/看跌，实查之后有两个发现：
+ *
+ * 1. **方向结构性地全是看涨。** 这张表记的是「催化剂」——政策利好、订单、
+ *    业绩上调、并购。没人会把「这个要跌」记成催化剂。用看跌词表扫全部 380 条，
+ *    命中 9 条，逐条看下来全是看涨记录：要么利空说的是另一个板块
+ *    （「航空受益油价下行，利空石油开采」），要么本身是好事
+ *    （「撤销退市风险警示」）。**一条真正看跌的都没有。**
+ * 2. **代码用正则就能取。** `codes` 是 JSON 数组，混着真实代码
+ *    （`翔宇医疗(688626)`）、题材名（`商业航天`）、无代码的公司名（`中国卫星`）。
+ *    取 6 位数字即可，题材名天然被丢掉。380 条里 206 条能抽出代码，共 453 个实例。
+ *
+ * 所以这个试点是纯规则的。`direction` 那一列（存的是自由文本描述而非方向枚举）
+ * 压根不用读——方向由这张表的性质决定，不由那一列决定。
+ *
+ * 分组标签用 `fermented`（系统自己标的「已发酵/未发酵」），因为它回答一个真问题：
+ * **被标成已发酵的那批，事后是不是真的更强。** 不用 `catalyst_type`——
+ * 那一列已退化成 97 个自由文本取值（「业绩+股权激励」这种），分不出组。
+ */
+function loadNewsCatalysts(): ScorableSignal[] {
+  const rows = sqlite
+    .prepare(
+      `select codes, first_seen_date, fermented from news_catalysts
+       where first_seen_date is not null and first_seen_date != '' order by first_seen_date`,
+    )
+    .all() as Array<{ codes: string | null; first_seen_date: string; fermented: number | null }>;
+
+  const out: ScorableSignal[] = [];
+  for (const r of rows) {
+    // 同一条催化剂里同一个代码只记一次，否则一条消息按提及次数重复占样本
+    const codes = new Set(
+      (String(r.codes ?? '').match(/\d{6}/g) ?? []).filter((c) => /^[036]\d{5}$/.test(c)),
+    );
+    for (const code of codes) {
+      out.push({
+        code,
+        tradeDate: r.first_seen_date,
+        side: 'long',
+        tag: r.fermented ? '已发酵' : '未发酵',
+      });
+    }
+  }
+  return out;
+}
+
+/**
+ * 面向全市场的来源共用的对照池：本地日线覆盖的全部标的（约 1600 只），
+ * **不是被它选中/提到的那几百只**。
  *
  * 用被选中的标的当池子就又踩了那个坑——等于拿信号偏爱的标的做基准，
- * 会低估它的优势。选股面向全市场，基准就该是「那天在全市场随便买一只」。
+ * 会低估它的优势。选股与消息面都面向全市场，
+ * 基准就该是「那天在全市场随便买一只」。
  */
-function screenerPool(): string[] {
+function marketPool(): string[] {
   const rows = sqlite
     .prepare(`select distinct code from kline_daily where provisional = 0`)
     .all() as Array<{ code: string }>;
@@ -181,7 +234,7 @@ export const SIGNAL_SOURCES: readonly SignalSource[] = [
     side: 'long',
     origin: '全市场规则打分排序（screener/scorer.ts、ranker.ts），不经模型',
     poolKey: 'screener',
-    pool: screenerPool,
+    pool: marketPool,
     load: () => loadScreener('multifactor'),
   },
   {
@@ -190,8 +243,20 @@ export const SIGNAL_SOURCES: readonly SignalSource[] = [
     side: 'long',
     origin: '模型按自然语言条件挑选（screener 的 nl 引擎）',
     poolKey: 'screener',
-    pool: screenerPool,
+    pool: marketPool,
     load: () => loadScreener('nl'),
+  },
+  {
+    id: 'news.catalyst',
+    label: '消息面催化剂',
+    // 这张表记的全是「利好」，没有一条看跌记录（见 loadNewsCatalysts 的说明）
+    side: 'long',
+    origin:
+      '情报合并产出的催化剂台账（news_catalysts），按正则从 codes 里取 6 位代码，' +
+      '方向由该表性质决定（记的都是利好），不经模型抽取',
+    poolKey: 'news',
+    pool: marketPool,
+    load: loadNewsCatalysts,
   },
 ];
 
