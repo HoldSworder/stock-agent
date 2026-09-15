@@ -5,6 +5,7 @@ import { newId, nowIso, shanghaiToday } from '../util';
 import { shiftTradingDays } from '../market/calendar';
 import { evaluateAdvice, type AdviceState, type AdviceAction } from './advice';
 import { isExDividendName } from './judge';
+import { heldLayerCount as etfWatchHeldLayers } from '../etfwatch/store';
 import { computeSwingSizing, splitLayers } from './sizing';
 
 // 建议持仓的落库与推进。
@@ -218,7 +219,6 @@ export function openAdvice(input: {
   assetType: 'etf' | 'stock';
   totalEquity: number;
   realPct: number;
-  etfWatchPct: number;
   ruleVersion: string;
   tradeDate?: string;
 }): { created: boolean; reason: string; allowedPct?: number } {
@@ -248,10 +248,21 @@ export function openAdvice(input: {
     totalEquity: input.totalEquity,
     bars: input.bars,
     realPct: input.realPct,
-    etfWatchPct: input.etfWatchPct,
+    etfWatchHeldLayers: etfWatchHeldLayers(input.code),
     usedByOthersPct: usedBudgetPct(input.code),
   });
-  if (!sizing) return { created: false, reason: '算不出仓位（缺总资产或止损方向不对），不给建议' };
+  if (!sizing) {
+    // 盯盘已建层要单独说明：它不是「算不出来」，而是「这只已经有人在管」。
+    // 混成一句会让使用者以为数据缺失，去查一个根本没坏的东西
+    const layers = etfWatchHeldLayers(input.code);
+    if (layers > 0) {
+      return {
+        created: false,
+        reason: `这只 ETF 盯盘那边已经建了 ${layers} 层，仓位由盯盘统一管，波段不再另给一份`,
+      };
+    }
+    return { created: false, reason: '算不出仓位（缺总资产或止损方向不对），不给建议' };
+  }
   if (sizing.allowedPct <= 0) return { created: false, reason: sizing.note };
 
   const { layer1Pct } = splitLayers(sizing.allowedPct);

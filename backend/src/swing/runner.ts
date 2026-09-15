@@ -341,9 +341,6 @@ export async function runSwingScan(mode: 'live' | 'replay' = 'live'): Promise<Ru
         assetType: t.assetType,
         totalEquity: collected.totalEquity,
         realPct: t.realPct,
-        // ETF 盯盘的建议层暂未接入合并，先按 0 处理。
-        // 接入前 swing 可能与它重复占仓，故合计上限压在 20% 有额外意义
-        etfWatchPct: 0,
         ruleVersion: rule.version,
         tradeDate,
       });

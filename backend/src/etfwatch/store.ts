@@ -258,6 +258,20 @@ export function getLayerState(code: string): EtfWatchLayerState | null {
   return row ? rowToState(row) : null;
 }
 
+/**
+ * 这只已经建了几层（0~3）。给「别的模块要不要对同一只标的另给仓位」当判据。
+ *
+ * 刻意只交出层数而不是层百分比：层百分比的基数是「给这个赛道的钱」，
+ * 而其他模块（波段、标的计划）的百分比基数是「账户总资产」，两者之间的换算率
+ * 系统里没有。交出百分比就等于邀请调用方在两把尺子之间做加减。
+ *
+ * 层状态存坏时 rowToState 会抛错，本函数不接——读不到就该让调用方停下，
+ * 而不是当成 0 层继续给仓位。
+ */
+export function heldLayerCount(code: string): number {
+  return getLayerState(code)?.heldLayers.length ?? 0;
+}
+
 export function listLayerStates(): EtfWatchLayerState[] {
   return db.select().from(schema.etfWatchState).all().map(rowToState);
 }

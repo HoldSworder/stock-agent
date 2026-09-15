@@ -83,7 +83,7 @@ function main(): void {
     totalEquity: EQUITY,
     bars: calmBars(1),
     realPct: 0,
-    etfWatchPct: 0,
+    etfWatchHeldLayers: 0,
     usedByOthersPct: 0,
   };
   check('总资产为 0 时返回 null（不退化成固定比例）', computeSwingSizing({ ...base, totalEquity: 0 }) === null);
@@ -140,19 +140,26 @@ function main(): void {
   const over = computeSwingSizing({ ...base, usedByOthersPct: TOTAL_UNVERIFIED_CAP_PCT + 5 });
   check('额度超用时增量仍为 0 而非负数', over != null && over.allowedPct === 0, `${over?.allowedPct}%`);
 
-  // --- 6. 唯一合并公式：取真实持仓与 ETF 盯盘目标的较大者去扣 ---
-  const cases: Array<{ real: number; etf: number; name: string }> = [
-    { real: 4, etf: 0, name: '只有真实持仓' },
-    { real: 0, etf: 4, name: '只有 ETF 盯盘建议' },
-    { real: 4, etf: 6, name: 'ETF 盯盘目标更高' },
-    { real: 7, etf: 3, name: '真实持仓更高' },
+  // --- 6. 合并公式：只扣真实持仓；盯盘在管的标的一律不给数 ---
+  //
+  // 此前这里扣的是 max(真实持仓, 盯盘目标仓位)，而那个「盯盘目标仓位」是拿
+  // 盯盘的层百分比填的——层百分比以「给这个赛道的钱」为基数，本函数的一切
+  // 百分比以「账户总资产」为基数，两把尺子做减法，不论填大填小都错：
+  // 填 100（三层建满）会把增量永久扣成 0，填 0 则两套系统各占一次仓。
+  //
+  // 而「这个赛道该占账户多少」系统里没有，所以换算不出来。于是改成收层数，
+  // 有层就不给数——这与全仓的「取不到就不产出精确动作」是同一条纪律。
+  const cases: Array<{ real: number; name: string }> = [
+    { real: 0, name: '无持仓' },
+    { real: 4, name: '已持 4%' },
+    { real: 7, name: '已持 7%' },
   ];
   const noHold = computeSwingSizing(base)?.allowedPct ?? 0;
   for (const c of cases) {
-    const r = computeSwingSizing({ ...base, realPct: c.real, etfWatchPct: c.etf });
-    const expected = Math.max(0, Math.round((noHold - Math.max(c.real, c.etf)) * 10) / 10);
+    const r = computeSwingSizing({ ...base, realPct: c.real });
+    const expected = Math.max(0, Math.round((noHold - c.real) * 10) / 10);
     check(
-      `${c.name}：按较大者 ${Math.max(c.real, c.etf)}% 扣减`,
+      `${c.name}：按真实持仓 ${c.real}% 扣减`,
       r != null && Math.abs(r.allowedPct - expected) < 0.15,
       `实际 ${r?.allowedPct}%，期望约 ${expected}%（无持仓时为 ${noHold}%）`,
     );
@@ -163,11 +170,16 @@ function main(): void {
     held != null && held.allowedPct === 0 && held.binding === 'already_held',
     `${held?.allowedPct}% / ${held?.binding}`,
   );
-  const etfHeld = computeSwingSizing({ ...base, etfWatchPct: SINGLE_CAP_PCT + 2 });
+  for (const layers of [1, 2, 3]) {
+    check(
+      `盯盘已建 ${layers} 层时不给仓位数（返回空，而不是算出一个混了基数的数）`,
+      computeSwingSizing({ ...base, etfWatchHeldLayers: layers }) === null,
+      `实际 ${JSON.stringify(computeSwingSizing({ ...base, etfWatchHeldLayers: layers }))}`,
+    );
+  }
   check(
-    'ETF 盯盘已建议到上限时 swing 让路，不再加',
-    etfHeld != null && etfHeld.allowedPct === 0,
-    `${etfHeld?.allowedPct}%`,
+    '盯盘 0 层时照常给数，别把正常情形一起挡掉',
+    computeSwingSizing({ ...base, etfWatchHeldLayers: 0 }) != null,
   );
 
   // --- 7. 反向验算：真按这个仓位买、真跌到止损，亏损不超过 0.25% 总资产 ---

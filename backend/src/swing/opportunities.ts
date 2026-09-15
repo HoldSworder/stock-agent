@@ -7,6 +7,7 @@ import type {
 } from '@stock-agent/shared';
 import { getKline } from '../datasource/scheduler';
 import { computeSwingSizing } from './sizing';
+import { heldLayerCount as etfWatchHeldLayers } from '../etfwatch/store';
 import { usedBudgetPct } from './adviceStore';
 import { TIME_STOP_TRADE_DAYS } from './advice';
 
@@ -206,12 +207,21 @@ function toOpportunity(
     bars,
     // 已持有的标的不进这个清单，所以这里恒为 0
     realPct: 0,
-    // ETF 盯盘的建议层尚未接入合并（runner.ts 同此），两边可能重复占仓。
-    // 本轮 ETF 盯盘定时已关，暂不会冲突
-    etfWatchPct: 0,
+    // 盯盘已建层的标的不再另给一份仓位。此前这里硬填 0 并注明「盯盘定时已关，
+    // 暂不会冲突」，但库里 etfwatch_enabled 是 true——那句假设早就过期了，
+    // 于是两套系统可以同时对一只 ETF 各占一次仓。
+    etfWatchHeldLayers: etfWatchHeldLayers(main.code),
     usedByOthersPct,
   });
   if (!sized) {
+    const layers = etfWatchHeldLayers(main.code);
+    if (layers > 0) {
+      return {
+        ...base,
+        sizing: null,
+        sizingUnavailable: `ETF 盯盘那边已经建了 ${layers} 层，仓位由盯盘统一管`,
+      };
+    }
     return { ...base, sizing: null, sizingUnavailable: '按现有止损距离算不出仓位' };
   }
   if (sized.allowedPct <= 0) {

@@ -8799,8 +8799,6 @@ export interface SwingSizingExplain {
   riskCapPct: number;
   /** 真实持仓已有比例 % */
   realPct: number;
-  /** ETF 盯盘已建议比例 % */
-  etfWatchPct: number;
   /** 哪一项是最终生效的约束 */
   binding: 'single' | 'total' | 'risk' | 'already_held';
   /** 白话说明 */

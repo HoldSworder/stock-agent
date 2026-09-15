@@ -55,8 +55,18 @@ export interface SizingInput {
   bars: KlineBar[];
   /** 该标的真实持仓占总资产 % */
   realPct: number;
-  /** 该标的 ETF 盯盘当前建议目标仓位 % */
-  etfWatchPct: number;
+  /**
+   * 该标的在 ETF 盯盘那边已经建了几层（0~3）。
+   *
+   * **这里刻意不收「盯盘目标仓位 %」**，因为那个百分比换不成本函数要的基数：
+   * 盯盘的 40/40/20 是「给这个赛道的钱」的分层，三层建满是 100%；
+   * 本函数的一切百分比是「占账户总资产」。把 100 当成占总资产 100% 填进来，
+   * 会把可执行增量永久扣成 0；反过来当成 0 填，两套系统就各自占一次仓。
+   * 而「这个赛道该占账户多少」是系统里不存在的数，所以无法换算。
+   *
+   * 于是只收层数这个能确知的事实，有层就不给增量（见下），不猜那个百分比。
+   */
+  etfWatchHeldLayers: number;
   /** 其他仍在跟踪的未验证建议已占用的额度合计 %（不含本标的） */
   usedByOthersPct: number;
 }
@@ -65,15 +75,19 @@ export interface SizingInput {
  * 算出可执行增量。**全系统只有这一处计算它**，别处一律引用本函数的结果。
  *
  * 唯一合并公式：
- *   可执行增量 = max(0, min(本次建议目标, 单标的上限) − max(真实持仓, ETF 盯盘目标))
+ *   可执行增量 = max(0, min(本次建议目标, 单标的上限) − 真实持仓)
  *
- * 取真实持仓与 ETF 盯盘目标的**较大者**去扣：不管是已经买到了，还是 ETF 盯盘已经建议到了，
- * 都只在其之上补差，不重复占仓。
+ * 只在真实持仓之上补差，不重复占仓。
  *
- * 为什么是 swing 让路而不是取较大者：ETF 盯盘是已经在用的功能，
- * 不该被一个尚未验收的新信号削弱；swing 作为未验证方理应自己受限。
+ * ETF 盯盘那边已经建了层的标的，本函数**一律不给增量**（返回 null）。
+ * 原因不是谦让，是算不出来：盯盘的层百分比以「赛道配置」为基数，本函数以
+ * 「账户总资产」为基数，而两者之间的换算率（这个赛道该占账户多少）系统里没有。
+ * 硬填一个数就是在两套不同的尺子之间做加减——不论填大填小都错。
  *
- * 返回 null 表示给不出建议（缺总资产、缺止损等），调用方必须区别于「增量为 0」。
+ * 为什么是 swing 让路：ETF 盯盘是已经在用的功能，swing 作为未验证方理应自己受限。
+ *
+ * 返回 null 表示给不出建议（缺总资产、缺止损、盯盘已建层等），
+ * 调用方必须区别于「增量为 0」，并按 conflictNote 给出各自的说法。
  */
 export function computeSwingSizing(input: SizingInput): SwingSizingExplain | null {
   const {
@@ -83,9 +97,12 @@ export function computeSwingSizing(input: SizingInput): SwingSizingExplain | nul
     totalEquity,
     bars,
     realPct,
-    etfWatchPct,
+    etfWatchHeldLayers,
     usedByOthersPct,
   } = input;
+
+  // 盯盘已在管这只：两套系统的仓位基数不同且无法换算，给不出能相加的数
+  if (etfWatchHeldLayers > 0) return null;
 
   // 总资产无效时禁止给建仓建议，且不得退化成固定百分比——
   // 退化等于在不知道本金多少的情况下算风险，那个百分比是假的
@@ -115,8 +132,9 @@ export function computeSwingSizing(input: SizingInput): SwingSizingExplain | nul
   const remainingTotalPct = Math.max(0, TOTAL_UNVERIFIED_CAP_PCT - usedByOthersPct);
   // 本次目标 = 三道上限取最小
   const target = Math.min(SINGLE_CAP_PCT, riskCapPct, remainingTotalPct);
-  // 已被占住的部分：真实持仓与 ETF 盯盘目标取较大者
-  const alreadyHeld = Math.max(realPct, etfWatchPct);
+  // 已被占住的部分只看真实持仓。盯盘已建层的标的在函数开头就返回了，
+  // 走到这里说明盯盘没在管这只，不存在要扣的第二份占仓
+  const alreadyHeld = realPct;
   const allowedPct = Math.max(0, target - alreadyHeld);
 
   const binding: SwingSizingExplain['binding'] =
@@ -136,7 +154,6 @@ export function computeSwingSizing(input: SizingInput): SwingSizingExplain | nul
     usedPct: r1(usedByOthersPct),
     riskCapPct: r1(riskCapPct),
     realPct: r1(realPct),
-    etfWatchPct: r1(etfWatchPct),
     binding,
     note: explain(binding, r1(allowedPct), r1(alreadyHeld), r1(remainingTotalPct), r1(riskCapPct)),
   };

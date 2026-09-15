@@ -82,7 +82,6 @@ function newAdvice(code: string, name = `测试${code}`) {
     assetType: 'etf',
     totalEquity: EQUITY,
     realPct: 0,
-    etfWatchPct: 0,
     ruleVersion: 'swing-test',
     tradeDate: TRADE_DATE,
   });
@@ -221,7 +220,6 @@ function main(): void {
     assetType: 'etf',
     totalEquity: 0,
     realPct: 0,
-    etfWatchPct: 0,
     ruleVersion: 'swing-test',
     tradeDate: TRADE_DATE,
   });
@@ -238,7 +236,6 @@ function main(): void {
     assetType: 'etf',
     totalEquity: EQUITY,
     realPct: 12,
-    etfWatchPct: 0,
     ruleVersion: 'swing-test',
     tradeDate: TRADE_DATE,
   });
