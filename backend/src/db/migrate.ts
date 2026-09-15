@@ -797,8 +797,12 @@ CREATE TABLE IF NOT EXISTS real_position_snapshots (
   avg_cost REAL NOT NULL DEFAULT 0,
   price REAL NOT NULL DEFAULT 0,
   market_value REAL NOT NULL DEFAULT 0,
-  -- 累计持有盈亏（元），券商原值
+  -- 累计持有盈亏（元），券商原值。只算还拿着那部分，不含已卖出落袋的
   hold_profit REAL NOT NULL DEFAULT 0,
+  -- 这只票上已经卖出落袋的盈亏（元），券商原值，不可本地重算。
+  -- 分层撤仓的打法下它是大头：接口只给当前累计值，不落库就永远拿不到
+  -- 「这一段时间里落袋了多少」。
+  closed_profit REAL NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_real_position_snapshots_key ON real_position_snapshots(account, trade_date, code);
@@ -1348,6 +1352,8 @@ export function ensureSchema(): void {
     "ALTER TABLE playbook_backtests ADD COLUMN equity TEXT NOT NULL DEFAULT '[]'",
     "ALTER TABLE playbook_backtests ADD COLUMN notes TEXT NOT NULL DEFAULT '[]'",
     'ALTER TABLE playbook_backtests ADD COLUMN spec TEXT',
+    // 已落袋盈亏：昨天建表时没有这一列，而库里已经有数据，必须加列而不是靠建表语句
+    'ALTER TABLE real_position_snapshots ADD COLUMN closed_profit REAL NOT NULL DEFAULT 0',
   ];
   for (const sql of addColumns) {
     try {

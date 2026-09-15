@@ -82,6 +82,8 @@ const etfPos = (price: number): Parameters<typeof resolveRule>[0] => ({
   marketValue: price * 10000,
   holdProfit: (price - 10) * 10000,
   holdRate: (price - 10) / 10,
+  closedProfit: 0,
+  closedRate: 0,
   todayProfit: 0,
   todayRate: 0,
   positionRate: 0.3,

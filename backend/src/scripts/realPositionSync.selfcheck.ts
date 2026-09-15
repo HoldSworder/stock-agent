@@ -25,6 +25,8 @@ const holding = (p: Partial<Holding> = {}): Holding => ({
   count: 10_000,
   cost: 10,
   holdDays: 30,
+  closedProfit: 0,
+  closedRate: 0,
   rawPrice: 10,
   rawHoldProfit: 0,
   rawHoldRate: 0,
@@ -169,6 +171,83 @@ const TOTAL = 200_000;
   );
   assert.notEqual(held.todayProfit, today.todayProfit, '当日建仓与持有多日不该算出同一个当日盈亏');
   assert.equal(held.todayProfit, 10_000 * (10.5 - 9));
+}
+
+// ===== 6. 已卖出落袋的盈亏必须带出来，且不许混进浮动盈亏 =====
+//
+// 接口（stock_position）一直在给 close_profit / close_rate，代码此前完全没读。
+// 分层撤仓的打法下这一段是大头。2026-09-15 的真实账户：
+//
+//   半导设备 159516  浮亏 -12220（-27.9%）  已落袋 +14962（+33.8%）  这只实际 +2742
+//   科创芯片 588200  浮亏  -5068（-27.3%）  已落袋  +4739           这只实际  -328
+//   合计            浮亏 -57412            已落袋 +20447           净 -36965
+//
+// 两个数必须分开存、分开显示：
+//   混在一起 → 止损线会被落袋盈利抵掉，该走的不走（成本止损看的就是还拿着那部分）
+//   只留浮亏 → 一只赚钱的票被判成止损，而使用者心里记的是「这只我赚了三成」，
+//              他会认为系统算错，然后连真该止损的那几条一起不信
+{
+  const p = __test__normalize(
+    holding({ cost: 10, count: 10_000, closedProfit: 14962, closedRate: 0.3376 }),
+    { price: 7, prevClose: 7.2 } as Quote,
+    TOTAL,
+  );
+
+  assert.equal(p.closedProfit, 14962, '已落袋盈亏要原样带出（券商口径，不可本地重算）');
+  assert.equal(p.closedRate, 0.3376, '已落袋收益率同样原样带出');
+
+  // 关键：浮动盈亏不得被落袋部分污染
+  assert.equal(p.holdProfit, -30_000, '浮动盈亏只算还拿着的这部分：1 万股 ×(7−10)');
+  assert.equal(p.holdRate, -0.3, '浮动收益率也只看还拿着的部分，不因为落袋赚过就变好看');
+
+  // 纪律体检：该止损还是要止损（规则不动），但必须把落袋那段说出来
+  const report = await evaluateDiscipline({
+    asOf: new Date().toISOString(),
+    sourceDate: '2026-09-15',
+    source: '自检构造',
+    cash: 0,
+    positionCount: 1,
+    totalMarketValue: 70_000,
+    fundMarketValue: 0,
+    totalAsset: TOTAL,
+    totalHoldProfit: 0,
+    totalTodayProfit: 0,
+    positions: [p],
+    funds: [],
+    closedToday: [],
+  });
+  const item = report.items[0];
+  assert.equal(item.status, 'stop_loss', '浮亏 30% 该止损就是该止损，落袋赚过不改这条规则');
+
+  const stopFlag = item.flags.find((f) => f.kind === 'stop_loss')!;
+  assert.ok(
+    stopFlag.detail.includes('落袋'),
+    '止损提示里必须说明这只已经落袋多少——否则与使用者的体感对不上，他会连真该止损的都不信',
+  );
+  assert.ok(
+    stopFlag.detail.includes('只算还拿着'),
+    '要讲清「下面说的盈亏只算还拿着的这部分」，避免被读成这只票总共亏了这么多',
+  );
+
+  // 没有落袋记录时不该多那句话
+  const clean = __test__normalize(holding({ cost: 10 }), { price: 7, prevClose: 7.2 } as Quote, TOTAL);
+  const cleanReport = await evaluateDiscipline({
+    asOf: new Date().toISOString(),
+    sourceDate: '2026-09-15',
+    source: '自检构造',
+    cash: 0,
+    positionCount: 1,
+    totalMarketValue: 70_000,
+    fundMarketValue: 0,
+    totalAsset: TOTAL,
+    totalHoldProfit: 0,
+    totalTodayProfit: 0,
+    positions: [clean],
+    funds: [],
+    closedToday: [],
+  });
+  const cleanFlag = cleanReport.items[0].flags.find((f) => f.kind === 'stop_loss')!;
+  assert.ok(!cleanFlag.detail.includes('落袋'), '没落袋过就不该加这句，那是噪音');
 }
 
 console.log('realPositionSync.selfcheck 全部通过');

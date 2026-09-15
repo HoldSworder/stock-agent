@@ -1593,8 +1593,15 @@ export const realPositionSnapshots = sqliteTable(
     avgCost: real('avg_cost').notNull().default(0),
     price: real('price').notNull().default(0),
     marketValue: real('market_value').notNull().default(0),
-    /** 累计持有盈亏（元），券商原值 */
+    /** 累计持有盈亏（元），券商原值。**只算还拿着那部分**，不含已卖出落袋的 */
     holdProfit: real('hold_profit').notNull().default(0),
+    /**
+     * 这只票上已经卖出落袋的盈亏（元），券商原值，不可本地重算。
+     *
+     * 必须按日存下来：分层撤仓的打法下它是大头，而接口只给当前累计值，
+     * 不落库就永远拿不到「这一段时间里落袋了多少」。
+     */
+    closedProfit: real('closed_profit').notNull().default(0),
     createdAt: text('created_at').notNull(),
   },
   (t) => ({

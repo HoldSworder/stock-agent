@@ -256,12 +256,28 @@ function evalPosition(
     };
   }
 
+  // 这只票上已经卖出落袋的部分。
+  //
+  // **它不参与止损判断**：成本止损看的是还拿着那部分的浮亏，这条规则不动（ADR 0002）。
+  // 但必须在文案里说出来，否则系统与使用者的体感会对不上，他就不会信系统。
+  //
+  // 2026-09-15 的真实账户：半导设备浮亏 13310（-30.4%），已落袋 14962（+33.8%），
+  // 这只**实际是赚的**。只印「已跌破止损线，建议止损离场」，而使用者心里记的是
+  // 「这只我赚了三成」——他会认为系统算错了，然后连真该止损的那几条一起不信。
+  const closedNote =
+    p.closedProfit !== 0
+      ? `（这只已经卖出落袋 ${p.closedProfit > 0 ? '+' : ''}${Math.round(p.closedProfit)} 元，` +
+        `下面说的盈亏只算还拿着的这部分）`
+      : '';
+
   // 止损：跌破成本达止损线
   if (holdPct <= -rule.stopLossPct) {
     flags.push({
       kind: 'stop_loss',
       severity: 'high',
-      detail: `已跌破止损线：持有 ${holdPct.toFixed(2)}%（止损线 -${rule.stopLossPct}%），建议止损离场`,
+      detail:
+        `已跌破止损线：持有 ${holdPct.toFixed(2)}%（止损线 -${rule.stopLossPct}%），建议止损离场` +
+        closedNote,
     });
   } else if (holdPct <= -(rule.stopLossPct - 2)) {
     // 接近止损（距止损线 2 个百分点内）

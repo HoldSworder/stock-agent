@@ -23,6 +23,10 @@ const PASS_QUOTES_URL = `${THS_BASE}/invest/v1/pass_quotes`;
 const ACCOUNT_LIST_URL = `${THS_BASE}/pc/account/v1/account_list`;
 const MERGE_FUND_URL = `${THS_BASE}/fund/v1/merge_fund`;
 
+// 导出给探测脚本用（工单 04-C 要试成交流水接口）。
+// 只给探测用，生产代码一律走本文件内的具体取数函数。
+export { THS_BASE as __test__THS_BASE, thsPost as __test__thsPost };
+
 /** 调同花顺投资账本接口（form 编码 + Cookie 鉴权，统一走 httpClient），返回 ex_data */
 async function thsPost(url: string, params: Record<string, string>): Promise<unknown> {
   const cookie = getValue('thsCookie');
@@ -55,6 +59,10 @@ interface RawHolding {
   count: number;
   cost: number;
   holdDays: number;
+  /** 这只票上已经卖出落袋的盈亏（接口 close_profit，券商口径，不可本地重算） */
+  closedProfit: number;
+  /** 已落袋部分的收益率（接口 close_rate） */
+  closedRate: number;
   /** 原始现价（账本侧，清仓行用于展示，无需实时报价） */
   rawPrice: number;
   /** 原始已实现/持有盈亏（清仓行直接复用，不可用 count*(price-cost) 重算） */
@@ -94,6 +102,9 @@ async function fetchLedger(userId: string, fundKeys: string[]): Promise<{
         count: num(p.count),
         cost: num(p.cost),
         holdDays: num(p.hold_days),
+        // 已落袋盈亏：接口一直在给，此前完全没读。分层撤仓的打法下它是大头
+        closedProfit: num(p.close_profit),
+        closedRate: num(p.close_rate),
         rawPrice: num(p.price),
         rawHoldProfit: num(p.hold_profit),
         rawHoldRate: num(p.hold_rate),
@@ -175,6 +186,8 @@ function normalize(h: RawHolding, q: Quote | undefined, totalAsset: number): Rea
     marketValue,
     holdProfit,
     holdRate: h.cost > 0 ? (price - h.cost) / h.cost : 0,
+    closedProfit: h.closedProfit,
+    closedRate: h.closedRate,
     todayProfit,
     todayRate,
     positionRate: totalAsset > 0 ? marketValue / totalAsset : 0,
@@ -200,6 +213,8 @@ function toClosed(h: RawHolding): RealPosition {
     marketValue: 0,
     holdProfit: h.rawHoldProfit,
     holdRate: h.rawHoldRate,
+    closedProfit: h.closedProfit,
+    closedRate: h.closedRate,
     todayProfit: 0,
     todayRate: 0,
     positionRate: 0,
@@ -365,6 +380,7 @@ export function persistHistory(portfolio: RealPortfolio): void {
         price: p.price,
         marketValue: p.marketValue,
         holdProfit: p.holdProfit,
+        closedProfit: p.closedProfit,
         createdAt: now,
       })
       .onConflictDoUpdate({
@@ -379,6 +395,7 @@ export function persistHistory(portfolio: RealPortfolio): void {
           price: p.price,
           marketValue: p.marketValue,
           holdProfit: p.holdProfit,
+          closedProfit: p.closedProfit,
         },
       })
       .run();

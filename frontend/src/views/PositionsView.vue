@@ -165,12 +165,15 @@ const sum = (arr: number[]) => arr.reduce((a, b) => a + b, 0);
 // 股票分组统计：现金/总资产归入股票账户口径
 const stockStats = computed(() => {
   const p = pf.value;
-  if (!p) return { marketValue: 0, todayProfit: 0, holdProfit: 0, asset: 0 };
+  if (!p) return { marketValue: 0, todayProfit: 0, holdProfit: 0, closedProfit: 0, asset: 0 };
   const marketValue = p.totalMarketValue - p.fundMarketValue;
   return {
     marketValue,
     todayProfit: sum(p.positions.map((x) => x.todayProfit)),
     holdProfit: sum(p.positions.map((x) => x.holdProfit)),
+    // 已落袋此前完全没进汇总：2026-09-15 实际落袋 2 万，
+    // 而卡片上只写「累计持有盈亏 -5.7 万」，少了这 2 万就不是真实成绩
+    closedProfit: sum(p.positions.map((x) => x.closedProfit)),
     asset: marketValue + p.cash,
   };
 });
@@ -273,9 +276,28 @@ onMounted(load);
               </div>
             </div>
             <div class="card">
-              <div class="card-label">累计持有盈亏</div>
+              <div class="card-label">还拿着的浮动盈亏</div>
               <div class="card-value num" :class="dir(stockStats.holdProfit)">
                 {{ signed(stockStats.holdProfit) }}
+              </div>
+            </div>
+            <!--
+              这两张卡此前没有。原先只写「累计持有盈亏」，而那个数只算还拿着的部分，
+              把已经卖出落袋的整段漏掉了——分层撤仓的打法下这一段是大头。
+            -->
+            <div v-if="stockStats.closedProfit" class="card">
+              <div class="card-label">已卖出落袋</div>
+              <div class="card-value num" :class="dir(stockStats.closedProfit)">
+                {{ signed(stockStats.closedProfit) }}
+              </div>
+            </div>
+            <div v-if="stockStats.closedProfit" class="card">
+              <div class="card-label">两者合计</div>
+              <div
+                class="card-value num"
+                :class="dir(stockStats.holdProfit + stockStats.closedProfit)"
+              >
+                {{ signed(stockStats.holdProfit + stockStats.closedProfit) }}
               </div>
             </div>
           </div>
@@ -502,6 +524,31 @@ onMounted(load);
               <template #default="{ row }">
                 <span class="num" :class="dir(row.holdProfit)">{{ signed(row.holdProfit) }}</span>
                 <span class="num sub" :class="dir(row.holdRate)"> {{ pct(row.holdRate) }}</span>
+              </template>
+            </el-table-column>
+            <!--
+              已落袋这一列此前完全没有——接口一直在给 close_profit，代码没读。
+              分层撤仓的打法下它是大头：半导设备浮亏 1.2 万、已落袋 1.5 万，
+              这只实际是赚的。只显示浮亏，会让一只赚钱的票看起来像在亏。
+            -->
+            <el-table-column label="已落袋" min-width="150" align="right">
+              <template #default="{ row }">
+                <template v-if="row.closedProfit">
+                  <span class="num" :class="dir(row.closedProfit)">
+                    {{ signed(row.closedProfit) }}
+                  </span>
+                  <span class="num sub" :class="dir(row.closedRate)">
+                    {{ pct(row.closedRate) }}
+                  </span>
+                </template>
+                <span v-else class="num sub">—</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="这只合计" min-width="120" align="right">
+              <template #default="{ row }">
+                <span class="num" :class="dir(row.holdProfit + row.closedProfit)">
+                  {{ signed(row.holdProfit + row.closedProfit) }}
+                </span>
               </template>
             </el-table-column>
             <el-table-column label="仓位" min-width="84" align="right">
