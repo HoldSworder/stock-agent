@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { useKlineStore } from '@/stores/kline';
+import { canOpenKline, useKlineStore } from '@/stores/kline';
 
 const props = defineProps<{
   code: string;
@@ -12,8 +12,8 @@ const props = defineProps<{
 
 const store = useKlineStore();
 
-// 有 secid（指数）或 code 为个股 6 位 / 板块 BKxxxx 才可点
-const valid = () => !!props.secid || /^(\d{6}|BK\d+)$/i.test(props.code);
+// 判据与 store 共用一份：各写一份正则就会出现「这里可点、open() 不认」的死链接
+const valid = () => canOpenKline(props.code, props.secid);
 const text = () => (props.show === 'code' ? props.code : props.name || props.code);
 
 function onClick() {

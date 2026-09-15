@@ -5,6 +5,7 @@ import dayjs from 'dayjs';
 import { Refresh } from '@element-plus/icons-vue';
 import { api } from '@/api';
 import StockLink from '@/components/StockLink.vue';
+import { canOpenKline, useKlineStore } from '@/stores/kline';
 import type {
   ActionDataSource,
   CockpitAction,
@@ -35,6 +36,7 @@ const plan = ref<CockpitActionPlan | null>(null);
 const loading = ref(false);
 const error = ref('');
 const router = useRouter();
+const kline = useKlineStore();
 
 async function load(): Promise<void> {
   loading.value = true;
@@ -145,6 +147,20 @@ const freshText = (f: SourceFreshness): string =>
 function goEvidence(e: CockpitAction['evidence'][number]): void {
   void router.push(e.anchor ? { path: e.route, hash: `#${e.anchor}` } : e.route);
 }
+
+/**
+ * 展开这只的明细。
+ *
+ * 复用全局 K 线弹窗——它的侧栏就是这只的交易计划（走势判断、关键价位、
+ * 持仓状态、该怎么动），不另建一套单标的面板。
+ */
+function openDetail(a: CockpitAction): void {
+  if (!a.code) return;
+  kline.open(a.code, a.name ?? a.code);
+}
+
+/** 先问能不能开再画入口。画出来点不开，比没有这个入口更糟 */
+const canOpenDetail = (a: CockpitAction): boolean => !!a.code && canOpenKline(a.code);
 
 /** 断供的来源 */
 const outages = computed(() => completeness.value?.outages ?? []);
@@ -303,6 +319,15 @@ function goSchedules(source: ActionDataSource): void {
             class="ta-ev"
             @click="goEvidence(e)"
             >{{ e.label }} →</a
+          >
+          <!--
+            单标的明细的入口。这张卡本来就能点开——代码那两个字是 StockLink，
+            点了会唤起 K 线弹窗，侧栏正是这只的走势判断/关键价位/持仓/该怎么动。
+            但那个入口只有「知道可以点代码」的人找得到，等于没有。
+            这里给一个写明白的入口，功能完全复用，不新建面板。
+          -->
+          <a v-if="canOpenDetail(a)" class="ta-ev ta-detail" @click="openDetail(a)"
+            >展开这只的明细 →</a
           >
         </div>
       </div>
@@ -549,6 +574,10 @@ function goSchedules(source: ActionDataSource): void {
 .ta-ev {
   cursor: pointer;
   color: var(--el-color-primary);
+}
+/* 明细入口排在证据链接之后，加粗一档：它是这张卡上最常用的下一步 */
+.ta-detail {
+  font-weight: 600;
 }
 .ta-omitted {
   margin-top: 8px;
