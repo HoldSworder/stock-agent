@@ -10,7 +10,8 @@
 //
 // 运行：cd backend && pnpm exec tsx src/scripts/cockpitActions.selfcheck.ts
 import assert from 'node:assert/strict';
-import type { CockpitAction, SourceFreshness } from '@stock-agent/shared';
+import type { ActionDataSource, CockpitAction, SourceFreshness } from '@stock-agent/shared';
+import { ACTION_DATA_SOURCE_LABELS } from '@stock-agent/shared';
 import {
   COCKPIT_ACTION_EMPTY_TEXT,
   PLAN_TRIGGER_UNKNOWN_TEXT,
@@ -25,6 +26,8 @@ import {
   __test__mergeByCode,
   __test__sortActions,
   __test__stampProven,
+  __test__stampStale,
+  __test__KIND_SOURCE,
   __test__PREDICTIVE_KINDS,
 } from '../cockpit/actions';
 import { judgeFreshness, summarizeFreshness, RISK_SOURCES } from '../cockpit/freshness';
@@ -393,6 +396,96 @@ function mk(p: Partial<CockpitAction> & Pick<CockpitAction, 'priority' | 'kind'>
   assert.equal(after.what, before.what);
   assert.equal(after.priority, before.priority);
   assert.equal(after.kind, before.kind);
+}
+
+// ===== 数据过期时，风险提示照出、但数字要标不可靠 =====
+//
+// 原先新鲜度只挡买入（gateOpportunities），止损与减仓在持仓数据已过期时
+// 照常输出精确股数——用昨天的持仓算出来的「减 14200 股」是错的数。
+//
+// 但解法不是把止损也拦掉。这里用算术说明为什么：
+// 昨天持仓 20000 股、今天你自己手动卖了 6000 股，系统还按 20000 算，
+// 「减 71%」会给出 14200 股 —— 超过你实际持有的 14000 股全部。
+// 照着做就是把仓位清零，而规则本意只是减一层。
+//
+// 所以两件事都要成立：提示不许消失（该走时没人提醒，损失没有上限），
+// 数字必须带「可能不准」（否则人会照着错数下单）。
+{
+  const stale = (source: ActionDataSource, state: SourceFreshness['state']): SourceFreshness => ({
+    source,
+    label: ACTION_DATA_SOURCE_LABELS[source],
+    state,
+    dataAt: '2026-09-14',
+    behindDays: 1,
+    note: null,
+  });
+  const ok = (source: ActionDataSource): SourceFreshness => ({
+    ...stale(source, 'ok'),
+    dataAt: '2026-09-15',
+    behindDays: 0,
+  });
+
+  // 持仓纪律数据过期：止损/减仓照出，但必须标数字不可靠
+  for (const kind of ['stop_loss', 'near_stop', 'overweight'] as const) {
+    const a = __test__stampStale(mk({ priority: 'P0', kind, code: '600519' }), [
+      stale('discipline', 'stale'),
+    ]);
+    assert.ok(
+      a.staleNote && a.staleNote.includes('持仓纪律') && a.staleNote.includes('可能不准'),
+      `${kind} 依据的数据过期了，必须标出来——否则会照着错股数下单`,
+    );
+    // 关键：不许因此被拦下。拦住一条止损比给个不准的股数更危险
+    assert.notEqual(
+      a.readiness,
+      'blocked',
+      `${kind} 不得因为数据过期被拦住——该走时没人提醒，损失没有上限`,
+    );
+  }
+
+  // 数据新鲜就不该有这句噪音
+  const fresh = __test__stampStale(mk({ priority: 'P0', kind: 'stop_loss', code: '600519' }), [
+    ok('discipline'),
+  ]);
+  assert.equal(fresh.staleNote, null, '数据是今天的就不该报过期，否则人会把红字当常态');
+
+  // 四种不新鲜的状态都要有各自的说法，不能只认 stale
+  for (const state of ['stale', 'outage', 'failed', 'missing'] as const) {
+    const a = __test__stampStale(mk({ priority: 'P0', kind: 'stop_loss', code: '600519' }), [
+      stale('discipline', state),
+    ]);
+    assert.ok(a.staleNote, `${state} 也算数据不可用，必须标`);
+  }
+
+  // 认错数据源不算标注：拿计划的新鲜度去标止损是无效的
+  const wrong = __test__stampStale(mk({ priority: 'P0', kind: 'stop_loss', code: '600519' }), [
+    stale('plan', 'stale'),
+  ]);
+  assert.equal(wrong.staleNote, null, '止损看的是持仓纪律，不该被今日计划的过期状态影响');
+
+  // 带股数或精确价位的动作都必须登记数据源，否则新增一种就会静默漏标
+  for (const kind of [
+    'stop_loss',
+    'near_stop',
+    'overweight',
+    'buy_triggered',
+    'near_buy',
+    'rotate',
+  ] as const) {
+    assert.ok(__test__KIND_SOURCE[kind], `${kind} 没登记数据源，过期时会静默漏标`);
+  }
+
+  // 反过来：选股候选不许借别人的新鲜度充数。
+  // 它来自选股器（没登记来源），且没有股数与精确价位——
+  // 硬套「今日计划」会印出一句与事实不符的话（真实数据里已经印错过一次）。
+  assert.equal(
+    __test__KIND_SOURCE.candidate,
+    undefined,
+    '选股候选不来自今日计划，不得借它的过期状态',
+  );
+  const cand = __test__stampStale(mk({ priority: 'P2', kind: 'candidate', code: '600000' }), [
+    stale('plan', 'missing'),
+  ]);
+  assert.equal(cand.staleNote, null, '选股候选没有股数，不该印「股数可能不准」');
 }
 
 console.log('cockpitActions.selfcheck 全部通过');

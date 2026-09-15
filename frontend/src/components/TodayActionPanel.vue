@@ -285,6 +285,12 @@ function goSchedules(source: ActionDataSource): void {
           给它加免责声明只会稀释真正该注意的那几条。
         -->
         <div v-if="a.provenNote" class="ta-unproven">{{ a.provenNote }}</div>
+        <!--
+          过期提醒与上面那条免责声明不同，**风险类动作也要显示**：
+          用昨天的持仓算出来的「减 14200 股」是错的数，不说等于让人照着错数下单。
+          但不因此隐藏或拦住这条提示——该止损时没人提醒，损失没有上限。
+        -->
+        <div v-if="a.staleNote" class="ta-stale">{{ a.staleNote }}</div>
         <div class="ta-foot">
           <!-- 只写依据来自哪套方法，不带任何准确率数字：安慰剂对照还没证明它们强于随机 -->
           <span v-if="a.basisSources.length" class="ta-basis">
@@ -521,6 +527,16 @@ function goSchedules(source: ActionDataSource): void {
   font-size: 12px;
   line-height: 1.5;
   color: var(--el-color-warning-dark-2);
+}
+/* 过期提醒用危险色而非警告色：它说的是「这个数可能是错的」，比「没验证过」更该停手核对 */
+.ta-stale {
+  margin-top: 4px;
+  padding: 3px 6px;
+  border-left: 2px solid var(--el-color-danger);
+  background: var(--el-color-danger-light-9);
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--el-color-danger-dark-2);
 }
 .ta-foot {
   display: flex;

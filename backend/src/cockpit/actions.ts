@@ -1,4 +1,5 @@
 import type {
+  ActionDataSource,
   BoardExposure,
   CockpitAction,
   CockpitActionEmptyReason,
@@ -13,7 +14,7 @@ import type {
   PlanTrigger,
   SourceFreshness,
 } from '@stock-agent/shared';
-import { PLAN_TRIGGER_UNKNOWN_TEXT } from '@stock-agent/shared';
+import { ACTION_DATA_SOURCE_LABELS, PLAN_TRIGGER_UNKNOWN_TEXT } from '@stock-agent/shared';
 import { evaluateDiscipline } from '../positions/discipline';
 import { computeBoardExposure } from '../boards/exposure';
 import { isJunkBoard, listBoardStagesFromSnapshot, type BoardStageRow } from '../breadth/service';
@@ -48,7 +49,11 @@ import { applyLiveOverlay, fetchLivePrices } from './liveOverlay';
  */
 // provenNote 不进 draft：它按动作类型在出口处统一盖章（见 stampProven），
 // 各生成处不该也不必各写一遍——那样将来新增一种买入类动作就会漏。
-type ActionDraft = Omit<CockpitAction, 'live' | 'distancePct' | 'distanceTo' | 'provenNote'> &
+// staleNote 同理：它取决于本次取数新不新，只有出口处才知道（见 stampStale）。
+type ActionDraft = Omit<
+  CockpitAction,
+  'live' | 'distancePct' | 'distanceTo' | 'provenNote' | 'staleNote'
+> &
   Partial<Pick<CockpitAction, 'distanceTo'>>;
 
 /** 补齐实时字段的默认值。实时价与距离由 applyLiveOverlay 之后填 */
@@ -59,6 +64,7 @@ function act(d: ActionDraft): CockpitAction {
     distancePct: null,
     distanceTo: d.distanceTo ?? null,
     provenNote: null,
+    staleNote: null,
   };
 }
 
@@ -714,7 +720,7 @@ export async function buildActionPlan(): Promise<CockpitActionPlan> {
 
   return {
     asOf: nowIso(),
-    actions: kept.map(stampProven),
+    actions: kept.map(stampProven).map((a) => stampStale(a, fresh)),
     emptyReason:
       kept.length > 0
         ? null
@@ -764,6 +770,58 @@ function stampProven(a: CockpitAction): CockpitAction {
   };
 }
 
+/**
+ * 各动作类型依赖哪个数据源，用于判断这条动作的数字是不是拿过期数据算的。
+ *
+ * `candidate`（选股候选）故意不在表里：它来自选股器（见 fromScreener），
+ * 而选股器没有登记新鲜度来源，硬套「今日计划」会印出一句与事实不符的话。
+ * 它也没有股数和精确价位——那句「股数可能不准」对它压根不成立。
+ * 真要标它，得先给选股器登记一个来源，不能借别人的状态充数。
+ */
+const KIND_SOURCE: Partial<Record<CockpitActionKind, ActionDataSource>> = {
+  stop_loss: 'discipline',
+  near_stop: 'discipline',
+  overweight: 'discipline',
+  buy_triggered: 'plan',
+  near_buy: 'plan',
+  rotate: 'rotation',
+  board_fading: 'boards',
+  board_leading: 'boards',
+  board_brewing: 'boards',
+};
+
+/**
+ * 数据过期时在动作上标一句「数字可能不准」，但**不拦住风险类动作**。
+ *
+ * 这里的取舍值得写清楚：新鲜度检查原先只挡买入（见 gateOpportunities），
+ * 止损与减仓照常输出精确股数。用昨天的持仓算出来的「减 14200 股」是错的数。
+ *
+ * 但解法不是把止损也拦掉——**拦住一条止损提示比给一个不准的股数更危险**。
+ * 该走的时候没人提醒，损失没有上限；股数不准，打开券商就能看到真实数量。
+ *
+ * 所以：提示照出、顺序照排，只把「这个数是拿哪天的数据算的」摆在脸上。
+ */
+function stampStale(a: CockpitAction, fresh: SourceFreshness[]): CockpitAction {
+  const source = KIND_SOURCE[a.kind];
+  // 显式置 null 而不是原样返回：字段缺失和「没过期」在前端 v-if 下看起来一样，
+  // 但缺失意味着这条动作根本没经过检查——两者必须能区分
+  if (!source) return { ...a, staleNote: null };
+  const f = fresh.find((x) => x.source === source);
+  if (!f || f.state === 'ok') return { ...a, staleNote: null };
+  const what: Record<Exclude<SourceFreshness['state'], 'ok'>, string> = {
+    stale: '不是今天的',
+    outage: '断供了',
+    failed: '取不到',
+    missing: '还没算出来',
+  };
+  return {
+    ...a,
+    staleNote:
+      `这条依据的${ACTION_DATA_SOURCE_LABELS[source]}数据${what[f.state]}` +
+      `${f.dataAt ? `（${f.dataAt}）` : ''}，里面的股数和价位可能不准，动手前自己核一眼。`,
+  };
+}
+
 /** 盘中才需要秒级新鲜的行情；这个导出让路由层决定要不要提示用户刷新 */
 export const isIntraday = (): boolean => isAShareTradingTime(new Date());
 
@@ -775,5 +833,7 @@ export {
   mergeByCode as __test__mergeByCode,
   sortActions as __test__sortActions,
   stampProven as __test__stampProven,
+  stampStale as __test__stampStale,
   PREDICTIVE_KINDS as __test__PREDICTIVE_KINDS,
+  KIND_SOURCE as __test__KIND_SOURCE,
 };
