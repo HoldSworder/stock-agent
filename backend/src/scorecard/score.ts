@@ -117,11 +117,38 @@ function rowFor(
  * 判据：两个对照都要过。只赢一个说明不了什么——赢了择时输了选标的，
  * 换成「这一天买池子里任意一只」反而更好，那这套信号就没有存在意义。
  */
+// 这句话是使用者唯一会读的东西，措辞本身就是产品，单独导出供自检钉住。
+export { verdictOf as __test__verdictOf };
+
 function verdictOf(rows: readonly ScoreRow[]): string {
   const usable = rows.filter((r) => r.judged >= MIN_JUDGED);
   if (usable.length === 0) {
     const most = Math.max(0, ...rows.map((r) => r.judged));
-    return `样本不足（最多 ${most} 条，需要 ${MIN_JUDGED} 条才给结论）`;
+    const base = `样本不足（最多 ${most} 条，需要 ${MIN_JUDGED} 条才给结论）`;
+
+    // 样本不够时不给「有本事」的结论，这条不松口——门槛就是被一次
+    // 58 条样本的越界结论逼出来的。但**「样本不足」不该被读成「不知道」**：
+    // 真实例子（2026-09-15 的选股·模型挑选）74 条样本落后 4 个百分点、
+    // 60 条样本落后 9.4 个百分点，方向已经很清楚了。
+    //
+    // 所以这里只补一句事实陈述，不是结论：说清目前的方向，让人别把它当中性。
+    // 判断「有没有本事」需要足够样本，提醒「目前看着在亏」不需要——
+    // 两个方向的谨慎程度本来就不对称：漏报优势只是错过，漏报亏损是真亏钱。
+    const bad = rows.filter(
+      (r) => r.judged > 0 && Math.min(r.edgeVsSameCode, r.edgeVsSameDate) <= -MEANINGFUL_EDGE,
+    );
+    if (bad.length === 0) return base;
+    const worst = bad.reduce((a, b) =>
+      Math.min(a.edgeVsSameCode, a.edgeVsSameDate) <= Math.min(b.edgeVsSameCode, b.edgeVsSameDate)
+        ? a
+        : b,
+    );
+    const pts = Math.abs(Math.min(worst.edgeVsSameCode, worst.edgeVsSameDate) * 100);
+    return (
+      `${base}。但目前这些样本的方向是负的：持有 ${worst.horizon} 日落后随机 ` +
+      `${pts.toFixed(1)} 个百分点（${worst.judged} 条）。样本不够还不能下结论，` +
+      `但也别当成「不知道」`
+    );
   }
   const winning = usable.filter(
     (r) => r.edgeVsSameCode >= MEANINGFUL_EDGE && r.edgeVsSameDate >= MEANINGFUL_EDGE,
@@ -133,7 +160,29 @@ function verdictOf(rows: readonly ScoreRow[]): string {
       : b,
   );
   const pts = Math.min(best.edgeVsSameCode, best.edgeVsSameDate) * 100;
-  return `持有 ${best.horizon} 日时领先随机 ${pts.toFixed(1)} 个百分点（${best.judged} 条样本）`;
+  const head = `持有 ${best.horizon} 日时领先随机 ${pts.toFixed(1)} 个百分点（${best.judged} 条样本）`;
+
+  // 只报最好的那个持有期是在骗人。
+  //
+  // 真实例子（2026-09-15 的选股·多因子）：5 日领先 0.8 个百分点，
+  // 而同一批信号 20 日是**落后 6.6 个百分点**。只印前半句，
+  // 使用者会当成「这套选股有本事」，然后按他自己的中线打法拿 20 天以上——
+  // 正好踩在它亏钱的那一段。报好看的、省掉打脸的，跟没判一样。
+  const losing = usable.filter(
+    (r) => Math.min(r.edgeVsSameCode, r.edgeVsSameDate) <= -MEANINGFUL_EDGE,
+  );
+  if (losing.length === 0) return head;
+
+  const worst = losing.reduce((a, b) =>
+    Math.min(a.edgeVsSameCode, a.edgeVsSameDate) <= Math.min(b.edgeVsSameCode, b.edgeVsSameDate)
+      ? a
+      : b,
+  );
+  const wpts = Math.min(worst.edgeVsSameCode, worst.edgeVsSameDate) * 100;
+  return (
+    `${head}；但持有 ${worst.horizon} 日反而落后 ${Math.abs(wpts).toFixed(1)} 个百分点` +
+    `（${worst.judged} 条样本）——只在短持有期有效，拿久了会亏回去`
+  );
 }
 
 /**

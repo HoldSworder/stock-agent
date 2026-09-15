@@ -10,7 +10,12 @@
 //   5. 两个对照只赢一个，不算有本事
 import assert from 'node:assert/strict';
 import { forwardReturnOn, rollForwardDays, type Series } from '../scorecard/series';
-import { MEANINGFUL_EDGE, MIN_JUDGED, signalEdge } from '../scorecard/score';
+import {
+  MEANINGFUL_EDGE,
+  MIN_JUDGED,
+  signalEdge,
+  __test__verdictOf,
+} from '../scorecard/score';
 import { poolFor, SIGNAL_SOURCES } from '../scorecard/sources';
 
 /** 由收盘价数组造一段序列，日期按 2026-01-01 起逐日递增（仅用于断言，不必是真交易日） */
@@ -136,7 +141,86 @@ assert.equal(
   );
 }
 
+// ===== 结论不许只报好看的那个持有期 =====
+//
+// 这一节钉的是措辞，而措辞就是产品——它是使用者唯一会读的那句话。
+//
+// 真实数据（2026-09-15 的选股·多因子）：5 日领先随机 0.8 个百分点，
+// 而同一批信号 20 日**落后 6.6 个百分点**。
+// 只印前半句，使用者会当成「这套选股有本事」，然后按他自己的中线打法拿 20 天以上——
+// 正好踩在它亏钱的那一段。报好看的、省掉打脸的，跟没判一样。
+{
+  const row = (horizon: number, judged: number, edge: number) => ({
+    horizon,
+    judged,
+    mean: 0,
+    upRatio: 0.5,
+    baselineSameCode: 0,
+    baselineSameDate: 0,
+    // 两个对照给同一个值，这一节只测措辞，不测「只赢一个不算」（那条在上面）
+    edgeVsSameCode: edge,
+    edgeVsSameDate: edge,
+  });
+
+  // 短持有期领先、长持有期落后 → 两句都要说
+  const mixed = __test__verdictOf([
+    row(5, 262, 0.008),
+    row(10, 247, 0.006),
+    row(20, 142, -0.066),
+  ]);
+  assert.ok(mixed.includes('持有 5 日'), '该报的领先还是要报');
+  assert.ok(
+    mixed.includes('20 日') && /落后/.test(mixed),
+    '长持有期落后必须一起说出来——这是使用者真正的持有期，省掉它等于误导',
+  );
+
+  // 全程领先 → 不必硬加一句「但」，那会变成没必要的自我怀疑
+  const allGood = __test__verdictOf([row(5, 200, 0.01), row(20, 150, 0.012)]);
+  assert.ok(allGood.includes('领先'), '全程领先应当正常报');
+  assert.ok(!allGood.includes('但'), '没有打脸的持有期就不该硬加转折');
+
+  // 落后幅度在阈值之内（噪声）→ 不提，否则每条结论都拖一句无意义的尾巴
+  const noise = __test__verdictOf([row(5, 200, 0.01), row(20, 150, -0.002)]);
+  assert.ok(!noise.includes('落后'), '落后幅度小于门槛属于噪声，不该当成打脸报出来');
+}
+
+// ===== 样本不足时，方向为负要说出来，不许被读成「不知道」 =====
+//
+// 样本不够不给「有本事」的结论，这条不松口——门槛就是被一次 58 条样本的
+// 越界结论逼出来的。但真实数据（选股·模型挑选）74 条落后 4 个百分点、
+// 60 条落后 9.4 个百分点，方向已经很清楚。
+//
+// 两个方向的谨慎程度本来就不对称：漏报优势只是错过，漏报亏损是真亏钱。
+{
+  const row = (horizon: number, judged: number, edge: number) => ({
+    horizon,
+    judged,
+    mean: 0,
+    upRatio: 0.3,
+    baselineSameCode: 0,
+    baselineSameDate: 0,
+    edgeVsSameCode: edge,
+    edgeVsSameDate: edge,
+  });
+
+  const badButSmall = __test__verdictOf([row(5, 74, -0.04), row(20, 60, -0.094)]);
+  assert.ok(badButSmall.includes('样本不足'), '样本不够仍然不给结论');
+  assert.ok(
+    badButSmall.includes('方向是负的') && badButSmall.includes('20 日'),
+    '方向为负必须作为事实陈述说出来，并指出是哪个持有期',
+  );
+  assert.ok(
+    badButSmall.includes('别当成'),
+    '要明确提醒别把「样本不足」读成「不知道」',
+  );
+
+  // 样本不足但方向没问题 → 只说样本不足，不要无端吓人
+  const smallAndFine = __test__verdictOf([row(5, 40, 0.001), row(20, 30, 0.002)]);
+  assert.ok(smallAndFine.includes('样本不足'));
+  assert.ok(!smallAndFine.includes('方向是负的'), '方向没问题时不该加负面提示');
+}
+
 console.log(
   '✅ 判分口径自检通过：前向收益边界 / 顺延上限 / 看跌价值取反 / ' +
-    '样本不足不给结论 / 只赢一个不算 / 对照池按模块归拢',
+    '样本不足不给结论 / 只赢一个不算 / 对照池按模块归拢 / 结论不报单一持有期',
 );
