@@ -124,7 +124,7 @@ export async function fetchMarketSnapshot(signal?: AbortSignal): Promise<Snapsho
 
 /** 收盘快照缓存的本地 kv 键（仅本模块读写，不在 SettingKey 枚举内） */
 const META_LAST_CLOSE_SNAPSHOT = 'screener_last_close_snapshot';
-/** 量价退化判定阈值：amount===0 行占比超过此值视为盘前退化 */
+/** 量价退化判定阈值：成交额为 0 或取不到的行占比超过此值视为盘前退化 */
 const DEGENERATE_AMOUNT_ZERO_RATIO = 0.9;
 
 /** 缓存载体：capturedAt 标记抓取时刻，rows 为当次有效全市场快照 */
@@ -134,12 +134,16 @@ interface CachedSnapshot {
 }
 
 /**
- * 快照是否盘前退化：非空且 amount===0 的行占比超阈值。
- * 真实交易/收盘后几乎无 amount=0 个股，仅「新交易日开盘前」窗口会整体退化。
+ * 快照是否盘前退化：非空且成交额为 0 或取不到的行占比超阈值。
+ * 真实交易/收盘后几乎无零成交个股，仅「新交易日开盘前」窗口会整体退化。
+ *
+ * 必须同时数 null：东财盘前 f6 返回 '-'，经 numOrNull 后是 null 而非 0。
+ * 只数 0 会让盘前一行都数不到，退化判定恒为 false——硬筛不再放宽量价门槛，
+ * 全市场都卡在成交额下限上，盘前跑选股会直接报「无标的达标」。
  */
 export function isDegenerateSnapshot(rows: SnapshotRow[]): boolean {
   if (rows.length === 0) return false;
-  const zero = rows.reduce((n, r) => (r.amount === 0 ? n + 1 : n), 0);
+  const zero = rows.reduce((n, r) => (r.amount == null || r.amount === 0 ? n + 1 : n), 0);
   return zero / rows.length > DEGENERATE_AMOUNT_ZERO_RATIO;
 }
 

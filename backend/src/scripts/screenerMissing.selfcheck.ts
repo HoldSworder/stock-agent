@@ -20,7 +20,7 @@ import {
   __test__MAX_MISSING_WEIGHT,
   type ThemeContext,
 } from '../screener/scorer';
-import type { SnapshotRow } from '../screener/snapshot';
+import { isDegenerateSnapshot, type SnapshotRow } from '../screener/snapshot';
 import type { ScreenStrategyDef } from '../screener/strategy';
 import { __test__applyHardFilterWithFallback } from '../screener/engines';
 
@@ -245,6 +245,58 @@ function def(weights: ScreenStrategyDef['factorWeights']): ScreenStrategyDef {
   const ok = __test__applyHardFilterWithFallback(rows, { amountMinYi: 0.05 }, true);
   assert.equal(ok.filtered.length, 2);
   assert.equal(ok.relaxedMode, null, '完整条件就有结果时不该标成已放宽');
+}
+
+// ===== 7. 退化判定必须把「取不到」和 0 一起数 =====
+//
+// 第 6 节靠 degenerate 这个入参决定要不要放宽，而它由 isDegenerateSnapshot 算出。
+// 取数层把缺失从 0 改成 null 之后，只数 0 的旧写法在盘前一行都数不到，
+// 退化判定恒为 false，第 6 节那条「数据正常却没人达标就返回空」反而会在盘前误触发。
+{
+  const many = (n: number, amount: number | null): SnapshotRow[] =>
+    Array.from({ length: n }, (_, i) => row({ code: String(600100 + i), amount }));
+
+  assert.equal(isDegenerateSnapshot(many(100, null)), true, '成交额全取不到就是盘前退化');
+  assert.equal(isDegenerateSnapshot(many(100, 0)), true, '成交额全为 0 同样是退化');
+  assert.equal(
+    isDegenerateSnapshot([...many(95, null), ...many(5, 8)]),
+    true,
+    '绝大多数取不到即退化，少数有值不影响',
+  );
+  assert.equal(isDegenerateSnapshot(many(100, 8)), false, '成交额正常不是退化');
+  assert.equal(isDegenerateSnapshot([]), false, '空快照不算退化，那是取数失败');
+}
+
+// ===== 8. 流动性因子缺一半时不许用 50 分补齐 =====
+//
+// 这个因子由成交额分位与换手率分位各半构成，而分位函数对 null 返回 50。
+// 直接求平均就等于「缺的那半按中等算」，缺一半的标的会被抬到 50 以上，
+// 正是第 2 节在算术上否掉的那种反超。
+{
+  const d = def({ liquidity: 1 });
+  // 给足基准行，分位才有意义（只放两三行时，垫底值反而落在第 50 百分位）
+  const base = Array.from({ length: 20 }, (_, i) =>
+    row({ code: String(700000 + i), amount: 5 + i * 5, turnoverRate: 5 + i * 5 }),
+  );
+  // 只缺成交额，换手率是全场唯一最低 → 流动性理应接近垫底
+  const half = row({ code: '000023', amount: null, turnoverRate: 0.01 });
+
+  const scored = scoreCandidates([...base, half], d, theme);
+  const got = scored.find((s) => s.row.code === '000023')!.screenScore;
+
+  // 旧写法会算成 (50 + 换手分位) / 2。换手分位在这里约 4.8，旧写法约 27。
+  const turnOnly = 4.8;
+  const oldWith50 = (50 + turnOnly) / 2;
+  assert.ok(
+    got < oldWith50,
+    `缺成交额时不该按 50 分补齐：旧写法约 ${oldWith50.toFixed(1)}，现在应接近换手分位本身，实际 ${got}`,
+  );
+  assert.ok(got < 10, `唯一可用因子处于全场最低，总分应贴近底部，实际 ${got}`);
+  assert.equal(
+    scored.find((s) => s.row.code === '000023')!.rankable,
+    true,
+    '只缺一个次要因子仍可排名，别误杀',
+  );
 }
 
 console.log('screenerMissing.selfcheck 全部通过');

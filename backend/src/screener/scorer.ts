@@ -159,10 +159,14 @@ export function scoreCandidates(
     switch (key) {
       case 'value':
         return valueScore(r);
-      case 'liquidity':
-        return r.amount == null && r.turnoverRate == null
-          ? null
-          : (amountRanker(r.amount) + turnoverLiqRanker(r.turnoverRate)) / 2;
+      case 'liquidity': {
+        // 两项各自缺失时不能求平均：percentileRanker 对 null 返回 50，
+        // 平均进去就等于用「中性分」补齐缺的那半，缺一半的标的会被抬到 50 以上。
+        const amt = r.amount != null ? amountRanker(r.amount) : null;
+        const turn = r.turnoverRate != null ? turnoverLiqRanker(r.turnoverRate) : null;
+        if (amt != null && turn != null) return (amt + turn) / 2;
+        return amt ?? turn;
+      }
       case 'size':
         return r.marketCap == null ? null : sizeRanker(r.marketCap);
       case 'momentum':

@@ -52,10 +52,10 @@ function buildPrompt(
   candidates: ScoredRow[],
 ): string {
   const lines = candidates.map((c) => {
-    const f = c.factors.map((x) => `${x.key}=${x.score}`).join(' ');
+    const f = c.factors.map((x) => `${x.key}=${x.score ?? '-'}`).join(' ');
     const r = c.row;
     return (
-      `${r.name}(${r.code}) 行业=${r.industry || '未知'} 现价${r.price} 涨跌${r.pct}% ` +
+      `${r.name}(${r.code}) 行业=${r.industry || '未知'} 现价${r.price} 涨跌${r.pct ?? '-'}% ` +
       `换手${r.turnoverRate ?? '-'}% 量比${r.volumeRatio ?? '-'} PE${r.pe ?? '-'} PB${r.pb ?? '-'} ` +
       `市值${r.marketCap != null ? r.marketCap.toFixed(0) + '亿' : '-'} | 综合分${c.screenScore} [${f}]`
     );
