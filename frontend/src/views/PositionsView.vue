@@ -41,10 +41,13 @@ const DISC_LABEL: Record<DisciplineStatus, string> = {
   over_hold: '超期',
   overweight: '超配',
   stop_not_executed: '止损未执行',
+  price_unavailable: '现价取不到·判不了',
 };
 const discTagType = (s: DisciplineStatus): 'success' | 'danger' | 'warning' | 'info' => {
   if (s === 'healthy') return 'success';
-  if (s === 'stop_loss' || s === 'stop_not_executed') return 'danger';
+  // 判不了按红色：现价取不到时盈亏率恒为 0，止损与止盈都永远碰不到，
+  // 一只该走的票会以「持有 0.00%」的样子躺在这里。这比「超配」更该让人停手。
+  if (s === 'stop_loss' || s === 'stop_not_executed' || s === 'price_unavailable') return 'danger';
   if (s === 'take_profit') return 'warning';
   return 'info';
 };

@@ -77,6 +77,7 @@ const etfPos = (price: number): Parameters<typeof resolveRule>[0] => ({
   market: 'SH',
   qty: 10000,
   price,
+  priceIsCostFallback: false,
   avgCost: 10,
   marketValue: price * 10000,
   holdProfit: (price - 10) * 10000,

@@ -139,8 +139,13 @@ async function fetchQuotes(
 }
 
 function normalize(h: RawHolding, q: Quote | undefined, totalAsset: number): RealPosition {
-  // 有实时报价用实时价，否则退回成本价（避免 0 价导致市值异常）
-  const price = q && q.price > 0 ? q.price : h.cost;
+  // 有实时报价用实时价，否则退回成本价（避免 0 价导致市值异常）。
+  //
+  // 这个回退本身是对的（0 价会让市值变 0），但**必须标出来**：
+  // 现价等于成本价时 holdProfit 与 holdRate 恒为 0，持仓看起来不亏不赚，
+  // 而纪律体检正是拿 holdRate 判止损止盈的，于是报价一断、止损就永不触发。
+  const priceIsCostFallback = !(q && q.price > 0);
+  const price = priceIsCostFallback ? h.cost : q!.price;
   const prevClose = q && q.prevClose > 0 ? q.prevClose : price;
   const marketValue = h.count * price;
   const holdProfit = h.count * (price - h.cost);
@@ -166,6 +171,7 @@ function normalize(h: RawHolding, q: Quote | undefined, totalAsset: number): Rea
     qty: h.count,
     avgCost: h.cost,
     price,
+    priceIsCostFallback,
     marketValue,
     holdProfit,
     holdRate: h.cost > 0 ? (price - h.cost) / h.cost : 0,
@@ -176,6 +182,10 @@ function normalize(h: RawHolding, q: Quote | undefined, totalAsset: number): Rea
   };
 }
 
+// 持仓归一化是「产出数量与盈亏率」的地方，而盈亏率直接决定纪律体检判不判止损，
+// 单独导出供自检喂构造数据验证（不联网、不碰数据库）。
+export { normalize as __test__normalize };
+
 /** 构造当日清仓行：qty=0，盈亏用原始已实现值（不可重算） */
 function toClosed(h: RawHolding): RealPosition {
   return {
@@ -185,6 +195,8 @@ function toClosed(h: RawHolding): RealPosition {
     qty: 0,
     avgCost: h.cost,
     price: h.rawPrice,
+    // 清仓行的价与盈亏都是券商给的已实现值，不经报价回退
+    priceIsCostFallback: false,
     marketValue: 0,
     holdProfit: h.rawHoldProfit,
     holdRate: h.rawHoldRate,

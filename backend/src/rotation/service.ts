@@ -110,8 +110,18 @@ function scoreRotation(
 ): { score: number; breakdown: StrengthBreakdown } {
   const base =
     state === '加速' ? 70 : state === '上升' ? 60 : state === '回踩' ? 52 : state === '过热' ? 40 : 22;
-  const rsPart = clamp((rs ?? 0) * 0.6, -12, 15);
-  const momPart = clamp((m.momentum ?? 0) * 0.4, -12, 15);
+  // rs 与 momentum 到这里一定不是 null：buildRotationOverview 已经把取不到的整只剔出榜单。
+  // 早先这里写的是 `(rs ?? 0)`，于是**RS 取不到的 ETF 贡献 0 分，
+  // 而真实落后基准 10% 的贡献 -6 分——取不到数的排在真实落后的前面**。
+  // 这个断言是为了让前置过滤被破坏时当场报错，而不是静默退回那个 0。
+  if (rs == null || m.momentum == null) {
+    throw new Error(
+      `${state} 状态的标的缺 RS 或动量却进了打分（rs=${rs}, momentum=${m.momentum}），` +
+        '榜单前置过滤漏了——按 0 分参与排名会把取不到数的排在真实落后的前面',
+    );
+  }
+  const rsPart = clamp(rs * 0.6, -12, 15);
+  const momPart = clamp(m.momentum * 0.4, -12, 15);
   const flowPart = flowNetIn != null && flowNetIn > 0 ? clamp(flowNetIn * 1.2, 0, 12) : 0;
   const score = Math.round(clamp(base + rsPart + momPart + flowPart, 0, 100));
   return {
@@ -127,6 +137,9 @@ function scoreRotation(
     },
   };
 }
+
+// 打分与状态判定是「决定换仓方向」的部分，单独导出供自检喂构造数据验证。
+export { scoreRotation as __test__scoreRotation, classifyState as __test__classifyState };
 
 function buildNote(state: EtfRotationState, m: EtfMetrics, rs: number | null): string {
   const parts: string[] = [];
@@ -196,6 +209,9 @@ export async function buildRotationOverview(): Promise<EtfRotationOverview> {
       const state = classifyState(m, rs);
       // 缺现价/MA60 无法定状态：整只剔除榜单，不硬给一个结论
       if (state === null) return null;
+      // RS 或动量取不到同样剔除。轮动榜的全部含义就是「谁比基准强」，
+      // 这两个数缺一个就没法参与比较——按 0 分混进去会把取不到数的排在真实落后的前面。
+      if (rs == null || m.momentum == null) return null;
       const { score, breakdown } = scoreRotation(state, m, rs, flowNetIn);
       return {
         code: u.code,
@@ -223,6 +239,19 @@ export async function buildRotationOverview(): Promise<EtfRotationOverview> {
     .filter((it): it is EtfRotationItem => it != null)
     .sort((a, b) => b.score - a.score);
   const dropped = universe.length - list.length;
+
+  // 基准取不到时全榜的 RS 都算不出来，于是整榜被剔空。
+  // 这种情况必须把原因说出来——一个空列表会被读成「今天没有强赛道」，
+  // 而事实是「拿来比较的那根尺子没取到」，两者结论完全不同。
+  if (benchRet60 == null) {
+    return {
+      asOf: nowIso(),
+      items: [],
+      note:
+        'ETF 行业轮动暂时排不出来：用来比强弱的大盘基准数据取不到，' +
+        '不是今天没有强赛道，而是没有可比的尺子。稍后刷新再看。',
+    };
+  }
 
   return {
     asOf: nowIso(),

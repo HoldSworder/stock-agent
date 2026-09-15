@@ -230,6 +230,32 @@ function evalPosition(
   const holdPct = p.holdRate * 100;
   const posPct = p.positionRate * 100;
 
+  // 现价取不到时，盈亏率是假的 0：realPositions 的 normalize 把现价退回成了成本价。
+  // 拿这个 0 去比止损线，结论永远是「没破」——**一只该止损的票会以「持有 0.00%」
+  // 的样子躺在报告里**。所以这里直接说判不了，不走下面任何盈亏类判断。
+  // 仓位超配仍照判：那只看市值占比，跟现价准不准无关。
+  if (p.priceIsCostFallback) {
+    flags.push({
+      kind: 'price_unavailable',
+      severity: 'high',
+      detail:
+        `现价取不到（暂时用成本价 ${p.avgCost} 顶着），这只的止损止盈判不了——` +
+        '不是「没问题」，请自己打开券商看一眼',
+    });
+    if (posPct > rule.singleMaxWeightPct) {
+      flags.push({
+        kind: 'overweight',
+        severity: 'medium',
+        detail: `单一持仓 ${posPct.toFixed(1)}% 超过上限 ${rule.singleMaxWeightPct}%（仓位占比不受现价影响，这条仍然有效）`,
+      });
+    }
+    return {
+      status: 'price_unavailable',
+      flags,
+      advice: '现价取不到，这只没法判纪律，自己打开券商看一眼再决定',
+    };
+  }
+
   // 止损：跌破成本达止损线
   if (holdPct <= -rule.stopLossPct) {
     flags.push({
@@ -401,6 +427,7 @@ export async function evaluateDiscipline(portfolio?: RealPortfolio): Promise<Dis
     overHold: items.filter((i) => i.flags.some((f) => f.kind === 'over_hold')).length,
     healthy: items.filter((i) => i.status === 'healthy').length,
     stopNotExecuted: items.filter((i) => i.flags.some((f) => f.kind === 'stop_not_executed')).length,
+    priceUnavailable: items.filter((i) => i.status === 'price_unavailable').length,
   };
 
   return { asOf: pf.asOf, config: cfg, regimePhase, budget, items, account, counts };

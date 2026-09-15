@@ -64,6 +64,8 @@ const portfolio = (
       qty: h.qty,
       avgCost: h.avgCost,
       price: h.avgCost,
+      // 这里用成本价当现价只是台账差分用不到现价，不是报价缺失
+      priceIsCostFallback: false,
       marketValue: h.qty * h.avgCost,
       holdProfit: 0,
       holdRate: 0,
@@ -80,6 +82,7 @@ const portfolio = (
       qty: 0,
       avgCost: c.avgCost,
       price: c.price,
+      priceIsCostFallback: false,
       marketValue: 0,
       holdProfit: c.pnl,
       holdRate: c.rate,

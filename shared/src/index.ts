@@ -2054,8 +2054,17 @@ export interface RealPosition {
   qty: number;
   /** 持仓成本价 */
   avgCost: number;
-  /** 现价 */
+  /** 现价。取不到实时报价时退回成本价，此时 priceIsCostFallback 为 true */
   price: number;
+  /**
+   * 现价其实是成本价顶上的（实时报价取不到）。
+   *
+   * 必须标出来，否则 `holdProfit` 与 `holdRate` 会恒为 0——
+   * 持仓看起来不亏不赚，而纪律体检正是拿 holdRate 判止损止盈的
+   * （`discipline.ts` 的 `holdPct <= -rule.stopLossPct`），
+   * 于是**报价一断，止损与止盈就永不触发**，在最需要喊撤时恰好失效。
+   */
+  priceIsCostFallback: boolean;
   /** 持有市值 */
   marketValue: number;
   /** 持有盈亏（累计） */
@@ -5971,7 +5980,15 @@ export type DisciplineKind =
   | 'over_hold'
   | 'near_stop'
   /** 曾触发止损但至今仍持有：风险预算反推仓位的前提是止损真的会执行，不追踪这条整套口径就是自欺 */
-  | 'stop_not_executed';
+  | 'stop_not_executed'
+  /**
+   * 现价取不到，这只判不了止损止盈。
+   *
+   * 不是「没问题」：报价缺失时现价退回成本价，盈亏率恒为 0，
+   * 止损线与止盈线都永远碰不到。必须把「判不了」说出来，
+   * 否则一只该止损的票会以「持有 0.00%」的样子躺在体检报告里。
+   */
+  | 'price_unavailable';
 
 /**
  * 市场阶段对应的风险预算档（ETF 中线口径，按本项目标的自行标定）。
@@ -6125,6 +6142,14 @@ export interface DisciplineReport {
     healthy: number;
     /** 曾触发止损但仍持有的笔数 */
     stopNotExecuted: number;
+    /**
+     * 现价取不到、这轮判不了的笔数。
+     *
+     * 必须单独计数：判不了既不算 healthy 也不算任何一类命中，
+     * 不计的话它会在汇总里静默消失——「3 只健康、0 只异常」看起来一切正常，
+     * 而实际上还有 2 只压根没判。
+     */
+    priceUnavailable: number;
   };
 }
 
