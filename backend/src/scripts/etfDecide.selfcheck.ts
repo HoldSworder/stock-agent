@@ -58,4 +58,52 @@ assert.ok(
   '止损文案须表明它是新进场参考价，避免被当成持仓有效止损',
 );
 
-console.log('✅ ETF 建议自检通过：卖点只来自趋势走弱 / 区间高位不减仓 / 文案不冒充估值');
+// ===== 5) 没有真实依据就不给精确买入价与止损价 =====
+//
+// 原先的兜底是 `现价 * 0.985`，标签写「回踩支撑」——那不是支撑位，
+// 是「现价往下 1.5%」，一个凭空生成的数字穿着技术分析的外衣。
+// 止损同理：`现价 * 0.95` 标成「破位止损参考价」，可那里并没有位可破。
+//
+// 触发条件是历史 K 线不足：不足 60 根时年线必然算不出来，
+// 新上市的 ETF 拿到的全是这类假位。
+{
+  /** 新上市：只有 30 根日 K，年线算不出来 */
+  const freshly: EtfMetrics = {
+    ...metrics(50, 5),
+    ma250: null,
+    maDeviation: null,
+    barCount: 30,
+  };
+
+  const d = decide(freshly, 0, null);
+  assert.equal(
+    d.buyTrigger,
+    null,
+    '没有网格水位也没有年线时不得给买入价——编出来的位不是支撑位',
+  );
+  assert.equal(d.stopLoss, null, '买入价都没有依据，止损价更不该给');
+  assert.ok(
+    d.notes.some((n) => n.includes('不足 60 根') && n.includes('不给买入价')),
+    '要说明为什么没给价，否则「今天怎么没价」查不到原因',
+  );
+
+  // 止盈可以给（它是「涨到目标就走」的规则，不依赖支撑阻力位），但标签要说实话
+  assert.ok(d.takeProfit != null, '止盈是百分比规则，不依赖网格，应当照给');
+  assert.ok(
+    d.takeProfit.note?.includes('没有网格水位'),
+    '没有网格时的止盈标签必须讲明它只是「现价 +8%」，不是阻力位',
+  );
+
+  // 反面：年线算得出来时照常给价，别把正常情形一起掐掉
+  const normal = decide({ ...metrics(50, 5), barCount: 500 }, 0, null);
+  assert.ok(normal.buyTrigger != null, '有年线时应当照常给买入价');
+  assert.ok(normal.stopLoss != null, '有年线时应当照常给止损价');
+  assert.ok(
+    normal.buyTrigger.note?.includes('年线'),
+    '依据来自年线就要写年线，别继续沿用含糊的「回踩支撑」',
+  );
+}
+
+console.log(
+  '✅ ETF 建议自检通过：卖点只来自趋势走弱 / 区间高位不减仓 / 文案不冒充估值 / 无依据不给精确价',
+);

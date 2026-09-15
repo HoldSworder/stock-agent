@@ -158,16 +158,39 @@ export function decide(
   let stopLoss: EtfTrigger | null = null;
   let takeProfit: EtfTrigger | null = null;
 
+  // 触发价必须有真实依据：网格水位或年线。两者都没有时**不给价**。
+  //
+  // 原先的兜底是 `现价 * 0.985`，而且贴的标签是「回踩支撑」——
+  // 那不是支撑位，是「现价往下 1.5%」，一个凭空生成的数字穿着技术分析的外衣。
+  // 止损同理：`现价 * 0.95` 被标成「破位止损参考价」，可那里并没有位可破。
+  // 历史 K 线不足 60 根时年线一定算不出来，于是新上市的 ETF 拿到的全是这类假位。
+  const level = grid?.nextBuy ?? m.ma250 ?? null;
+  const levelSource = grid?.nextBuy != null ? '网格下一档低吸' : '回踩年线支撑';
+
   if (action === 'buy' || action === 'add' || action === 'hold') {
-    const buyAt = grid?.nextBuy ?? m.ma250 ?? r3(price * 0.985);
-    buyTrigger = trig('pullback', buyAt, grid?.nextBuy ? '网格下一档低吸' : '回踩支撑');
-    stopLoss = trig('price', Math.min(buyAt * 0.96, price * 0.95), '新进场的破位止损参考价');
-    takeProfit = trig('breakout', grid?.nextSell ?? price * 1.08, '网格上一档/止盈');
+    if (level != null) {
+      buyTrigger = trig('pullback', level, levelSource);
+      stopLoss = trig('price', Math.min(level * 0.96, price * 0.95), '新进场的破位止损参考价');
+    } else {
+      notes.push(
+        `历史数据只有 ${m.barCount} 根日 K（不足 60 根），算不出年线也没有网格水位，` +
+          '这只不给买入价和止损价——凭现价往下打几个点编出来的位不是支撑位',
+      );
+    }
+    // 止盈是「涨到目标就走」的规则，不依赖支撑阻力位，所以没有网格也能给，
+    // 但标签要说实话：没有网格时它就是「现价 +8%」，不是什么阻力位
+    takeProfit =
+      grid?.nextSell != null
+        ? trig('breakout', grid.nextSell, '网格上一档止盈')
+        : trig('breakout', r3(price * 1.08), '按现价 +8% 的止盈目标（没有网格水位可依据）');
   }
   // 卖点只来自趋势走弱，不来自「涨得多」。原先此处挂在「区间高位」上，
   // 于是主升浪途中反复给减仓价；现在改挂 avoid（绝对动量转负）
   if (action === 'avoid') {
-    sellTrigger = trig('price', grid?.nextSell ?? price, '趋势已走弱，反弹减仓参考价');
+    sellTrigger =
+      grid?.nextSell != null
+        ? trig('price', grid.nextSell, '趋势已走弱，反弹到网格上一档减仓')
+        : trig('price', price, '趋势已走弱，按现价减仓（没有网格水位，不是等反弹的价）');
   }
 
   return { action, buyTrigger, sellTrigger, stopLoss, takeProfit, notes };

@@ -1,6 +1,9 @@
-// 选股打分「缺数不冒充中性」自检（无框架，assert 断言，不碰网络与数据库）。
+// 选股「不许为了凑出结果而静默降级」自检（无框架，assert 断言，不碰网络与数据库）。
 //
-// 钉住的是这一条：**取不到的因子不许按 50 分参与排名**。
+// 两条同源的规则：
+//   1. 取不到的因子不许按 50 分参与排名（第 1~5 节）
+//   2. 硬筛不许为了凑出结果自动放宽（第 6 节）
+// 都是同一个毛病的两种形态：宁可交一张凑出来的榜，也不肯说「今天没有」。
 //
 // 原先的行为：分位、题材、趋势、龙头等因子缺失一律记 50（中性）。
 // 后果用算术说明最清楚——
@@ -19,6 +22,7 @@ import {
 } from '../screener/scorer';
 import type { SnapshotRow } from '../screener/snapshot';
 import type { ScreenStrategyDef } from '../screener/strategy';
+import { __test__applyHardFilterWithFallback } from '../screener/engines';
 
 /** 造一行快照。不传的字段即「取不到」 */
 function row(p: Partial<SnapshotRow> & Pick<SnapshotRow, 'code'>): SnapshotRow {
@@ -183,6 +187,64 @@ function def(weights: ScreenStrategyDef['factorWeights']): ScreenStrategyDef {
     assert.equal(s.rankable, true, `${s.row.code} 数据齐全必须可排名`);
     assert.ok(s.screenScore > 0, `${s.row.code} 应当算出一个真实分数`);
   }
+}
+
+// ===== 6. 硬筛不许为了凑出结果自动放宽 =====
+//
+// 原先是逐级兜底：full → skipVolumePrice → tradableOnly，哪级出结果用哪级，
+// 只把「已自动放宽」写进运行说明，不阻止出榜。
+//
+// 问题在于：**自动放宽等于「你的条件没人满足，那我换个条件」**。
+// 放量突破的全部含义就在那个成交额下限上，跳过它再出榜，出来的不是放量突破；
+// 降到 tradableOnly 只剩「能不能交易」，那就是全市场，跟没筛一样。
+//
+// 唯一该放宽的情形是数据确实没有：盘前东财把当日量价置 0 且没有收盘缓存可用。
+// 那是「取不到」，不是「没人达标」。
+{
+  const d = def({ momentum: 1 });
+  void d; // 这一节只测硬筛，不用打分
+
+  // 只有大票，且成交额都低于阈值
+  const rows = [
+    row({ code: '600011', amount: 0.1, marketCap: 100 }),
+    row({ code: '600012', amount: 0.2, marketCap: 200 }),
+  ];
+  const needBigAmount = { amountMinYi: 100 };
+
+  // 数据正常却没人达标 → 空结果，不放宽
+  const normal = __test__applyHardFilterWithFallback(rows, needBigAmount, false);
+  assert.equal(
+    normal.filtered.length,
+    0,
+    '数据正常却没人满足成交额下限时，必须返回空——放宽之后出的榜不是这个策略的判断',
+  );
+  assert.equal(normal.relaxedMode, null, '数据正常时不许放宽');
+
+  // 快照退化（量价取不到）→ 允许跳过量价阈值，其余条件照常
+  const degenerate = __test__applyHardFilterWithFallback(rows, needBigAmount, true);
+  assert.equal(
+    degenerate.filtered.length,
+    2,
+    '快照退化时量价取不到，跳过量价阈值是对的——那是数据没有，不是条件没人满足',
+  );
+  assert.equal(degenerate.relaxedMode, 'skipVolumePrice', '要说明放宽到了哪一级');
+
+  // 即使退化，非量价的条件也不许放宽：市值下限 1 万亿谁都不满足
+  const stillStrict = __test__applyHardFilterWithFallback(
+    rows,
+    { amountMinYi: 100, marketCapMinYi: 1_000_000 },
+    true,
+  );
+  assert.equal(
+    stillStrict.filtered.length,
+    0,
+    '退化只该放宽量价阈值，市值这类与当日行情无关的条件必须继续生效',
+  );
+
+  // 有人达标时就走完整条件，不该误报放宽
+  const ok = __test__applyHardFilterWithFallback(rows, { amountMinYi: 0.05 }, true);
+  assert.equal(ok.filtered.length, 2);
+  assert.equal(ok.relaxedMode, null, '完整条件就有结果时不该标成已放宽');
 }
 
 console.log('screenerMissing.selfcheck 全部通过');

@@ -87,16 +87,36 @@ function withModeNote(mode: string | null, text: string | null): string | null {
  * 逐级硬筛兜底：full → skipVolumePrice → tradableOnly。
  * 返回首个非空结果及是否经过放宽（relaxed=true 表示未用 full 口径）。
  */
+/**
+ * 硬筛，以及「什么时候可以放宽」。
+ *
+ * 原先是逐级兜底：full → skipVolumePrice → tradableOnly，哪级出了结果用哪级，
+ * 只把「已自动放宽」写进运行说明，不阻止出榜。这有个根本问题：
+ * **自动放宽等于「你的条件没人满足，那我换个条件」**，出的榜不是这个策略的判断了。
+ * 放量突破的全部含义就在那个成交额下限上，跳过它再出榜，出来的不是放量突破。
+ *
+ * 现在只区分两种情形：
+ *
+ * 1. 快照退化（盘前东财把当日量价置 0，且没有可用的收盘缓存）——
+ *    此时跳过量价阈值是**对的**：那是数据没有，不是条件没人满足。
+ * 2. 数据正常却一只都不满足——**今天真的没有符合这个策略的标的**。
+ *    这时候的正确答案是把这句话说出来，而不是把门槛一路降到只剩「能交易」
+ *    （降到那一级，剩下的就是全市场，跟没筛一样）。
+ */
 function applyHardFilterWithFallback(
   snapshot: SnapshotRow[],
   hardFilters: Parameters<typeof hardFilter>[1],
-): { filtered: SnapshotRow[]; relaxed: boolean } {
-  const modes: HardFilterMode[] = ['full', 'skipVolumePrice', 'tradableOnly'];
-  for (const mode of modes) {
-    const filtered = hardFilter(snapshot, hardFilters, mode);
-    if (filtered.length > 0) return { filtered, relaxed: mode !== 'full' };
+  degenerate: boolean,
+): { filtered: SnapshotRow[]; relaxedMode: HardFilterMode | null } {
+  const full = hardFilter(snapshot, hardFilters, 'full');
+  if (full.length > 0) return { filtered: full, relaxedMode: null };
+
+  if (degenerate) {
+    const skipped = hardFilter(snapshot, hardFilters, 'skipVolumePrice');
+    if (skipped.length > 0) return { filtered: skipped, relaxedMode: 'skipVolumePrice' };
   }
-  return { filtered: [], relaxed: true };
+
+  return { filtered: [], relaxedMode: null };
 }
 
 /** multifactor：全市场快照 → 规则硬筛 → 多因子打分 → LLM 横排 → 组合去集中 → TopN */
@@ -130,10 +150,16 @@ const multifactor: ScreenEngine = {
     // 盘前退化处理：当日量价被东财置 0 时，优先复用最近一次有效行情缓存（通常即上一交易日收盘），
     // 让硬筛/打分照常生效；非退化则把本次快照写入缓存，供下个盘前窗口使用。
     let runMode: string | null = UNIMPLEMENTED_RULE_NOTE;
-    if (isDegenerateSnapshot(snapshot)) {
+    // 退化 = 东财把当日量价置 0（盘前常见）。这个事实要留到硬筛那一步：
+    // 只有这种「数据确实没有」的情形才允许跳过量价阈值，
+    // 「条件没人满足」不许放宽（见 applyHardFilterWithFallback）。
+    let degenerate = isDegenerateSnapshot(snapshot);
+    if (degenerate) {
       const { rows: cached, staleNote } = loadLastCloseSnapshot();
       if (cached) {
         snapshot = cached;
+        // 换成收盘快照后量价是齐的，不再算退化——此时量价阈值应当照常生效
+        degenerate = false;
         runMode = `盘前模式：采用上一交易日收盘快照；${runMode}`;
       } else if (staleNote) {
         // 缓存过期时绝不能沉默降级：此刻用的是当日被置 0 的量价，硬筛会自动放宽，用户需要知道
@@ -150,12 +176,23 @@ const multifactor: ScreenEngine = {
       note: runMode ?? undefined,
     });
 
-    // 逐级硬筛兜底：full → skipVolumePrice → tradableOnly，仍为空才判定全市场异常。
     emit({ stage: 'filter', label: '规则硬筛', status: 'running' });
-    const { filtered, relaxed } = applyHardFilterWithFallback(snapshot, def.hardFilters);
-    if (filtered.length === 0) throw new Error('硬筛后无候选，请放宽策略阈值或更换策略');
-    if (relaxed) {
-      const relaxNote = '已自动放宽硬筛阈值';
+    const { filtered, relaxedMode } = applyHardFilterWithFallback(
+      snapshot,
+      def.hardFilters,
+      degenerate,
+    );
+    if (filtered.length === 0) {
+      // 「没有满足条件的」和「系统出错了」是两件事，必须说清是哪一件——
+      // 否则人会去排查一个不存在的故障，或者反过来把故障当成「今天没机会」。
+      throw new Error(
+        `今天没有标的满足「${def.name}」的条件（全市场 ${snapshot.length} 只都不满足）。` +
+          '这不是系统故障，是这套条件今天没人达标。' +
+          '系统不会替你自动放宽：放宽之后出的榜就不是这个策略的判断了。',
+      );
+    }
+    const relaxNote = '盘前当日量价取不到，本次跳过量价阈值（其余条件照常）';
+    if (relaxedMode === 'skipVolumePrice') {
       runMode = runMode ? `${runMode}；${relaxNote}` : relaxNote;
     }
     emit({
@@ -163,7 +200,7 @@ const multifactor: ScreenEngine = {
       label: '规则硬筛',
       status: 'done',
       filteredCount: filtered.length,
-      note: relaxed ? '已自动放宽硬筛阈值' : undefined,
+      note: relaxedMode === 'skipVolumePrice' ? relaxNote : undefined,
     });
 
     emit({ stage: 'score', label: '多因子打分', status: 'running' });
@@ -332,3 +369,6 @@ export function hasEngine(id: string): boolean {
 export function getEngine(id: string | null | undefined): ScreenEngine {
   return (id && BY_ID.get(id)) || BY_ID.get(DEFAULT_ENGINE)!;
 }
+
+// 「什么时候可以放宽硬筛」是这层唯一会悄悄改变策略含义的地方，单独导出供自检验证。
+export { applyHardFilterWithFallback as __test__applyHardFilterWithFallback };
