@@ -13,6 +13,7 @@ import {
   settleDue,
   trackedCodes,
 } from './service';
+import { recomputeWeights, tripBreakerIfSampleCollapsed } from './weightService';
 
 // 技术断言账本模块。自包含：删掉 server.ts 里那一行接入即整模块下线。
 
@@ -177,6 +178,29 @@ export function registerAssertionsModule(app: FastifyInstance): void {
           console.log(
             `[assertions] 核对：待判 ${s.checked}，遵循 ${s.settled.respected}，` +
               `未遵循 ${s.settled.violated}，未触及 ${s.settled.untouched}，判不了 ${s.settled.unjudgeable}`,
+          );
+        },
+      },
+      // 必须排在核对之后：成绩是拿「已判出结果的记录」算的，
+      // 核对没跑完就重算，等于用昨天的样本盖上今天的日期——成绩看着新鲜，证据还是旧的。
+      //
+      // 此前这一步只存在于 weights.livecheck.ts 里，生产没有任何入口，
+      // 于是成绩停在手工跑过的那一天（2026-08-28），而页面照常展示。
+      {
+        id: 'assertions.weights',
+        label: '技术判断算成绩（16:00）',
+        defaultCron: '0 16 * * 1-5',
+        // 与存档/核对同为默认关：三环是一条链，单开这一环只会反复重算同一批样本。
+        // 关着期间说准率页会明确提示「不会自己更新」，不让停更悄悄发生。
+        defaultEnabled: false,
+        run: async () => {
+          const out = await recomputeWeights();
+          // 熔断要紧跟在重算之后：样本骤降说明取数或跟踪范围出了问题，
+          // 此时必须把权重按回中性，否则就是拿旧证据指挥今天的排序。
+          const tripped = tripBreakerIfSampleCollapsed();
+          console.log(
+            `[assertions] 算成绩：${out.length} 个依据来源` +
+              (tripped ? `；${tripped}` : ''),
           );
         },
       },

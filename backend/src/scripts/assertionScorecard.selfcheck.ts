@@ -1,4 +1,7 @@
-// 技术判断成绩口径自检（无框架，assert 断言；纯计算，不碰 DB/网络）。
+// 技术判断成绩口径自检（无框架，assert 断言；不查库、不联网）。
+//
+// 第 1~4 节用本文件内的镜像函数验证判据口径；第 5 节导入 scorecard.ts 的真实函数
+// （因此会连带建立数据库连接，但不执行任何查询）。
 // 运行：cd backend && ./node_modules/.bin/tsx src/scripts/assertionScorecard.selfcheck.ts
 //
 // 钉住两条，都是刚才真出过的错：
@@ -12,6 +15,7 @@
 //    拿它宣布领先，下个月就翻脸。实测数据里道氏的点估计是 +0.75 而下界是 -0.88，
 //    看点估计会说它领先，看下界才知道它弱于随机。
 import assert from 'node:assert/strict';
+import { __test__stalenessOf, __test__STALE_DAYS_WARN } from '../assertions/scorecard';
 
 const MIN_SAMPLES = 100;
 const MEANINGFUL_POINTS = 0.5;
@@ -79,3 +83,59 @@ assert.equal(verdictOf({ edgeLower: null, samples: 500 }), 'no-control', '没算
 console.log(
   '✅ 技术判断成绩口径自检通过：小数转百分点 / 用 95% 下界不用点估计 / 样本下限优先 / 中间带判持平',
 );
+
+// ===== 5. 成绩过期提示（用的是 scorecard.ts 里的真实函数，不是镜像）=====
+//
+// 起因：这份成绩的重算此前只存在于 weights.livecheck.ts，生产没有任何入口，
+// 于是成绩停在手工跑过的那一天（2026-08-28），而页面照常展示「算于 08-28」，
+// 不提一个字说这是半个月前的数。**测出来没人知道是哪天的结论，和没测一样。**
+//
+// 两种停更原因给出的话必须不同，否则使用者不知道该做什么：
+// 定时没开 = 「它本来就不会更新，去打开」；定时开着却停更 = 「有一环跑挂了，去看任务健康」。
+
+assert.equal(
+  __test__stalenessOf('2026-09-15', '2026-09-15', []).staleDays,
+  0,
+  '当天算的就是 0 天',
+);
+assert.equal(
+  __test__stalenessOf('2026-09-15', '2026-09-15', []).staleNote,
+  null,
+  '链路开着且是当天的，不该有任何提示',
+);
+
+// 链路开着、在容忍窗口内 → 不提示（跨周末不能误报）
+assert.equal(
+  __test__stalenessOf('2026-09-09', '2026-09-15', []).staleNote,
+  null,
+  `${__test__STALE_DAYS_WARN} 天内不提示，否则周末假期天天误报`,
+);
+
+// 链路开着却停更超窗口 → 指向任务健康
+{
+  const r = __test__stalenessOf('2026-08-28', '2026-09-15', []);
+  assert.equal(r.staleDays, 18);
+  assert.ok(r.staleNote, '停更 18 天必须提示');
+  assert.ok(r.staleNote!.includes('18 天'), '要把天数说出来，不能只给日期');
+  assert.ok(r.staleNote!.includes('任务健康'), '定时开着却停更，该引导去看哪一项跑挂了');
+  assert.ok(!r.staleNote!.includes('关着'), '定时开着时不该说成关着');
+}
+
+// 链路关着 → 必须说明「不会自己更新」并指出是哪几项
+{
+  const r = __test__stalenessOf('2026-08-28', '2026-09-15', ['存档', '核对']);
+  assert.equal(r.staleDays, 18);
+  assert.ok(r.staleNote!.includes('不会自己更新'), '关着的时候要说清它不会自动更新');
+  assert.ok(r.staleNote!.includes('存档'), '要点名是哪几项没开');
+  assert.ok(r.staleNote!.includes('核对'), '要点名是哪几项没开');
+  assert.ok(!r.staleNote!.includes('任务健康'), '定时关着是预期内，不该引导去查故障');
+}
+
+// 从未算过 → 不能显示成 0 天（那会被读成「今天刚算的」）
+{
+  const r = __test__stalenessOf(null, '2026-09-15', ['存档', '核对', '算成绩']);
+  assert.equal(r.staleDays, null, '从未算过必须是 null，不能是 0');
+  assert.ok(r.staleNote!.includes('还没算过'), '从未算过要如实说');
+}
+
+console.log('✅ 成绩过期提示自检通过：天数与日期同时给出 / 两种停更原因给不同的话 / 从未算过不显示成 0 天');

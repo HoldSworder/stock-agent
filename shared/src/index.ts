@@ -5376,6 +5376,15 @@ export interface AssertionScorecard {
    * 首轮对照没有一套方法显示出优势，此时打开权重等于拿还没被证明的优势去改排序。
    */
   weightsEnabled: boolean;
+  /**
+   * 成绩距今多少个自然日。从未算过为 null。
+   *
+   * 页面必须显示这个数：一张标着「算于某日」的成绩单，看的人不会去数那是几天前。
+   * 半个月前的成绩会被当成今天的结论读。
+   */
+  staleDays: number | null;
+  /** 成绩过期或更新链路没开时的提示；一切正常为 null */
+  staleNote: string | null;
   /** 判定方式说明 */
   note: string;
 }

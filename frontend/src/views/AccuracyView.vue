@@ -179,7 +179,13 @@ onMounted(load);
       <template #header>
         <div class="vs-head">
           <span class="vs-title">比随便画一条线，好多少</span>
-          <el-tag size="small" effect="plain" type="info">算于 {{ scorecard.computedAt }}</el-tag>
+          <!-- 天数必须和日期一起显示：只给日期，看的人不会去数那是几天前 -->
+          <el-tag size="small" effect="plain" :type="scorecard.staleNote ? 'danger' : 'info'">
+            算于 {{ scorecard.computedAt }}
+            <template v-if="scorecard.staleDays != null && scorecard.staleDays > 0">
+              （{{ scorecard.staleDays }} 天前）
+            </template>
+          </el-tag>
           <el-tag
             size="small"
             effect="plain"
@@ -189,6 +195,15 @@ onMounted(load);
           </el-tag>
         </div>
       </template>
+      <!-- 放在表格之前：先知道这批数字是哪天的，再看数字 -->
+      <el-alert
+        v-if="scorecard.staleNote"
+        :title="scorecard.staleNote"
+        type="warning"
+        :closable="false"
+        show-icon
+        class="vs-stale"
+      />
       <el-table :data="scorecard.rows" size="small">
         <el-table-column prop="label" label="方法" width="130" />
         <el-table-column label="比随机好多少" width="130">
@@ -368,6 +383,9 @@ onMounted(load);
 }
 .vs-title {
   font-weight: 600;
+}
+.vs-stale {
+  margin-bottom: 10px;
 }
 .vs-note {
   margin: 10px 0 0;
