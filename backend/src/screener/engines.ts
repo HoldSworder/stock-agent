@@ -6,6 +6,7 @@ import type {
   ScreenFunnelDiagnostics,
   Horizon,
 } from '@stock-agent/shared';
+import { SCREEN_FACTOR_LABELS } from '@stock-agent/shared';
 import {
   fetchMarketSnapshot,
   isDegenerateSnapshot,
@@ -171,17 +172,13 @@ const multifactor: ScreenEngine = {
       (a, b) => b.screenScore - a.screenScore,
     );
 
-    // 数据缺太多的不进榜：拿半份数据算出来的分和拿全份算出来的分不是同一把尺，
-    // 混在一张榜上比就是错的。剔掉多少条要说出来，否则「今天榜变短了」查不到原因。
-    const dropped = scored.filter((c) => !c.rankable);
-    let pool = scored.filter((c) => c.rankable).slice(0, LLM_POOL_MAX);
-    emit({
-      stage: 'score',
-      label: '多因子打分',
-      status: 'done',
-      poolCount: pool.length,
-      note: dropped.length > 0 ? `${dropped.length} 只因取数不全未参与排名` : undefined,
-    });
+    // 这一遍**不能**按 rankable 过滤：trend / fundFlow / midTrend / dragonRank
+    // 是下面「二段增强」才注入的因子，此刻必然全是空值。
+    // 在这里过滤会把所有用这些因子的策略整池剔空——真实数据下中线龙头 646 只
+    // 会一只不剩（探测脚本 screenerMissing.probe.ts 就是这么抓到的）。
+    // 这一遍只负责按分排序、收窄到 LLM_POOL_MAX，缺数的判定留到最终那一遍。
+    let pool = scored.slice(0, LLM_POOL_MAX);
+    emit({ stage: 'score', label: '多因子打分', status: 'done', poolCount: pool.length });
 
     // 二段增强：策略若启用 trend / fundFlow（逐只历史因子）或 dragonRank（涨停池因子），
     // 仅对收窄后的候选池限量取 K 线/资金流/涨停池补分并重打分（避免对全市场逐只取数）。
@@ -218,6 +215,30 @@ const multifactor: ScreenEngine = {
       }
       emit({ stage: 'enrich', label: '趋势/资金/龙头二段增强', status: 'done', poolCount: pool.length });
     }
+
+    // 缺数判定放在这里：所有因子该注入的都注入过了，此刻的空值才是真的取不到。
+    // 拿半份数据算出来的分和拿全份算出来的分不是同一把尺，混在一张榜上比就是错的。
+    // 剔掉多少条必须说出来，否则「今天榜怎么变短了」查不到原因。
+    //
+    // 整池被剔空是可能的，而且是对的：趋势因子权重 0.4 的中线策略在
+    // 完全取不到趋势数据时不该出榜——那时候出的榜是拿剩下 0.6 凑的，不是它本来的判断。
+    const dropped = pool.filter((c) => !c.rankable);
+    pool = pool.filter((c) => c.rankable);
+    if (dropped.length > 0) {
+      const missNames = Array.from(
+        new Set(dropped.flatMap((c) => c.missingFactors.map((k) => SCREEN_FACTOR_LABELS[k]))),
+      );
+      emit({
+        stage: 'score',
+        label: '缺数剔除',
+        status: 'done',
+        poolCount: pool.length,
+        note:
+          `${dropped.length} 只因取数不全未参与排名（缺：${missNames.join('、')}）` +
+          (pool.length === 0 ? '——本次无结果，不是没选出来，是这些数据取不到' : ''),
+      });
+    }
+
     if (input.useLlm) {
       emit({ stage: 'rank', label: 'LLM 横向排序', status: 'running', poolCount: pool.length });
     }

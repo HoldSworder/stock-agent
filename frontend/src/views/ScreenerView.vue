@@ -516,6 +516,22 @@ onMounted(loadStatus);
                   <el-tag v-for="t in row.riskTags" :key="t" size="small" type="danger" effect="plain">
                     {{ t }}
                   </el-tag>
+                  <!--
+                    缺数要标到榜上。综合分是在「取到数的因子之间」重新归一算的，
+                    所以缺一项不会被按 0 分误杀，但也意味着这个分和数据齐全的那些
+                    不是拿同样几项算出来的——轻微偏高是这套算法的固有性质，
+                    藏起来不如标出来。
+                  -->
+                  <el-tooltip
+                    v-if="missingFactorLabels(row).length"
+                    :content="`这一条的综合分只用了取到数的那几项算，缺：${missingFactorLabels(row).join('、')}。缺项多的已经不参与排名了，这条还在榜上说明缺得不多，但分数会比数据齐全的略偏高。`"
+                    placement="top"
+                    :width="300"
+                  >
+                    <el-tag size="small" type="warning" effect="plain">
+                      缺 {{ missingFactorLabels(row).length }} 项数据
+                    </el-tag>
+                  </el-tooltip>
                 </div>
               </template>
             </el-table-column>
