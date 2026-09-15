@@ -8385,7 +8385,17 @@ export interface SymbolTradePlanRisk {
   executionStop: number | null;
   atrPct: number | null;
   maxAccountRiskPct: number;
+  /**
+   * 这只最多能持多少（占真实账户总资产 %），由「单笔最多亏多少」反推。
+   *
+   * **它与盯盘分层那个百分数不是同一个问题**（见 CONTEXT.md「仓位比例」）：
+   * 盯盘是赛道配置（三层合计 100%、不接账户），这里是风险反推的上限
+   * （主升 40% / 退潮 15%）。所以界面上必须连 `budgetPhase` 一起显示——
+   * 只印 15% 而不说是退潮档，使用者翻回盯盘页看到 100% 会以为系统坏了。
+   */
   suggestedPositionPct: number | null;
+  /** 上面那个上限是按哪一档市场阶段算的。null = 阶段取不到，按最紧的震荡档算 */
+  budgetPhase: MarketRegimePhase | null;
   timeStopBars: number | null;
   gapRiskNote: string | null;
   /**

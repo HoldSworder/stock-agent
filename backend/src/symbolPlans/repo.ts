@@ -63,6 +63,9 @@ function toDto(row: PlanRow): SymbolTradePlan {
       atrPct: null,
       maxAccountRiskPct: 0,
       suggestedPositionPct: null,
+      // 老计划落库时还没这个字段，读出来是 null——界面据此不显示档位，
+      // 而不是编一个档位印上去
+      budgetPhase: null,
       timeStopBars: null,
       gapRiskNote: null,
       allowedShares: null,

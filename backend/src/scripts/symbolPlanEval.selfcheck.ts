@@ -84,6 +84,7 @@ function mkPlan(over: Partial<SymbolTradePlan> = {}): SymbolTradePlan {
       executionStop: null,
       atrPct: null,
       maxAccountRiskPct: 1,
+      budgetPhase: '主升',
       suggestedPositionPct: null,
       timeStopBars: null,
       gapRiskNote: null,

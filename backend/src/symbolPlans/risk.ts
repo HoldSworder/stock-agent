@@ -104,6 +104,8 @@ export function assembleRisk(input: RiskInput): AssembledRisk {
         atrPct: null,
         maxAccountRiskPct: budgetForPhase(null).singleTradeRiskPct,
         suggestedPositionPct: null,
+        // 没行情就没算出上限，档位也就无从谈起
+        budgetPhase: null,
         timeStopBars: TIME_STOP_BARS,
         gapRiskNote: '无有效行情，未计算风险距离',
         allowedShares: null,
@@ -172,6 +174,9 @@ export function assembleRisk(input: RiskInput): AssembledRisk {
       atrPct,
       maxAccountRiskPct: budget.singleTradeRiskPct,
       suggestedPositionPct: sizing?.allowedWeightPct ?? null,
+      // 把档位一起交出去：同一只票在主升档是 40%、退潮档是 15%，差 2.7 倍。
+      // 不说档位，使用者翻回盯盘页看到「赛道配置 100%」会以为系统自相矛盾
+      budgetPhase: regime,
       timeStopBars: TIME_STOP_BARS,
       gapRiskNote: gapNote,
       // 股数是 computeSizing 早就算好的，此前只取了权重百分比就把它丢了，

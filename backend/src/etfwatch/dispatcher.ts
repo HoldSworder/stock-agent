@@ -89,12 +89,24 @@ async function pushAlert(s: EtfWatchSignal, body: string): Promise<boolean> {
   }
 }
 
+// 推送文案是「仓位那个数会不会被误读」的唯一出口，单独导出供自检验证。
+export { formatInstruction as __test__formatInstruction };
+
 /** 把执行指令拼成可直接照做的一段文本（Telegram / 死信兜底） */
 function formatInstruction(ins: EtfExecInstruction): string {
   const parts = [`动作：${ins.action}${ins.layer ? ` L${ins.layer}` : ''}`];
   if (ins.entryLow != null && ins.entryHigh != null)
     parts.push(`价位：${ins.entryLow}-${ins.entryHigh}`);
-  if (ins.sizePct > 0) parts.push(`仓位：${ins.sizePct}%${ins.totalAfterPct != null ? `（总仓→${ins.totalAfterPct}%）` : ''}`);
+  // 必须写明这个百分数是「赛道配置」而不是「风险预算算出来的上限」。
+  //
+  // 同一只 ETF 在三个地方各有一个「仓位」，回答三个不同问题（见 CONTEXT.md）：
+  // 这里是赛道配置（三层合计 100%，不接账户），标的计划那边是按单笔最多亏多少
+  // 反推的上限（主升 40% / 退潮 15%），波段那边是「已有仓位之上还能补多少」。
+  // 只印一个百分数，使用者翻到另一页就会以为系统自相矛盾。
+  if (ins.sizePct > 0)
+    parts.push(
+      `仓位：${ins.sizePct}%（这是赛道配置比例${ins.totalAfterPct != null ? `，本轮加完约 ${ins.totalAfterPct}%` : ''}）`,
+    );
   if (ins.stopLoss != null) parts.push(`止损：${ins.stopLoss}`);
   if (ins.invalidation) parts.push(`失效：${ins.invalidation}`);
   if (ins.guardrailNote) parts.push(`护栏：${ins.guardrailNote}`);

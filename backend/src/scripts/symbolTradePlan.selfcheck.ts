@@ -160,6 +160,7 @@ const RISK = {
   executionStop: CLOSE * 0.92,
   atrPct: 3,
   maxAccountRiskPct: 1,
+  budgetPhase: '主升' as const,
   suggestedPositionPct: 12,
   timeStopBars: 5,
   gapRiskNote: null,

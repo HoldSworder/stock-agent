@@ -370,6 +370,20 @@ function splitBatches(shares: number, fractions: number[]): string[] {
 }
 
 /**
+ * 说明这个上限的基数与档位。
+ *
+ * 「占账户」要写出来，因为盯盘页那个百分数不接账户、是赛道配置比例；
+ * 档位要写出来，因为主升 40% / 退潮 15% 差 2.7 倍，不说档位就没法理解为什么今天只给这么少。
+ */
+const positionBaseNote = computed(() => {
+  const r = plan.value?.risk;
+  if (!r || r.suggestedPositionPct == null) return '';
+  return r.budgetPhase
+    ? `（占账户总资产，按「${r.budgetPhase}」这档算的）`
+    : '（占账户总资产，当前行情阶段判不出来，按最紧的一档算）';
+});
+
+/**
  * 可下单指令：把「持有 / 减仓」这类动词换算成挂单价 + 股数 + 金额 + 分批。
  *
  * 股数不直接用 risk.allowedShares：那是按现价算的，而计划要求在触发价才进场。
@@ -680,7 +694,15 @@ watch(() => props.code, () => void load(), { immediate: true });
 
         <!-- 仓位与有效期 -->
         <div class="tp__meta">
-          <span>建议仓位上限 <b class="num">{{ plan.risk.suggestedPositionPct ?? '—' }}%</b></span>
+          <!--
+            必须连档位一起显示。同一只票主升档允许 40%、退潮档只允许 15%，差 2.7 倍；
+            而盯盘页那个「赛道配置」三层合计到 100%。只印一个百分数，
+            使用者翻页对比会以为系统自相矛盾（见 CONTEXT.md「仓位比例」）。
+          -->
+          <span>
+            建议仓位上限 <b class="num">{{ plan.risk.suggestedPositionPct ?? '—' }}%</b>
+            <em class="tp__base">{{ positionBaseNote }}</em>
+          </span>
           <span>单笔风险 <b class="num">{{ plan.risk.maxAccountRiskPct }}%</b></span>
           <span>时间止损 <b>{{ timeStopText }}</b></span>
           <span>有效期至 {{ expiresText }}</span>
@@ -1133,6 +1155,12 @@ watch(() => props.code, () => void load(), { immediate: true });
 }
 .tp__meta b {
   color: #cfd3dc;
+}
+/* 基数与档位的说明：比数字弱一级，但不能省——省了就会被当成和盯盘页那个数同一回事 */
+.tp__meta .tp__base {
+  font-style: normal;
+  color: var(--text-3, var(--text-2));
+  opacity: 0.8;
 }
 .tp__status {
   margin-top: 5px;
