@@ -11,7 +11,6 @@
 // 运行：cd backend && pnpm exec tsx src/scripts/cockpitActions.selfcheck.ts
 import assert from 'node:assert/strict';
 import type { ActionDataSource, CockpitAction, SourceFreshness } from '@stock-agent/shared';
-import { ACTION_DATA_SOURCE_LABELS } from '@stock-agent/shared';
 import {
   COCKPIT_ACTION_EMPTY_TEXT,
   PLAN_TRIGGER_UNKNOWN_TEXT,
@@ -47,6 +46,7 @@ function mk(p: Partial<CockpitAction> & Pick<CockpitAction, 'priority' | 'kind'>
     evidence: [],
     basisSources: [],
     provenNote: null,
+    staleNote: null,
     dataAt: null,
     live: null,
     distancePct: null,
@@ -417,7 +417,8 @@ function mk(p: Partial<CockpitAction> & Pick<CockpitAction, 'priority' | 'kind'>
     state,
     dataAt: '2026-09-14',
     behindDays: 1,
-    note: null,
+    ttlMinutes: 24 * 60,
+    note: '',
   });
   const ok = (source: ActionDataSource): SourceFreshness => ({
     ...stale(source, 'ok'),

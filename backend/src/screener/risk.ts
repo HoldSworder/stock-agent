@@ -6,9 +6,14 @@ import type { ScoredRow } from './scorer';
 /** 基于快照的确定性风险标签（与 LLM riskTags 合并去重） */
 export function ruleRiskTags(row: ScoredRow['row']): string[] {
   const tags: string[] = [];
-  if (row.pct >= 9) tags.push('高位涨停');
-  else if (row.pct >= 7) tags.push('当日大涨');
-  if (row.pct <= -7) tags.push('当日暴跌');
+  // 涨跌幅取不到时不贴涨跌类标签，但要说出来——
+  // 没有标签会被读成「今天很平静」，而事实是这只的涨跌幅根本没取到
+  if (row.pct == null) tags.push('涨跌幅取不到');
+  else {
+    if (row.pct >= 9) tags.push('高位涨停');
+    else if (row.pct >= 7) tags.push('当日大涨');
+    if (row.pct <= -7) tags.push('当日暴跌');
+  }
   if (row.marketCap != null && row.marketCap < 30) tags.push('微盘股');
   if (row.pe != null && row.pe <= 0) tags.push('当前亏损');
   if (row.turnoverRate != null && row.turnoverRate > 30) tags.push('换手过热');

@@ -21,7 +21,7 @@ function toTelegram(detail: ScreenRunDetail): string {
   const lines = detail.picks.map((p) => {
     const tags = p.riskTags.length ? ` ⚠️${p.riskTags.join('/')}` : '';
     const thesis = p.thesis ? `\n   ${p.thesis}` : '';
-    return `${p.rank}. ${p.name}(${p.code}) ${p.price} ${p.pct >= 0 ? '+' : ''}${p.pct}% 分${p.screenScore}${tags}${thesis}`;
+    return `${p.rank}. ${p.name}(${p.code}) ${p.price} ${p.pct == null ? '涨跌幅取不到' : `${p.pct >= 0 ? '+' : ''}${p.pct}%`} 分${p.screenScore}${tags}${thesis}`;
   });
   return `${head}${view}\n${lines.join('\n')}`;
 }

@@ -25,10 +25,15 @@ export interface SnapshotRow {
   name: string;
   /** 现价 */
   price: number;
-  /** 涨跌幅 % */
-  pct: number;
-  /** 成交额（亿元） */
-  amount: number;
+  /**
+   * 涨跌幅 %（缺失为 null）。
+   *
+   * 早先缺失经 num() 变成 0，而 dual_low 策略的动量理想值正是 0 →
+   * **取不到涨跌幅反而拿满分动量**。必须能表达「没这个数」。
+   */
+  pct: number | null;
+  /** 成交额（亿元；缺失为 null，不是 0——0 会被读成「一手没成交」） */
+  amount: number | null;
   /** 换手率 %（缺失为 null） */
   turnoverRate: number | null;
   /** 量比（缺失为 null） */
@@ -63,8 +68,11 @@ function mapRow(r: Record<string, unknown>): SnapshotRow | null {
     code,
     name: String(r.f14 ?? ''),
     price,
-    pct: num(r.f3),
-    amount: num(r.f6) / 1e8,
+    pct: numOrNull(r.f3),
+    amount: (() => {
+      const v = numOrNull(r.f6);
+      return v != null ? v / 1e8 : null;
+    })(),
     turnoverRate: numOrNull(r.f8),
     volumeRatio: numOrNull(r.f10),
     pe: numOrNull(r.f9),

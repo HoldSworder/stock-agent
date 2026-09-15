@@ -6416,10 +6416,15 @@ export interface ScreenStrategy {
 /** 单只候选的某因子得分（0-100，便于前端迷你条/雷达展示） */
 export interface ScreenFactorScore {
   key: ScreenFactorKey;
-  /** 归一后的因子分 0-100 */
-  score: number;
-  /** 该因子在加权总分中的贡献（score * 权重，已归一） */
-  weight: number;
+  /**
+   * 归一后的因子分 0-100。**null = 这项数据取不到**，不是 0 分也不是中性分。
+   *
+   * 早先缺失一律记 50（中性），后果是取数不全的标的被抬到「中等偏上」，
+   * 排在真实弱势但数据齐全的标的之前——榜单前列可能是数据缺口而非强势。
+   */
+  score: number | null;
+  /** 该因子在加权总分中的贡献（score * 权重，已归一）。score 为 null 时也是 null */
+  weight: number | null;
 }
 
 /** 一只选股候选（确定性打分 + 可选 LLM 横向排序产出） */
@@ -6430,7 +6435,13 @@ export interface ScreenPick {
   name: string;
   /** 选股快照价（T+N 复盘基准） */
   price: number;
-  /** 选股时涨跌幅 % */
+  /**
+   * 选股时涨跌幅 %。
+   *
+   * 这里是非空的，靠的是「涨跌幅取不到的标的不参与排名」这条前置规则
+   * （见 scorer.ts 的 rankable），而不是把缺失填成 0——
+   * 填 0 会被读成「今天平盘」，与「没取到数」是两个相反的结论。
+   */
   pct: number;
   /** 所属行业（东财 f100，缺失为空串） */
   industry: string;

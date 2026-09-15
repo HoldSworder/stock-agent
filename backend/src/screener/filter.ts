@@ -49,11 +49,13 @@ function passHardFilter(row: SnapshotRow, f: HardFilter, mode: HardFilterMode): 
   // 量价阈值（当日盘中口径，盘前退化时跳过）
   if (mode === 'full') {
     if (!inRange(row.turnoverRate, f.turnoverMin, f.turnoverMax)) return false;
-    // 成交额下限
-    if (f.amountMinYi != null && row.amount < f.amountMinYi) return false;
-    // 涨跌幅区间
-    if (f.pctMin != null && row.pct < f.pctMin) return false;
-    if (f.pctMax != null && row.pct > f.pctMax) return false;
+    // 成交额与涨跌幅：**取不到就不放行**。
+    // 策略写了「成交额至少 5 亿」，而这只的成交额取不到，我们无从知道它够不够——
+    // 早先缺失被当成 0 会误杀，当成通过会放进一只根本没验证过流动性的票。
+    // 两者之中「不放行」是对的：硬筛的意思就是「没满足就别进来」。
+    if (f.amountMinYi != null && (row.amount == null || row.amount < f.amountMinYi)) return false;
+    if (f.pctMin != null && (row.pct == null || row.pct < f.pctMin)) return false;
+    if (f.pctMax != null && (row.pct == null || row.pct > f.pctMax)) return false;
   }
   return true;
 }

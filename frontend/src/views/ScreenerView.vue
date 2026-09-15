@@ -112,8 +112,10 @@ const fmtTime = (iso: string) => dayjs(iso).format('MM-DD HH:mm');
 const confTag = (c: number | null): 'success' | 'warning' | 'info' =>
   c == null ? 'info' : c >= 70 ? 'success' : c >= 40 ? 'warning' : 'info';
 
-function factorBar(p: ScreenPick, key: ScreenFactorKey): number {
-  return p.factors.find((f) => f.key === key)?.score ?? 0;
+// 取不到数的因子返回 null，交给模板画成空条而不是 0 分条——
+// 画成 0 分条会被读成「这项很差」，而事实是「这项没数据」
+function factorBar(p: ScreenPick, key: ScreenFactorKey): number | null {
+  return p.factors.find((f) => f.key === key)?.score ?? null;
 }
 function pickFactorKeys(p: ScreenPick): ScreenFactorKey[] {
   return p.factors.map((f) => f.key);
@@ -121,8 +123,13 @@ function pickFactorKeys(p: ScreenPick): ScreenFactorKey[] {
 // 综合分构成：各因子对加权总分的贡献（weight = score × 归一权重），按贡献降序
 function factorParts(p: ScreenPick): ScorePart[] {
   return p.factors
+    .filter((f): f is typeof f & { weight: number } => f.weight != null)
     .map((f) => ({ label: SCREEN_FACTOR_LABELS[f.key], value: f.weight }))
     .sort((a, b) => b.value - a.value);
+}
+/** 取不到数的因子名单。构成条里不画它们，但要单独说出来，否则「少了一项」无声无息 */
+function missingFactorLabels(p: ScreenPick): string[] {
+  return p.factors.filter((f) => f.score == null).map((f) => SCREEN_FACTOR_LABELS[f.key]);
 }
 // 当前结果所用策略（取其 criteria 口径展示）
 const detailStrategy = computed(() =>
@@ -479,13 +486,21 @@ onMounted(loadStatus);
                   >
                     <template #content>
                       <div class="factor-tip">
-                        <b>{{ SCREEN_FACTOR_LABELS[k] }} · {{ factorBar(row, k) }} 分</b>
+                        <b v-if="factorBar(row, k) != null">
+                          {{ SCREEN_FACTOR_LABELS[k] }} · {{ factorBar(row, k) }} 分
+                        </b>
+                        <b v-else>{{ SCREEN_FACTOR_LABELS[k] }} · 这项取不到数</b>
                         <p>{{ SCREEN_FACTOR_DESC[k] }}</p>
                       </div>
                     </template>
                     <div class="factor">
                       <span class="fk">{{ SCREEN_FACTOR_LABELS[k] }}</span>
-                      <span class="fbar"><i :style="{ width: factorBar(row, k) + '%' }" /></span>
+                      <!--
+                        取不到数画空条并标斜杠，不画 0 分条：
+                        0 分条会被读成「这项很差」，而事实是「这项没数据」，两者结论相反
+                      -->
+                      <span v-if="factorBar(row, k) == null" class="fbar fbar-na">/</span>
+                      <span v-else class="fbar"><i :style="{ width: factorBar(row, k) + '%' }" /></span>
                     </div>
                   </el-tooltip>
                 </div>
@@ -946,6 +961,23 @@ onMounted(loadStatus);
   display: block;
   height: 100%;
   background: var(--el-color-primary);
+}
+/* 取不到数：斜纹底 + 居中斜杠，一眼区别于「0 分」的空条 */
+.factor .fbar-na {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 6px;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--el-text-color-placeholder);
+  background: repeating-linear-gradient(
+    45deg,
+    var(--el-fill-color),
+    var(--el-fill-color) 2px,
+    transparent 2px,
+    transparent 4px
+  );
 }
 .factor-tip b {
   display: block;

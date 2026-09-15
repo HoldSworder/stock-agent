@@ -99,7 +99,27 @@ export interface ScoredRow {
   row: SnapshotRow;
   screenScore: number;
   factors: ScreenFactorScore[];
+  /** 取不到数的因子。空数组 = 数据齐全 */
+  missingFactors: ScreenFactorKey[];
+  /** 缺失因子占策略总权重的比例（0-1）。用于判断这个分还能不能比 */
+  missingWeight: number;
+  /**
+   * 这只能不能参与排名。缺失权重超过 MAX_MISSING_WEIGHT 就是 false。
+   *
+   * 分数照算照展示（使用者要能看到它为什么被排除），但不进 TopN——
+   * 拿半份数据算出来的分和拿全份算出来的分不是同一把尺，混在一张榜上比就是错的。
+   */
+  rankable: boolean;
 }
+
+/**
+ * 缺失权重上限：超过这个比例就不参与排名。
+ *
+ * 取 1/3 的理由：多数策略的主导因子权重在 0.4 左右（如中线龙头的 midTrend），
+ * 容忍到 1/3 意味着「丢掉一个次要因子还能比，丢掉主导因子就不能比」。
+ * 这是个判断值而非推导值——真要调，先看被剔掉的都是些什么标的。
+ */
+const MAX_MISSING_WEIGHT = 1 / 3;
 
 /**
  * 对候选池打分（横截面），按策略权重加权出 screenScore（0-100）。
@@ -133,24 +153,34 @@ export function scoreCandidates(
   const turnoverLiqRanker = percentileRanker(base.map((r) => r.turnoverRate), 'high');
   const sizeRanker = percentileRanker(base.map((r) => r.marketCap), 'low'); // 偏好中小盘
 
-  const factorScore = (key: ScreenFactorKey, r: SnapshotRow): number => {
+  // 返回 null = 这项数据取不到。**不许返回 50 冒充中性**：
+  // 那会把取数不全的标的抬到「中等偏上」，排在真实弱势但数据齐全的标的之前。
+  const factorScore = (key: ScreenFactorKey, r: SnapshotRow): number | null => {
     switch (key) {
       case 'value':
         return valueScore(r);
       case 'liquidity':
-        return (amountRanker(r.amount) + turnoverLiqRanker(r.turnoverRate)) / 2;
+        return r.amount == null && r.turnoverRate == null
+          ? null
+          : (amountRanker(r.amount) + turnoverLiqRanker(r.turnoverRate)) / 2;
       case 'size':
-        return sizeRanker(r.marketCap);
+        return r.marketCap == null ? null : sizeRanker(r.marketCap);
       case 'momentum':
-        return idealScore(r.pct, def.momentumIdeal);
+        // 涨跌幅缺失时尤其危险：snapshot 的 num() 会把它变成 0%，
+        // 而 dual_low 策略的动量理想值正是 0 → 缺失反而拿满分动量。
+        return r.pct == null ? null : idealScore(r.pct, def.momentumIdeal);
       case 'activity': {
-        const turn = r.turnoverRate != null ? idealScore(r.turnoverRate, def.activityIdeal) : 50;
+        if (r.turnoverRate == null && r.volumeRatio == null) return null;
+        const turn = r.turnoverRate != null ? idealScore(r.turnoverRate, def.activityIdeal) : null;
         const vr =
           r.volumeRatio != null ? idealScore(r.volumeRatio, { ideal: 1.6, tolerance: 1.5 }) : null;
-        return vr != null ? turn * 0.6 + vr * 0.4 : turn;
+        if (turn != null && vr != null) return turn * 0.6 + vr * 0.4;
+        return turn ?? vr;
       }
       case 'themeHeat': {
-        let base = r.industry ? theme.industryHeat.get(r.industry) ?? 50 : 50;
+        // 没有所属行业就无从谈题材热度，这是真的缺数而不是「热度中等」
+        if (!r.industry) return null;
+        let base = theme.industryHeat.get(r.industry) ?? 50;
         if (theme.keywords.length) {
           const hit = theme.keywords.some(
             (k) => r.industry.includes(k) || r.name.includes(k),
@@ -163,22 +193,50 @@ export function scoreCandidates(
       case 'fundFlow':
       case 'midTrend':
       case 'dragonRank': {
-        // 趋势/资金流/中线趋势/龙头分为逐只历史/涨停池因子，由外部 extraScores 注入；缺失记中性 50
+        // 趋势/资金流/中线趋势/龙头分为逐只历史/涨停池因子，由外部 extraScores 注入。
+        // 注入失败（取数超时、接口挂了）返回 null——这些往往是策略的主导因子，
+        // 记中性会让「趋势因子权重 0.4 的中线策略」在完全没有趋势数据时照样出榜。
         const v = extraScores?.get(r.code)?.[key];
-        return typeof v === 'number' ? v : 50;
+        return typeof v === 'number' ? v : null;
       }
       default:
-        return 50;
+        return null;
     }
   };
 
   return rows.map((r) => {
-    const factors: ScreenFactorScore[] = keys.map((k) => {
-      const score = Math.round(factorScore(k, r) * 10) / 10;
-      const normW = (def.factorWeights[k] ?? 0) / totalW;
-      return { key: k, score, weight: Math.round(score * normW * 10) / 10 };
+    const raw = keys.map((k) => ({
+      key: k,
+      score: factorScore(k, r),
+      w: (def.factorWeights[k] ?? 0) / totalW,
+    }));
+
+    // 权重只在取到数的因子之间归一。缺失的不按中性摊进去，也不白占权重：
+    // 前者抬高数据不全的标的，后者等于按 0 分惩罚一次取数故障。
+    const availW = raw.reduce((s, f) => s + (f.score != null ? f.w : 0), 0);
+    const missing = raw.filter((f) => f.score == null);
+    const missingWeight = Math.round((1 - availW) * 1000) / 1000;
+
+    const factors: ScreenFactorScore[] = raw.map((f) => {
+      if (f.score == null) return { key: f.key, score: null, weight: null };
+      const score = Math.round(f.score * 10) / 10;
+      const w = availW > 0 ? f.w / availW : 0;
+      return { key: f.key, score, weight: Math.round(score * w * 10) / 10 };
     });
-    const screenScore = Math.round(factors.reduce((s, f) => s + f.weight, 0) * 10) / 10;
-    return { row: r, screenScore, factors };
+    const screenScore =
+      Math.round(factors.reduce((s, f) => s + (f.weight ?? 0), 0) * 10) / 10;
+
+    return {
+      row: r,
+      screenScore,
+      factors,
+      missingFactors: missing.map((f) => f.key),
+      missingWeight,
+      // 涨跌幅单独一票否决，与权重无关：它出现在榜单每一行、参与风险标签，
+      // 且落库那一列不允许空值。取不到就不该进榜，而不是填个 0 冒充平盘。
+      rankable: r.pct != null && missingWeight <= MAX_MISSING_WEIGHT,
+    };
   });
 }
+
+export { MAX_MISSING_WEIGHT as __test__MAX_MISSING_WEIGHT };

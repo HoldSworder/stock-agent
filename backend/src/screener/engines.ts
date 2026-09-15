@@ -171,8 +171,17 @@ const multifactor: ScreenEngine = {
       (a, b) => b.screenScore - a.screenScore,
     );
 
-    let pool = scored.slice(0, LLM_POOL_MAX);
-    emit({ stage: 'score', label: '多因子打分', status: 'done', poolCount: pool.length });
+    // 数据缺太多的不进榜：拿半份数据算出来的分和拿全份算出来的分不是同一把尺，
+    // 混在一张榜上比就是错的。剔掉多少条要说出来，否则「今天榜变短了」查不到原因。
+    const dropped = scored.filter((c) => !c.rankable);
+    let pool = scored.filter((c) => c.rankable).slice(0, LLM_POOL_MAX);
+    emit({
+      stage: 'score',
+      label: '多因子打分',
+      status: 'done',
+      poolCount: pool.length,
+      note: dropped.length > 0 ? `${dropped.length} 只因取数不全未参与排名` : undefined,
+    });
 
     // 二段增强：策略若启用 trend / fundFlow（逐只历史因子）或 dragonRank（涨停池因子），
     // 仅对收窄后的候选池限量取 K 线/资金流/涨停池补分并重打分（避免对全市场逐只取数）。
@@ -240,6 +249,11 @@ const multifactor: ScreenEngine = {
     const picks: ScreenPick[] = finalRows.map((c, i) => {
       const llm = rank?.byCode.get(c.row.code);
       const riskTags = Array.from(new Set([...(llm?.riskTags ?? []), ...ruleRiskTags(c.row)]));
+      // 能走到这里的一定有涨跌幅：scorer 把 pct 缺失的标成不可排名，上面已滤掉。
+      // 这个断言是为了让规则被破坏时当场报错，而不是静默写一个 0 进库冒充平盘。
+      if (c.row.pct == null) {
+        throw new Error(`${c.row.code} 涨跌幅取不到却进了榜单，排名前置过滤漏了`);
+      }
       return {
         rank: i + 1,
         code: c.row.code,
