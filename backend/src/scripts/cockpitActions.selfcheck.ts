@@ -10,9 +10,10 @@
 //
 // 运行：cd backend && pnpm exec tsx src/scripts/cockpitActions.selfcheck.ts
 import assert from 'node:assert/strict';
-import type { ActionDataSource, CockpitAction, SourceFreshness } from '@stock-agent/shared';
+import type { ActionDataSource, CockpitAction, CockpitActionKind, SourceFreshness } from '@stock-agent/shared';
 import {
   COCKPIT_ACTION_EMPTY_TEXT,
+  COCKPIT_ACTION_KIND_LABELS,
   PLAN_TRIGGER_UNKNOWN_TEXT,
   ACTION_DATA_SOURCE_LABELS,
   FRESHNESS_OUTAGE_DAYS,
@@ -28,6 +29,8 @@ import {
   __test__stampStale,
   __test__KIND_SOURCE,
   __test__PREDICTIVE_KINDS,
+  __test__TODAY_ACTION_KINDS,
+  __test__todayActionList,
 } from '../cockpit/actions';
 import { judgeFreshness, summarizeFreshness, RISK_SOURCES } from '../cockpit/freshness';
 import { applyLiveOverlay, distanceText } from '../cockpit/liveOverlay';
@@ -487,6 +490,61 @@ function mk(p: Partial<CockpitAction> & Pick<CockpitAction, 'priority' | 'kind'>
     stale('plan', 'missing'),
   ]);
   assert.equal(cand.staleNote, null, '选股候选没有股数，不该印「股数可能不准」');
+}
+
+// ===== 今日动作不得出现买入类 / 板块方向 =====
+{
+  const mixed = [
+    mk({ priority: 'P0', kind: 'stop_loss', code: '159516' }),
+    mk({ priority: 'P2', kind: 'candidate', code: '300398' }),
+    mk({ priority: 'P2', kind: 'buy_triggered', code: '159841' }),
+    mk({ priority: 'P1', kind: 'overweight', code: '159841' }),
+    mk({ priority: 'P2', kind: 'rotate', code: '588200' }),
+    mk({ priority: 'P2', kind: 'board_leading', code: '159915' }),
+    mk({ priority: 'P2', kind: 'board_brewing', code: '512480' }),
+    mk({ priority: 'P1', kind: 'board_fading', code: '510300' }),
+    mk({ priority: 'P3', kind: 'observe', code: '600519' }),
+    mk({ priority: 'P1', kind: 'near_stop', code: '159841' }),
+  ];
+  const today = __test__todayActionList(mixed);
+  assert.deepEqual(
+    today.map((a) => a.kind).sort(),
+    ['near_stop', 'overweight', 'stop_loss'],
+    '只留止损、临近止损、超配；买入/换仓/板块/观察必须拿掉',
+  );
+
+  const allKinds = Object.keys(COCKPIT_ACTION_KIND_LABELS) as CockpitActionKind[];
+  for (const kind of allKinds) {
+    const kept = __test__todayActionList([mk({ priority: 'P2', kind, code: '000001' })]);
+    if (__test__TODAY_ACTION_KINDS.has(kind)) {
+      assert.equal(kept.length, 1, `${kind} 是风险项，必须留在今日动作`);
+    } else {
+      assert.equal(kept.length, 0, `${kind} 会改操作或靠预测，不得进今日动作`);
+    }
+  }
+
+  // 同标的先过滤再合并：买入不得把理由写进止损卡
+  const same = [
+    mk({
+      priority: 'P2',
+      kind: 'buy_triggered',
+      code: '600519',
+      what: '买入 1000 股',
+      why: '买点到了',
+    }),
+    mk({
+      priority: 'P0',
+      kind: 'stop_loss',
+      code: '600519',
+      what: '减 1200 股（留到 3000 股以内）',
+      why: '已跌破止损线',
+    }),
+  ];
+  const afterFilter = __test__mergeByCode(__test__todayActionList(same));
+  assert.equal(afterFilter.length, 1);
+  assert.equal(afterFilter[0].kind, 'stop_loss');
+  assert.ok(!afterFilter[0].what.includes('买入'), '过滤后再合并，止损卡不得出现买入动作');
+  assert.ok(!afterFilter[0].why.includes('买点到了'), '被拿掉的买入理由不得并进止损卡');
 }
 
 console.log('cockpitActions.selfcheck 全部通过');

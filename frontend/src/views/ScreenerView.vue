@@ -135,6 +135,11 @@ function missingFactorLabels(p: ScreenPick): string[] {
 const detailStrategy = computed(() =>
   detail.value ? strategies.value.find((s) => s.id === detail.value!.strategyId) ?? null : null,
 );
+/**
+ * 中线龙头只攒样本、不给可照着买的名单。
+ * 具体代码会让人在选股页完成「今日动作」里已经拿掉的那一步。
+ */
+const hidePickIdentity = computed(() => detail.value?.strategyId === 'mid_leader');
 
 async function loadStatus() {
   try {
@@ -431,18 +436,27 @@ onMounted(loadStatus);
                 <span v-if="detail.context"> · 题材：{{ detail.context }}</span>
               </p>
             </div>
-            <el-button :icon="TrendCharts" :loading="evaluating" @click="evalCurrent">
+            <el-button
+              v-if="!hidePickIdentity"
+              :icon="TrendCharts"
+              :loading="evaluating"
+              @click="evalCurrent"
+            >
               T+N 复盘
             </el-button>
           </div>
 
-          <div v-if="detail.marketView || detail.selectionLogic || detail.portfolioRisk" class="llm-notes">
+          <div v-if="!hidePickIdentity && (detail.marketView || detail.selectionLogic || detail.portfolioRisk)" class="llm-notes">
             <p v-if="detail.marketView"><b>大盘</b>{{ detail.marketView }}</p>
             <p v-if="detail.selectionLogic"><b>选股逻辑</b>{{ detail.selectionLogic }}</p>
             <p v-if="detail.portfolioRisk" class="risk"><b>组合风险</b>{{ detail.portfolioRisk }}</p>
           </div>
 
-          <el-table :data="detail.picks" size="small" stripe>
+          <div v-if="hidePickIdentity" class="mid-hide">
+            这套是中线研究用的，只记成绩、不列代码和名称——避免看着名单下单。
+            本次算出 {{ detail.picks.length }} 只，成绩去「说准率」页看它比随机好不好。
+          </div>
+          <el-table v-else :data="detail.picks" size="small" stripe>
             <el-table-column label="#" width="44">
               <template #default="{ row }">{{ row.rank }}</template>
             </el-table-column>
@@ -617,25 +631,31 @@ onMounted(loadStatus);
         </el-table>
 
         <h4>差一点入选（只被一条门槛拦住，按差距升序）</h4>
-        <el-table :data="detail.diagnostics.nearMisses" size="small" stripe>
-          <el-table-column label="标的" min-width="130">
-            <template #default="{ row }"><StockLink :code="row.code" :name="row.name" /></template>
-          </el-table-column>
-          <el-table-column prop="failedLabel" label="卡在" min-width="100" />
-          <el-table-column label="实际 / 门槛" min-width="120" align="right">
-            <template #default="{ row }">
-              <span class="num">{{ row.actual }} / {{ row.threshold }}</span>
-            </template>
-          </el-table-column>
-          <el-table-column label="差距" width="80" align="right">
-            <template #default="{ row }"><span class="num">{{ row.gapPct }}%</span></template>
-          </el-table-column>
-        </el-table>
-        <el-empty
-          v-if="!detail.diagnostics.nearMisses.length"
-          description="没有「只差一条」的标的"
-          :image-size="60"
-        />
+        <p v-if="hidePickIdentity" class="funnel-hint">
+          中线研究不展示差一点入选的代码和名称。这类有
+          {{ detail.diagnostics.nearMisses.length }} 只，只记数量。
+        </p>
+        <template v-else>
+          <el-table :data="detail.diagnostics.nearMisses" size="small" stripe>
+            <el-table-column label="标的" min-width="130">
+              <template #default="{ row }"><StockLink :code="row.code" :name="row.name" /></template>
+            </el-table-column>
+            <el-table-column prop="failedLabel" label="卡在" min-width="100" />
+            <el-table-column label="实际 / 门槛" min-width="120" align="right">
+              <template #default="{ row }">
+                <span class="num">{{ row.actual }} / {{ row.threshold }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="差距" width="80" align="right">
+              <template #default="{ row }"><span class="num">{{ row.gapPct }}%</span></template>
+            </el-table-column>
+          </el-table>
+          <el-empty
+            v-if="!detail.diagnostics.nearMisses.length"
+            description="没有「只差一条」的标的"
+            :image-size="60"
+          />
+        </template>
       </div>
     </el-drawer>
   </div>
@@ -916,6 +936,14 @@ onMounted(loadStatus);
 }
 .llm-notes p {
   margin: 4px 0;
+}
+.mid-hide {
+  padding: 12px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--el-text-color-regular);
+  background: var(--el-fill-color-light);
+  border-radius: 8px;
 }
 .llm-notes b {
   margin-right: 6px;

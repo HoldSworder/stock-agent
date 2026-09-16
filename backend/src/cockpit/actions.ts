@@ -706,6 +706,9 @@ export async function buildActionPlan(): Promise<CockpitActionPlan> {
   }
 
   const completeness = summarizeFreshness(fresh);
+  // 先拿掉未过关方向，再按标的合并。反过来会把买入理由并进止损卡。
+  const hiddenPredictive = actions.filter((a) => !TODAY_ACTION_KINDS.has(a.kind)).length;
+  actions = todayActionList(actions);
   actions = gateOpportunities(mergeByCode(actions), completeness.riskReady);
   let { kept, omitted } = capTiers(sortActions(actions));
 
@@ -730,6 +733,10 @@ export async function buildActionPlan(): Promise<CockpitActionPlan> {
           ),
     completeness,
     omitted,
+    researchHint:
+      hiddenPredictive > 0
+        ? `另外算出过 ${hiddenPredictive} 条尚未通过考试的方向，不列在上面。要看成绩去「说准率」；个股中线名单不展示代码，避免照着下单。`
+        : '买入和板块方向还没有通过考试，所以不出现在上面。要看已有成绩去「说准率」。',
   };
 }
 
@@ -748,6 +755,16 @@ const PREDICTIVE_KINDS: ReadonlySet<CockpitActionKind> = new Set<CockpitActionKi
   'buy_triggered',
   'near_buy',
   'rotate',
+]);
+
+/**
+ * 今日动作白名单：只有报事实的风险项。
+ * 板块主升/酝酿/退潮会改标的或仓位，观察与买入同类，一律不进这一列。
+ */
+const TODAY_ACTION_KINDS: ReadonlySet<CockpitActionKind> = new Set<CockpitActionKind>([
+  'stop_loss',
+  'near_stop',
+  'overweight',
 ]);
 
 /**
@@ -835,5 +852,13 @@ export {
   stampProven as __test__stampProven,
   stampStale as __test__stampStale,
   PREDICTIVE_KINDS as __test__PREDICTIVE_KINDS,
+  TODAY_ACTION_KINDS as __test__TODAY_ACTION_KINDS,
   KIND_SOURCE as __test__KIND_SOURCE,
 };
+
+/** 今日动作只保留止损、临近止损、仓位超限。自检钉住其余类型不得混进。 */
+export function todayActionList(actions: readonly CockpitAction[]): CockpitAction[] {
+  return actions.filter((a) => TODAY_ACTION_KINDS.has(a.kind));
+}
+
+export { todayActionList as __test__todayActionList };

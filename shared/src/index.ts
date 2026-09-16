@@ -5647,6 +5647,11 @@ export interface CockpitActionPlan {
   completeness: DataCompleteness;
   /** P0 永不截断；其余层级被折叠掉的条数 */
   omitted: number;
+  /**
+   * 研究入口说明。未经验证的买入不进 actions，但必须告诉人去哪看成绩。
+   * 没有可看的研究时为 null。
+   */
+  researchHint: string | null;
 }
 
 // ===== 驾驶舱「今日全景」统一读模型 =====

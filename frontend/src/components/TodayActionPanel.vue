@@ -244,15 +244,19 @@ function goSchedules(source: ActionDataSource): void {
       生成要调模型、花钱，所以只给入口不自动跑。
     -->
     <div v-if="planMissing" class="ta-noplan">
-      今日计划还没生成，所以下面没有买点、卖点这类计划动作。
-      <RouterLink to="/plan">去计划页手动生成 →</RouterLink>
-      <a class="ta-outage-go" @click="goSchedules('plan')">或看看盘前定时开没开 →</a>
+      今日计划还没生成。买入类本来也不会出现在这里；若少了某条止损提示，去看持仓纪律检查开没开。
+      <a class="ta-outage-go" @click="goSchedules('discipline')">查看持仓纪律定时 →</a>
     </div>
 
     <div v-if="error" class="ta-error">⚠ 动作清单取数失败：{{ error }}（数据未到，不是功能下线）</div>
 
+    <div v-if="plan?.researchHint" class="ta-research">
+      {{ plan.researchHint }}
+      <RouterLink to="/accuracy">说准率 →</RouterLink>
+    </div>
+
     <!-- 空清单：四种原因说法各不相同，绝不含糊成一句「暂无」 -->
-    <div v-else-if="plan && actions.length === 0" class="ta-empty">
+    <div v-if="plan && actions.length === 0" class="ta-empty">
       {{ plan.emptyReason ? COCKPIT_ACTION_EMPTY_TEXT[plan.emptyReason] : '暂无动作' }}
     </div>
 
@@ -334,7 +338,7 @@ function goSchedules(source: ActionDataSource): void {
     </div>
 
     <div v-if="plan && plan.omitted > 0" class="ta-omitted">
-      另有 {{ plan.omitted }} 项机会类未展开（风险项从不折叠）
+      另有 {{ plan.omitted }} 项较低优先级未展开（止损与超配从不折叠）
     </div>
   </section>
 </template>
@@ -431,6 +435,15 @@ function goSchedules(source: ActionDataSource): void {
   padding: 8px;
   font-size: 13px;
   color: var(--el-color-danger);
+}
+.ta-research {
+  margin: 8px 0;
+  padding: 8px 10px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--el-text-color-regular);
+  background: var(--el-fill-color-light);
+  border-radius: 6px;
 }
 .ta-empty {
   padding: 16px 8px;
