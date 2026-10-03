@@ -2,7 +2,7 @@ import type { StockQuote } from '@stock-agent/shared';
 import { requestText } from '../datasource/httpClient';
 import { num, toNetease } from '../datasource/codes';
 
-// 网易财经实时行情（api.money.126.net feed）薄封装，作为东财之外的报价兜底源。
+// 网易财经实时行情（api.money.126.net feed）薄封装。域名已不存在，已退出报价调度，默认关闭；文件保留。
 // 返回 JSONP：_ntes_quote_callback({"0600000":{...}})，UTF-8，名称不乱码（不同于腾讯/新浪 GBK 接口）。
 
 const NETEASE_FEED = 'https://api.money.126.net/data/feed';

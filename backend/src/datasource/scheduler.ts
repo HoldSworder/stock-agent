@@ -69,7 +69,7 @@ async function backfillNames(quotes: StockQuote[], servedBy: string): Promise<St
   return applyCache();
 }
 
-/** 批量实时报价（mootdx → 东财 → 网易 自动兜底；首选源缺名称时自动回填） */
+/** 批量实时报价（a-stock-data → 东财自动兜底；首选源缺名称时自动回填） */
 export async function getQuotes(codes: string[]): Promise<StockQuote[]> {
   const errors: string[] = [];
   for (const p of QUOTE_PROVIDERS) {

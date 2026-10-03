@@ -14,11 +14,12 @@ const DEFAULTS: Partial<Record<SettingKey, string>> = {
   researchBaseUrl: 'https://reportapi.eastmoney.com',
   researchEnabled: 'true',
   etfEnabled: 'true',
-  // 行情数据源启停（参与 datasource 调度，默认全开）；集思录默认开启用于补 ETF 折溢价（公开端点被限流时可在数据源页补 cookie）
+  // 行情数据源启停（参与 datasource 调度，除网易外默认全开）；集思录默认开启用于补 ETF 折溢价（公开端点被限流时可在数据源页补 cookie）
   eastmoneyEnabled: 'true',
   tencentEnabled: 'true',
   sinaEnabled: 'true',
-  neteaseEnabled: 'true',
+  // 网易域名已不存在，已退出报价调度。只改默认值盖不住库里已写成 true 的记录，见 migrateLegacySettings。
+  neteaseEnabled: 'false',
   jisiluEnabled: 'true',
   akshareEnabled: 'true',
   // 中金所股指期货持仓榜（直连 CFFEX CSV，无鉴权），默认开启
@@ -187,7 +188,11 @@ export function setMeta(name: string, value: string): void {
     .run();
 }
 
-/** 把早期 deepseek_* 设置迁移到通用 llm_* 键，避免已配置值丢失 */
+/**
+ * 启动时迁移旧设置。
+ * deepseek_* 迁到通用 llm_*，避免已配置值丢失。
+ * 库里 netease_enabled 的原始值若为 true，改写成 false：只改默认值盖不住已经落库的 true。
+ */
 export function migrateLegacySettings(): void {
   const map: Array<[string, SettingKey]> = [
     ['deepseek_base_url', 'llmBaseUrl'],
@@ -200,6 +205,9 @@ export function migrateLegacySettings(): void {
     if (oldVal && !(newVal && newVal.length > 0)) {
       setValue(newKey, oldVal);
     }
+  }
+  if (readRaw('neteaseEnabled') === 'true') {
+    setValue('neteaseEnabled', 'false');
   }
 }
 

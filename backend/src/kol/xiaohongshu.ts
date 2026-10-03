@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { requestJson, requestText, requestTextDetail } from '../datasource/httpClient';
+import { requestText, requestTextDetail } from '../datasource/httpClient';
 import { getValue } from '../settings';
 
 // 小红书博主笔记取数客户端（服务端渲染页直连 www.xiaohongshu.com）。
@@ -386,36 +386,18 @@ export async function parseUserId(input: string, signal?: AbortSignal): Promise<
 }
 
 /**
- * 健康探测。
- * 配了 Cookie 就校验 Cookie 是否仍然有效（失效时页面还能打开，但拿不到 noteId，
- * 只探主页会误判为健康）；没配就退化成「主页 SSR 能否解析出笔记」。
+ * 健康探测。走博主主页 SSR，不请求 edith.xiaohongshu.com 的 user/me。
+ * 有 Cookie 时：至少一条笔记的 noteId 非空才算健康；列表为空按空笔记列表报错，不当作 Cookie 失效；
+ * 列表非空但 noteId 都是空串视为 Cookie 失效。
+ * 无 Cookie 时只要求主页笔记列表非空，不要求 noteId。
  */
 export async function ping(signal?: AbortSignal): Promise<void> {
-  const cookie = getCookie();
-  if (cookie) {
-    const json = await requestJson({
-      sourceId: SOURCE_ID,
-      url: 'https://edith.xiaohongshu.com/api/sns/web/v2/user/me',
-      headers: {
-        'User-Agent': UA,
-        Cookie: cookie,
-        Referer: `${ORIGIN}/`,
-        Accept: 'application/json, text/plain, */*',
-      },
-      timeoutMs: 15_000,
-      maxAttempts: 2,
-      retryBaseMs: 800,
-      errorLabel: '小红书登录态校验',
-      makeError: (m) => new XhsError(m),
-      signal,
-    });
-    const data = json.data as { user_id?: string } | undefined;
-    if (json.code !== 0 || !data?.user_id) {
-      throw authError('小红书 Cookie 已失效，请到设置页重新粘贴（有效期约 7-30 天）');
-    }
-    return;
-  }
   // 「一洪财智说」为长期活跃的公开博主，仅用于探测 SSR 链路连通性
   const p = await fetchUserProfile('6437c1bc000000000d01b4c1', signal);
-  if (p.notes.length === 0) throw new XhsError('小红书主页返回空笔记列表（疑似风控或页面改版）');
+  if (p.notes.length === 0) {
+    throw new XhsError('小红书主页返回空笔记列表（疑似风控或页面改版）');
+  }
+  if (hasCookie() && p.notes.every((n) => n.noteId === '')) {
+    throw authError('小红书 Cookie 已失效，请到设置页重新粘贴（有效期约 7-30 天）');
+  }
 }

@@ -2,7 +2,6 @@ import type { KlineBar, KlinePeriod, StockQuote } from '@stock-agent/shared';
 import { getQuotesEastmoney, getKlineEastmoney } from '../market/eastmoney';
 import { getKlineTencent } from '../market/tencent';
 import { getKlineSina } from '../market/sina';
-import { getQuotesNetease } from '../market/netease';
 import { getKlineAstock, getQuotesAstock } from '../astock/market';
 
 // 能力 → 有序 provider 适配器。scheduler 据此按 启用+优先级 选源与故障转移。
@@ -20,6 +19,7 @@ import { getKlineAstock, getQuotesAstock } from '../astock/market';
 // K 线顺序不变：分钟线 mootdx 首选（同样因不封 IP），日线经 fetchDailyAdjusted 统一复权修正后按数据完整度排。
 // 注：腾讯/新浪实时报价为 GBK 接口（名称需 iconv 解码），故不纳入报价 provider，仅做 K 线兜底。
 // a-stock-data 未配置 Base URL / sidecar 不可用时，对应 provider 会快速失败并转下一源，不影响调度。
+// 当前报价链只剩 a-stock-data → 东财。网易已退出（api.money.126.net 域名不存在），不进 QUOTE_PROVIDERS。
 
 export interface QuoteProvider {
   sourceId: string;
@@ -34,7 +34,6 @@ export interface KlineProvider {
 export const QUOTE_PROVIDERS: QuoteProvider[] = [
   { sourceId: 'astockdata', fn: getQuotesAstock },
   { sourceId: 'eastmoney', fn: getQuotesEastmoney },
-  { sourceId: 'netease', fn: getQuotesNetease },
 ];
 
 // K 线按周期分两条链（scheduler 据 isMinutePeriod 选择）：

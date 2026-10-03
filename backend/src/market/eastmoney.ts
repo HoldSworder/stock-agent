@@ -493,7 +493,7 @@ const KLT_MAP: Record<KlinePeriod, number> = {
 };
 
 /**
- * 批量实时报价（薄委托至 datasource 调度层：东财 → 网易 自动兜底）。
+ * 批量实时报价（薄委托至 datasource 调度层：a-stock-data → 东财自动兜底）。
  * 保留此入口与签名，消费方无需改动即经统一调度取数。
  */
 export function getQuotes(codes: string[]): Promise<StockQuote[]> {

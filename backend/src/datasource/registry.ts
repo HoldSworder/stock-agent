@@ -103,7 +103,7 @@ const SOURCES: SourceDef[] = [
     category: '行情',
     protocol: 'http-jsonp',
     baseUrl: 'api.money.126.net',
-    description: '报价调度兜底源（东财失败时接管批量实时报价），UTF-8 feed 名称不乱码，无需鉴权。',
+    description: '域名已不存在，已退出报价调度，默认关闭。',
     enabledKey: 'neteaseEnabled',
     fields: [],
     healthCheck: async () => {
@@ -343,7 +343,7 @@ const SOURCES: SourceDef[] = [
     protocol: 'http-rest',
     baseUrl: 'www.xiaohongshu.com',
     description:
-      '小红书博主笔记，供「大V观点」页时间流。走服务端渲染页解析（user/profile 拿 noteId + xsec_token，再逐篇取 explore 详情页的 __INITIAL_STATE__），不需要 x-s 签名也不需要无头浏览器。Cookie 选填但强烈建议填：不填时小红书会把 noteId 抹成空串，只能抓到标题、封面与点赞数，没有正文、发布时间和可跳转链接；填了才是完整笔记。Cookie 有效期约 7-30 天，失效后此处健康检查会直接报错。小红书按昵称搜用户的接口需要签名，因此只能粘贴博主主页链接添加。',
+      '小红书博主笔记，供「大V观点」页时间流。走服务端渲染页解析（user/profile 拿 noteId + xsec_token，再逐篇取 explore 详情页的 __INITIAL_STATE__），不需要 x-s 签名也不需要无头浏览器。Cookie 选填但强烈建议填：不填时小红书会把 noteId 抹成空串，只能抓到标题、封面与点赞数，没有正文、发布时间和可跳转链接；填了才是完整笔记。Cookie 有效期约 7-30 天，有 Cookie 时健康检查走博主主页，至少一条笔记的 noteId 非空才算健康；列表非空但 noteId 都是空串视为 Cookie 失效。不再请求 edith.xiaohongshu.com 的 user/me。无 Cookie 时只要求主页笔记列表非空。小红书按昵称搜用户的接口需要签名，因此只能粘贴博主主页链接添加。',
     enabledKey: 'xhsEnabled',
     fields: [
       {

@@ -412,7 +412,7 @@ async function computeSectorNote(code: string, signal: AbortSignal | undefined, 
 
 /**
  * 个股实时行情（本地免费源，免妙想额度）：现价/涨跌幅/昨收/成交额/振幅/换手/量比/涨跌停/当日主力净流入。
- * 取数与 stock_quotes 工具同款（东财 push2 → 网易自动兜底）；PE/PB 由 valuationNote 覆盖、
+ * 取数与 stock_quotes 工具同款（a-stock-data → 东财自动兜底）；PE/PB 由 valuationNote 覆盖、
  * 所属行业与概念板块由 sectorNote 覆盖，故不在此查，避免占用妙想日配额。
  */
 async function computeQuoteNote(code: string, signal?: AbortSignal): Promise<string> {
