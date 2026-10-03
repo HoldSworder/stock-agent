@@ -10,10 +10,12 @@ import { join } from 'node:path';
 import { cacheDir, cacheImages } from '../kol/images';
 import { fetchLongText, fetchUserTimeline, searchUsers, stripHtml } from '../kol/weibo';
 import {
+  assertXhsHealthy,
   cleanDesc,
   fetchNoteDetail,
   fetchUserProfile,
   hasCookie,
+  parseProfileState,
   parseUserId,
   syntheticNoteKey,
 } from '../kol/xiaohongshu';
@@ -47,6 +49,49 @@ assert.match(
   '话题锚点应保留原文本',
 );
 console.log('✓ HTML 清洗（含外链还原）');
+
+// 登录页 userPageData 是空对象。健康检查要落到笔记三条结果，不能报「用户不存在」。
+const loginPage = {
+  user: {
+    userPageData: {},
+    notes: [[{ noteCard: { noteId: '', displayTitle: '标题' }, id: '' }]],
+  },
+};
+assert.throws(
+  () => parseProfileState(loginPage, '', '6437c1bc000000000d01b4c1'),
+  /用户不存在或已注销/,
+  '大V取数遇到空资料仍报用户不存在',
+);
+const probed = parseProfileState(loginPage, '', '6437c1bc000000000d01b4c1', {
+  allowEmptyProfile: true,
+});
+assert.equal(probed.notes.length, 1, '健康检查应继续解析笔记');
+assert.throws(
+  () => assertXhsHealthy(probed.notes, true),
+  /Cookie 已失效/,
+  '有 Cookie 且 noteId 为空应报失效',
+);
+assert.throws(
+  () => assertXhsHealthy([], true),
+  /空笔记列表/,
+  '空列表不报 Cookie 失效',
+);
+assert.doesNotThrow(
+  () => assertXhsHealthy([{ ...probed.notes[0], noteId: 'a'.repeat(24) }], true),
+  '至少一条 noteId 非空才算健康',
+);
+assert.throws(
+  () =>
+    parseProfileState(
+      { user: { userPageData: { result: { message: '用户不存在' } } } },
+      '',
+      '6437c1bc000000000d01b4c1',
+      { allowEmptyProfile: true },
+    ),
+  /用户不存在/,
+  '有注销说明时健康检查仍抛出',
+);
+console.log('✓ 小红书健康检查：空 userPageData 落到笔记三条结果');
 
 // ===== 2. 访客握手 + 时间线（联网） =====
 // 财经网：官方蓝V，长期高频发博，适合作为探针

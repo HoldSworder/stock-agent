@@ -132,22 +132,27 @@ function collectTokensFromHtml(html: string): Map<string, string> {
   return out;
 }
 
-/** 拉取博主主页：资料 + 首屏笔记列表（约 30 条，含置顶） */
-export async function fetchUserProfile(userId: string, signal?: AbortSignal): Promise<XhsProfile> {
-  if (!ID_RE.test(userId)) throw new XhsError(`小红书用户 ID 格式非法：${userId}`);
-  const html = await requestText({
-    sourceId: SOURCE_ID,
-    url: `${ORIGIN}/user/profile/${userId}`,
-    headers: pageHeaders(),
-    timeoutMs: 20_000,
-    maxAttempts: 2,
-    retryBaseMs: 1200,
-    errorLabel: `小红书博主(${userId})主页`,
-    makeError: (m) => new XhsError(m),
-    signal,
-  });
+/**
+ * 健康检查专用：登录页的 userPageData 是空对象，没有注销说明。
+ * 此时不要报「用户不存在」，交给笔记列表走三条结果。大V取数不传。
+ */
+export interface ParseProfileOptions {
+  allowEmptyProfile?: boolean;
+}
 
-  const state = extractInitialState(html);
+/**
+ * 从已抠出的 __INITIAL_STATE__ 组装主页资料和笔记列表。
+ * @param state extractInitialState 的结果
+ * @param html 原始 HTML，用来兜底收集 xsec_token
+ * @param userId 博主 ID
+ * @param opts allowEmptyProfile 仅健康检查使用
+ */
+export function parseProfileState(
+  state: Record<string, unknown>,
+  html: string,
+  userId: string,
+  opts?: ParseProfileOptions,
+): XhsProfile {
   const user = state.user as Record<string, unknown> | undefined;
   if (!user) throw new XhsError('小红书主页未返回用户数据（疑似页面改版）');
 
@@ -155,7 +160,10 @@ export async function fetchUserProfile(userId: string, signal?: AbortSignal): Pr
   const basic = (pageData.basicInfo ?? {}) as Record<string, unknown>;
   if (!basic.nickname) {
     const reason = str((pageData.result as Record<string, unknown> | undefined)?.message);
-    throw new XhsError(`小红书未返回博主资料${reason ? `：${reason}` : '（用户不存在或已注销）'}`);
+    // 登录页没有 result.message。健康检查继续看笔记；大V取数仍报用户不存在。
+    if (!(opts?.allowEmptyProfile && !reason)) {
+      throw new XhsError(`小红书未返回博主资料${reason ? `：${reason}` : '（用户不存在或已注销）'}`);
+    }
   }
 
   const interactions = (pageData.interactions ?? []) as Array<Record<string, unknown>>;
@@ -190,6 +198,27 @@ export async function fetchUserProfile(userId: string, signal?: AbortSignal): Pr
     fansCount: str(fans?.count),
     notes,
   };
+}
+
+/** 拉取博主主页：资料 + 首屏笔记列表（约 30 条，含置顶） */
+export async function fetchUserProfile(
+  userId: string,
+  signal?: AbortSignal,
+  opts?: ParseProfileOptions,
+): Promise<XhsProfile> {
+  if (!ID_RE.test(userId)) throw new XhsError(`小红书用户 ID 格式非法：${userId}`);
+  const html = await requestText({
+    sourceId: SOURCE_ID,
+    url: `${ORIGIN}/user/profile/${userId}`,
+    headers: pageHeaders(),
+    timeoutMs: 20_000,
+    maxAttempts: 2,
+    retryBaseMs: 1200,
+    errorLabel: `小红书博主(${userId})主页`,
+    makeError: (m) => new XhsError(m),
+    signal,
+  });
+  return parseProfileState(extractInitialState(html), html, userId, opts);
 }
 
 /** 笔记里的一张图 */
@@ -386,18 +415,27 @@ export async function parseUserId(input: string, signal?: AbortSignal): Promise<
 }
 
 /**
+ * 健康检查的三条结果。cookieOn 由调用方传入，避免自检去读设置。
+ * 列表为空报空笔记列表，不当作 Cookie 失效；列表非空但 noteId 都是空串才算 Cookie 失效。
+ * @param notes 主页笔记列表
+ * @param cookieOn 是否已配置 Cookie
+ */
+export function assertXhsHealthy(notes: XhsNoteRef[], cookieOn: boolean): void {
+  if (notes.length === 0) {
+    throw new XhsError('小红书主页返回空笔记列表（疑似风控或页面改版）');
+  }
+  if (cookieOn && notes.every((n) => n.noteId === '')) {
+    throw authError('小红书 Cookie 已失效，请到设置页重新粘贴（有效期约 7-30 天）');
+  }
+}
+
+/**
  * 健康探测。走博主主页 SSR，不请求 edith.xiaohongshu.com 的 user/me。
- * 有 Cookie 时：至少一条笔记的 noteId 非空才算健康；列表为空按空笔记列表报错，不当作 Cookie 失效；
- * 列表非空但 noteId 都是空串视为 Cookie 失效。
+ * 登录页的 userPageData 是空对象，不当成「用户不存在或已注销」，继续按笔记列表判断。
  * 无 Cookie 时只要求主页笔记列表非空，不要求 noteId。
  */
 export async function ping(signal?: AbortSignal): Promise<void> {
   // 「一洪财智说」为长期活跃的公开博主，仅用于探测 SSR 链路连通性
-  const p = await fetchUserProfile('6437c1bc000000000d01b4c1', signal);
-  if (p.notes.length === 0) {
-    throw new XhsError('小红书主页返回空笔记列表（疑似风控或页面改版）');
-  }
-  if (hasCookie() && p.notes.every((n) => n.noteId === '')) {
-    throw authError('小红书 Cookie 已失效，请到设置页重新粘贴（有效期约 7-30 天）');
-  }
+  const p = await fetchUserProfile('6437c1bc000000000d01b4c1', signal, { allowEmptyProfile: true });
+  assertXhsHealthy(p.notes, hasCookie());
 }
