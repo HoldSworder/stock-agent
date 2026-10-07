@@ -101,7 +101,7 @@ assert.equal(family(shortName('证券ETF')), '金融');
 const FLAT = DATES.map(() => 100);
 const ZERO = DATES.map(() => 0);
 
-// A1 选主线主题的代表标的，且买入发生在锚点当天（idx 0 即调仓日）
+// A1 选主线主题的代表标的。收盘确认，下一交易日开盘才成交。
 {
   const strong = buildSeries(
     'AAA',
@@ -113,12 +113,12 @@ const ZERO = DATES.map(() => 0);
   const r = replay(baseSpec, [strong, weak]);
   assert.equal(r.trades.length, 1, 'A1 应只有一笔（期末持有中）');
   assert.equal(r.trades[0].code, 'AAA');
-  assert.equal(r.trades[0].entryDate, DATES[0]);
+  assert.equal(r.trades[0].entryDate, DATES[1]);
   assert.equal(r.trades[0].reason, '持有中');
-  assert.deepEqual(r.days[0].events, [{ kind: 'enter', detail: '买入 芯片(AAA)：主题 芯片宽泛' }]);
+  assert.deepEqual(r.days[1].events, [{ kind: 'enter', detail: '买入 芯片(AAA)：主题 芯片宽泛' }]);
 }
 
-// A2 最短持有拦截换手：第 4 日 BBB 已追平（打平后按家族名反超），但满 8 日才允许换
+// A2 最短持有从成交日起算。第 4 日 BBB 已追平，第 8 日仍不满 8 日；第 12 日收盘确认，次日开盘换手。
 {
   const aaScore = DATES.map(() => 0.2);
   const bbScore = DATES.map((_, i) => 0.05 * i);
@@ -128,21 +128,21 @@ const ZERO = DATES.map(() => 0);
   ]);
   assert.equal(r.trades[0].code, 'AAA');
   assert.equal(r.trades[0].reason, '主线主题替换');
-  assert.equal(r.trades[0].exitDate, DATES[8], `A2 换手应发生在第 8 日，实际 ${r.trades[0].exitDate}`);
+  assert.equal(r.trades[0].exitDate, DATES[13], `A2 换手次日开盘成交，实际 ${r.trades[0].exitDate}`);
   assert.equal(r.trades[1].code, 'BBB');
-  assert.equal(r.trades[1].entryDate, DATES[8]);
+  assert.equal(r.trades[1].entryDate, DATES[13]);
 }
 
-// A3 盈利保护：浮盈超 15% 后自峰值回撤超 6%，在最近的调仓日了结
+// A3 盈利保护：浮盈超 15% 后自峰值回撤超 6%，在最近的调仓日收盘确认，次日开盘了结
 {
-  // 第 8 日冲到 +40% 见顶，随后回落到 -10%（相对峰值），第 12 日为调仓日
+  // 第 8 日冲到 +40% 见顶，随后回落到 -10%（相对峰值），第 12 日收盘确认
   const px = DATES.map((_, i) => (i <= 8 ? 100 * (1 + 0.05 * i) : 140 * 0.9));
   const r = replay(baseSpec, [
     buildSeries('AAA', '芯片', px, DATES.map(() => 0.5)),
     buildSeries('BBB', '证券', FLAT, ZERO),
   ]);
   assert.equal(r.trades[0].reason, '盈利保护15%/6%');
-  assert.equal(r.trades[0].exitDate, DATES[12], `A3 应在第 12 日了结，实际 ${r.trades[0].exitDate}`);
+  assert.equal(r.trades[0].exitDate, DATES[13], `A3 应在确认后的下一交易日开盘了结，实际 ${r.trades[0].exitDate}`);
 }
 
 // A4 除权修正：中途 1 拆 2 的价格跳变要被前复权抹平

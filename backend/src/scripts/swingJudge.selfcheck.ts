@@ -90,7 +90,7 @@ function main(): void {
 
   // --- 3. 底部：力道衰减 + 站上确认K线高点 → 二级 ---
   const bottomConfirmed = judgeSwing(
-    makeSeries(10, [...WARMUP, [-0.22, 12], [0.1, 8], [-0.12, 14], [0.12, 8]]),
+    makeSeries(10, [...WARMUP, [-0.22, 12], [0.1, 8], [-0.12, 14], [0.25, 8]]),
     'day',
   );
   line(`     [底部走出反转] ${SWING_GRADE_LABELS[bottomConfirmed.grade]}`);
