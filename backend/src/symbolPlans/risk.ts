@@ -15,7 +15,7 @@ import { nextTradingClose } from './sessionClock';
 const REGIME_PHASES: MarketRegimePhase[] = ['主升', '退潮', '反弹', '震荡'];
 
 // 风险与执行装配（计划 9.x）。全部复用 positions/riskBudget.ts 的口径：
-// 结构止损 vs 2×ATR 取大、个股跳空 P95 缓冲、费用缓冲、按大盘阶段分层的单票上限。
+// 有效损失 = max(止损距离, 这只自己的向下跳空, 波动) + 费用。三段取更远的一段，费用另加。
 // 本文件只负责「从候选价位取结构止损」和「拼装 risk / execution」，不重算风险公式。
 
 /**
@@ -149,7 +149,7 @@ export function assembleRisk(input: RiskInput): AssembledRisk {
         )
       : null;
 
-  // 波动止损：2×ATR（与 riskBudget 的 ATR_MULT 口径一致，由 sizing 回吐）
+  // 波动：这只自己的 ATR，与止损距离、向下跳空三段取更远的一段（见 computeSizing）
   const volatilityStop =
     sizing?.atrDistancePct != null ? price * (1 - sizing.atrDistancePct / 100) : null;
 
@@ -161,10 +161,8 @@ export function assembleRisk(input: RiskInput): AssembledRisk {
 
   const gapNote =
     sizing?.gapBufferPct && sizing.gapBufferPct > 0
-      ? `已计入近 60 日向下跳空 P95 缓冲 ${sizing.gapBufferPct}%`
-      : assetType === 'etf'
-        ? 'ETF 由一篮子成分平滑，未额外计跳空缓冲'
-        : null;
+      ? `已计入这只近 60 日向下跳空 ${sizing.gapBufferPct}%`
+      : '这只近期没有向下跳空';
 
   return {
     risk: {

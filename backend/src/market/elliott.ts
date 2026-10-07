@@ -183,18 +183,18 @@ interface Candidate {
 }
 
 /**
- * 浪的长度，取**对数尺度**（|ln(p1/p0)|）而非绝对价差。
- *
- * 这一点用真实数据验过才敢定：601127 从 173 跌到 52，按点数算「浪5 = 浪1 等长」
- * 会得到 7.5 元的目标，按 2.618 倍扩展甚至算出负价——绝对价差在大幅波动的标的上
- * 根本不是等价的「一样长」。改到对数空间后，「等长」变成「同样的涨跌幅」，
- * 目标价恒为正、比例也与价格水平无关，是行情图上通用的处理方式。
+ * 浪的对数长度，只用于目标位投射。铁律二不用这个数。
  */
 function legLen(pts: WavePoint[], i: number): number {
   const a = pts[i].price;
   const b = pts[i + 1].price;
   if (!(a > 0) || !(b > 0)) return 0;
   return Math.abs(Math.log(b / a));
+}
+
+/** 铁律二用的价格行程：高点到低点的绝对价差，不用对数 */
+function legLenPrice(pts: WavePoint[], i: number): number {
+  return Math.abs(pts[i + 1].price - pts[i].price);
 }
 
 /** 从 base 沿 dir 方向按对数长度投射一个价位；恒为正 */
@@ -243,17 +243,17 @@ function labelImpulse(
   // 铁律二：浪3 不是 1/3/5 中最短的一浪（须三浪齐全才判得了）
   if (completed >= 5) {
     applicable += 1;
-    const l1 = legLen(pts, 0);
-    const l3 = legLen(pts, 2);
-    const l5 = legLen(pts, 4);
+    const l1 = legLenPrice(pts, 0);
+    const l3 = legLenPrice(pts, 2);
+    const l5 = legLenPrice(pts, 4);
     const ok = !(l3 < l1 && l3 < l5);
     if (ok) satisfied += 1;
     rationale.push(
       `铁律二 浪3 非最短：浪1 ${r3(l1)} / 浪3 ${r3(l3)} / 浪5 ${r3(l5)} → ${ok ? '满足' : '违反'}`,
     );
   } else if (completed >= 3) {
-    const l1 = legLen(pts, 0);
-    const l3 = legLen(pts, 2);
+    const l1 = legLenPrice(pts, 0);
+    const l3 = legLenPrice(pts, 2);
     if (l3 < l1) rationale.push(`提示：浪3 幅度 ${r3(l3)} 目前小于浪1 ${r3(l1)}，若浪5 更长则本计数作废`);
   }
 

@@ -120,6 +120,11 @@ export interface FetchJsonOptions {
   validate?: (json: Record<string, unknown>) => boolean;
   /** 调用统计归属的数据源 id（东财=eastmoney，腾讯/新浪兜底各自归源），默认 eastmoney */
   sourceId?: string;
+  /**
+   * 是否允许切到 push2delay 延迟行情。默认允许。
+   * 急跌、炸板、回封这三类报价必须关掉：延迟价不能因为排第二就继续当这三类的报价。
+   */
+  allowDelay?: boolean;
 }
 
 /**
@@ -140,7 +145,7 @@ export async function getJson(
     cacheTtlMs: 15_000,
     maxAttempts: 4,
     retryBaseMs: 500,
-    hostFallback: { from: PUSH2_HOST, to: PUSH2_DELAY_HOST },
+    hostFallback: opts.allowDelay === false ? undefined : { from: PUSH2_HOST, to: PUSH2_DELAY_HOST },
     errorLabel: label,
     makeError: (msg) => new MarketError(msg),
     validate: validate ? (json) => (validate(json) ? null : `${label}返回无有效数据`) : undefined,
@@ -388,12 +393,15 @@ function buildKlineSecid(code: string): string {
 }
 
 /** 批量个股实时报价（ulist.np 一次取多只）。f2 现价 / f3 涨跌幅% / f12 代码 / f14 名称 / f18 昨收 / f6 成交额 / f7 振幅% / f8 换手率% / f10 量比 */
-export async function getQuotesEastmoney(codes: string[]): Promise<StockQuote[]> {
+export async function getQuotesEastmoney(
+  codes: string[],
+  opts: { allowDelay?: boolean } = {},
+): Promise<StockQuote[]> {
   const valid = codes.filter((c) => /^\d{6}$/.test(c));
   if (valid.length === 0) return [];
   const secids = valid.map(toSecid).join(',');
   const url = `${PUSH2}/ulist.np/get?fltt=2&fields=f2,f3,f6,f7,f8,f10,f12,f14,f18&secids=${secids}`;
-  const json = await getJson(url);
+  const json = await getJson(url, { allowDelay: opts.allowDelay });
   return toRows(json).map((r) => {
     // f7 振幅 / f8 换手率 / f10 量比：缺失（如停牌/无数据）东财返回 '-' → num()=0，归一为 undefined
     const amplitude = num(r.f7);

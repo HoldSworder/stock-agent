@@ -1,4 +1,5 @@
-import { MACD, EMA, RSI, BollingerBands, StochasticOscillator } from 'trading-signals';
+import { MACD, EMA, RSI, BollingerBands } from 'trading-signals';
+import { kdjTongdaxin } from './kdj';
 import type {
   KlineBar,
   KlinePeriod,
@@ -86,22 +87,13 @@ function calcRsi(closes: number[]): RsiReadout | null {
   return { rsi6: r2(rsi6), rsi12: r2(rsi12), rsi24: r2(rsi24), signal };
 }
 
-/** KDJ（9,3,3）：基于随机指标 %K/%D，J=3K-2D */
+/** KDJ（通达信 9,3,3）。与战法同一数列，80 是同一个数。 */
 function calcKdj(bars: KlineBar[]): KdjReadout | null {
-  const stoch = new StochasticOscillator(9, 3, 3);
-  let last: { stochK: number; stochD: number } | null = null;
-  for (const b of bars) {
-    const res = stoch.add({ high: b.high, low: b.low, close: b.close }) as
-      | { stochK: number; stochD: number }
-      | null;
-    if (res) last = res;
-  }
+  const series = kdjTongdaxin(bars);
+  const last = [...series].reverse().find((p) => p != null);
   if (!last) return null;
-  const k = Number(last.stochK);
-  const d = Number(last.stochD);
-  const j = 3 * k - 2 * d;
-  const signal = k > 80 ? '超买' : k < 20 ? '超卖' : '中性';
-  return { k: r2(k), d: r2(d), j: r2(j), signal };
+  const signal = last.k > 80 ? '超买' : last.k < 20 ? '超卖' : '中性';
+  return { k: r2(last.k), d: r2(last.d), j: r2(last.j), signal };
 }
 
 /** BOLL（20,2）+ %B + 价格相对带位置 */

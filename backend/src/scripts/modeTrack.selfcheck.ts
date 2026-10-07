@@ -275,19 +275,14 @@ const ZERO = DATES.map(() => 0);
   );
   assert.equal(supertrendDirection([], 3, 1).length, 0, 'A8f 空序列不应报错');
 
-  // (g) M1：翻向刻意用**前一根**最终轨道，比教科书 Supertrend 慢一根 bar。
-  //     基准 mode/etf-mainline-offense/etf-mainline-offense-research.py：
-  //     st[i] = 1 if close[i] > fu[i-1] else (-1 if close[i] < fl[i-1] else st[i-1])
-  //     这里钉住这一根滞后：改用当根轨道会让 dir[4] 提前翻空，与研究留档对不上。
+  // (g) Supertrend(10,3)：收盘对当根最终轨道判断翻向。上升段不再因昨天的下轨把出场推迟。
   const lag: Bar[] = [
     ...Array.from({ length: 4 }, (_, i) => mk(i + 1, 100 + i, 101 + i, 99 + i, 100.5 + i)),
-    // 宽幅长上影：当根 finalLower≈101.92 已在收盘价 101.6 之上，但前一根 finalLower=101 还在其下
     mk(5, 110, 112, 101.5, 101.6),
     mk(6, 110, 112, 101.5, 101.6),
   ];
   const lagDir = supertrendDirection(lag, 3, 1);
-  assert.equal(lagDir[4], 1, `A8g 用前一根轨道判向，当根不得翻空，实际 ${lagDir.join(',')}`);
-  assert.equal(lagDir[5], -1, 'A8g 滞后恰好一根：下一根才认翻空');
+  assert.equal(lagDir[4], -1, `A8g 当根收盘已在最终下轨之下，应翻空，实际 ${lagDir.join(',')}`);
 }
 
 // A8h C1：口径键必须只随**申报池**变化，不随「今天取数成功的子集」抖动。

@@ -40,14 +40,13 @@ export function sideCostBps(c: BacktestCosts, side: 'buy' | 'sell'): number {
 }
 
 /**
- * 映射到 tradelab 成本模型。
- * 近似口径：tradelab 的 commissionBps 双边对称计费，而 A 股印花税仅卖出单边收取，
- * 这里把印花税折半（stampDutyBps/2）摊到买卖两腿。单笔绝对成本与真实略有出入，
- * 长区间统计层面接近；佣金、过户费本就双边，按原值并入 commissionBps。
+ * 映射到 tradelab。它的 commissionBps 买卖同一费率，不能表达卖出单边税。
+ * 所以这里不把印花税摊进两腿：买入不含印花税，未平仓也不会提前扣半笔税。
+ * 卖出整笔印花税由调用方按 sellStampBps 在平仓时另计。
  */
 export function toTradelabCosts(c: BacktestCosts): ExecutionCostOptions {
   return {
-    commissionBps: c.commissionBps + c.transferFeeBps + c.stampDutyBps / 2,
+    commissionBps: c.commissionBps + c.transferFeeBps,
     minCommission: c.minCommission,
     slippageBps: c.slippageBps,
   };
@@ -57,7 +56,7 @@ export function toTradelabCosts(c: BacktestCosts): ExecutionCostOptions {
 export function costNote(c: BacktestCosts): string {
   return (
     `费用怎么算：佣金双边 ${c.commissionBps}bps（最低 ${c.minCommission} 元）` +
-    ` + 过户费双边 ${c.transferFeeBps}bps + 印花税卖出 ${c.stampDutyBps}bps（折半摊双边近似）` +
+    ` + 过户费双边 ${c.transferFeeBps}bps + 印花税只在卖出按当日税率整笔计（买入不含，未平仓不提前扣）` +
     ` + 滑点 ${c.slippageBps}bps`
   );
 }

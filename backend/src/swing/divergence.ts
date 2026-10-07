@@ -77,8 +77,10 @@ interface StrokeSegment {
   /** 在原始 K 线数组上的下标区间（闭区间） */
   fromIndex: number;
   toIndex: number;
-  /** 段内柱代数和的绝对值，即这一段的净推动力 */
+  /** 段内柱代数和的绝对值。5% 无结论用这个净额 */
   area: number;
+  /** 同向柱面积：下跌只加绿柱绝对值，上涨只加红柱。80% 衰减只用它，反向柱不抵消 */
+  sameDirArea: number;
   /** 段内有效柱数（不筛符号，故等于段长扣掉 MACD 未成型的部分） */
   barCount: number;
   /** 段内 DIF 极值：下跌段取最小、上涨段取最大 */
@@ -174,14 +176,17 @@ function readSegment(
   macdByIndex: Map<number, MacdPoint>,
 ): StrokeSegment | null {
   let sum = 0;
+  let sameSum = 0;
   let barCount = 0;
   let difExtreme = dir === 'down' ? Number.POSITIVE_INFINITY : Number.NEGATIVE_INFINITY;
   for (let i = fromIndex; i <= toIndex; i += 1) {
     const p = macdByIndex.get(i);
     if (!p) continue; // MACD 未成型的区段跳过，不当作 0 面积
-    // 代数和：保留符号累加。MACD 滞后于笔，下跌段前半段的柱往往还是正的，
-    // 只筛同号柱会让整段只剩一两根参与计算（自检里出现过 16 根对 1 根）
+    // 80% 衰减只加同向柱：下跌段加绿柱绝对值，上涨段加红柱。反向柱不参与、不抵消。
+    // 5% 无结论仍用净额（下面的代数和再取绝对值）。
     sum += p.bar;
+    const sameDir = dir === 'down' ? p.bar < 0 : p.bar > 0;
+    if (sameDir) sameSum += Math.abs(p.bar);
     barCount += 1;
     difExtreme = dir === 'down' ? Math.min(difExtreme, p.dif) : Math.max(difExtreme, p.dif);
   }
@@ -192,7 +197,10 @@ function readSegment(
     to,
     fromIndex,
     toIndex,
+    /** 净额：代数和再取绝对值。5% 无结论用这个数 */
     area: Math.abs(sum),
+    /** 同向柱面积。80% 衰减只用这个数，反向柱不抵消 */
+    sameDirArea: sameSum,
     barCount,
     difExtreme,
     endPrice: to.price,
@@ -238,30 +246,31 @@ function compare(p0: StrokeSegment, p1: StrokeSegment, confirmed: boolean): Dive
       (p1.barCount < SHORT_SEGMENT_HINT ? '（这一段偏短，结论把握有限）' : ''),
   );
 
-  // 条件三：力道衰减达阈值
-  if (!(p0.area > 0)) {
+  // 条件三：5% 用净额，80% 只用同向柱
+  if (!(p0.area > 0) || !(p0.sameDirArea > 0)) {
     return NONE(rationale, ['上一段力道读数为零，无法比较']);
   }
-  const areaRatio = p1.area / p0.area;
-  // 防代数和退化：净面积接近零说明这一段多空拉锯、力道方向不明，
+  const netRatio = p1.area / p0.area;
+  // 防代数和退化：净额接近零说明这一段多空拉锯、力道方向不明，
   // 此时算出的 99% 衰减是假的，不该给建仓信号
-  if (areaRatio < MIN_MEANINGFUL_AREA_RATIO) {
+  if (netRatio < MIN_MEANINGFUL_AREA_RATIO) {
     counter.push(
-      `这一段多空拉锯、净推动力接近零（只有上一段的 ${(areaRatio * 100).toFixed(1)}%），` +
+      `这一段多空拉锯、净推动力接近零（只有上一段的 ${(netRatio * 100).toFixed(1)}%），` +
         `力道方向不明，不判背驰`,
     );
     return NONE(rationale, counter);
   }
+  const areaRatio = p1.sameDirArea / p0.sameDirArea;
   const weaken = 1 - areaRatio;
   if (weaken < MIN_WEAKEN_RATIO) {
     counter.push(
-      `力道没有明显减弱（这一段是上一段的 ${(areaRatio * 100).toFixed(0)}%，` +
+      `同向柱没有明显减弱（这一段是上一段的 ${(areaRatio * 100).toFixed(0)}%，` +
         `要低于 ${((1 - MIN_WEAKEN_RATIO) * 100).toFixed(0)}% 才算），不判背驰`,
     );
     return NONE(rationale, counter);
   }
   rationale.push(
-    `力道减弱：这一段的推动力只有上一段的 ${(areaRatio * 100).toFixed(0)}%`,
+    `同向柱减弱：这一段只有上一段的 ${(areaRatio * 100).toFixed(0)}%（反向柱不参与、不抵消）`,
   );
 
   // 条件四：DIF 同向背离。价格更极端但 DIF 反而没更极端，才是真背离

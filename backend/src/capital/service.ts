@@ -2,10 +2,11 @@ import type { CapitalSeat, StockCapitalDetail } from '@stock-agent/shared';
 import { getDragonTigerEntries } from '../market/datacenter';
 import { getDragonSeats } from './data';
 
-// S7 资金面服务层：龙虎榜资金面深挖 = 净额趋势（东财 datacenter）+ 最近一次席位拆分（akshare）。
+// S7 资金面服务层：龙虎榜只叫披露席位净额，只在上榜日有意义。
+// 没有上榜写成「未披露」，不能写成资金没有方向。
 // 纯只读、不下单、不调 LLM。两源独立容错：任一失败仍返回另一半。
 
-/** 个股龙虎榜资金面合并视图（确定性只读；席位源失败不影响净额趋势） */
+/** 个股龙虎榜：没有上榜写成未披露。席位源失败不影响已披露的席位净额。 */
 export async function getStockCapital(code: string, signal?: AbortSignal): Promise<StockCapitalDetail> {
   const [trendRes, seatsRes] = await Promise.allSettled([
     getDragonTigerEntries(code, 6),
@@ -14,7 +15,7 @@ export async function getStockCapital(code: string, signal?: AbortSignal): Promi
   const trend = trendRes.status === 'fulfilled' ? trendRes.value : { name: code, entries: [] };
   const seats = seatsRes.status === 'fulfilled' ? seatsRes.value : null;
   const notes: string[] = [];
-  if (!trend.entries.length) notes.push('近期无龙虎榜上榜记录');
+  if (!trend.entries.length) notes.push('未披露');
   if (seatsRes.status === 'rejected') notes.push('席位拆分数据源暂不可用');
   return {
     code,
@@ -40,7 +41,7 @@ function topSeats(seats: CapitalSeat[], n: number): string {
 export function formatCapitalForAgent(d: StockCapitalDetail): string {
   const lines: string[] = [`${d.name}(${d.code}) 龙虎榜资金面`];
   if (d.recent.length) {
-    lines.push('净额趋势（新→旧）：');
+    lines.push('披露席位净额（新→旧，只在上榜日有意义）：');
     for (const e of d.recent) {
       lines.push(
         `  ${e.date} 涨跌${e.pct.toFixed(2)}% 净买入${e.net >= 0 ? '+' : ''}${e.net.toFixed(0)}万 换手${e.turnover.toFixed(2)}%` +
@@ -48,7 +49,7 @@ export function formatCapitalForAgent(d: StockCapitalDetail): string {
       );
     }
   } else {
-    lines.push('近期无龙虎榜上榜记录。');
+    lines.push('未披露。');
   }
   if (d.seats) {
     lines.push(`最近一次席位拆分（${d.seats.date}${d.seats.reason ? `·${d.seats.reason}` : ''}）：`);

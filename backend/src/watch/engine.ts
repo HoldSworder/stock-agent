@@ -503,7 +503,7 @@ async function tick(cfg: WatchConfig): Promise<void> {
   }
 
   const codes = [...meta.keys()];
-  const quotes = codes.length > 0 ? await getQuotes(codes) : [];
+  const quotes = codes.length > 0 ? await getQuotes(codes, { liveOnly: true }) : [];
   // 首见标的的当日高点先并发播种，循环里只读结果（串行 await 会把首个 tick 拖成 N 次串行取数）
   const seededHighs = await seedDayHighs(quotes, day);
 

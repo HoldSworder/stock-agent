@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { BacktestCosts, ModeProtocolMark, ModeSpec, ModeUniversePolicy } from '@stock-agent/shared';
 import { resolveCosts, resolveEtfCosts, sideCostBps } from '../backtest/costs';
+import { isExchangeFund } from '../market/instrument';
 import { family, shortName } from './themeFirst';
 import { researchPoolFor } from './researchPool';
 
@@ -17,7 +18,7 @@ import { researchPoolFor } from './researchPool';
  * 引擎语义版本。任何会改变持仓/收益的规则改动都必须换号，仅重构不换。
  * v1 = supertrend 恒不触发、回放零成本的历史口径（旧 daily 行与旧回测均属 v1）。
  */
-export const MODE_ENGINE_VERSION = 'v2-2026.08';
+export const MODE_ENGINE_VERSION = 'v3-2026.10';
 
 export type { ModeUniversePolicy };
 
@@ -32,19 +33,8 @@ export function modeCosts(input?: Partial<BacktestCosts>): BacktestCosts {
   return resolveEtfCosts(input);
 }
 
-/**
- * 场内基金代码段（ETF / LOF）：深市 15xxxx、16xxxx，沪市 51/52/56/58xxxx。
- * 个股是沪 60/68、深 00/30、北 8x/4x，都不在这几段里。
- */
-const EXCHANGE_FUND_PREFIX = ['15', '16', '51', '52', '56', '58'];
-
-/**
- * 是否场内基金。ETF 免印花税这档成本只对场内基金成立，而 etf_pool 表对 code 无品种校验，
- * 用户往「ETF 跟踪池」里加一只个股，卖出侧就会少扣 5bps 印花税（方向偏乐观）。
- */
-export function isExchangeFund(code: string): boolean {
-  return EXCHANGE_FUND_PREFIX.some((p) => code.startsWith(p));
-}
+/** 场内基金代码段与 market/instrument 同一句：15、16、51、52、56、58。16 开头不看名称。 */
+export { isExchangeFund };
 
 /**
  * 池哈希：对**排序后的申报池**计算，且必须带上影响 family/theme 归类的规范化名称——

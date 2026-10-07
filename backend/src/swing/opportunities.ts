@@ -5,6 +5,7 @@ import type {
   SwingOpportunityOrigin,
   SwingReading,
 } from '@stock-agent/shared';
+import { oneRDistance } from '../market/instrument';
 import { getKline } from '../datasource/scheduler';
 import { computeSwingSizing } from './sizing';
 import { heldLayerCount as etfWatchHeldLayers } from '../etfwatch/store';
@@ -96,10 +97,11 @@ export function selectOpportunitySignals(
   return out;
 }
 
-/** 1R 目标价：赚到的钱等于当初打算亏的钱。按区间上沿这个最不利的入场价算 */
+/** 1R 目标价：成交价到存档止损的距离。区间上沿买入时这段是 1.25 倍 ATR */
 export function firstRTargetOf(entry: number, initialStop: number): number | null {
-  if (!(entry > 0) || !(initialStop > 0) || initialStop >= entry) return null;
-  return Math.round((entry + (entry - initialStop)) * 1000) / 1000;
+  const dist = oneRDistance(entry, initialStop);
+  if (dist == null) return null;
+  return Math.round((entry + dist) * 1000) / 1000;
 }
 
 /**

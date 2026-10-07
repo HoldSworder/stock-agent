@@ -6,6 +6,7 @@ import { getKline } from '../datasource/scheduler';
 import { judge } from '../symbolPlans/forecast';
 import { bootstrapEdge, type PairedSample } from '../assertions/weights';
 import { currentRuleVersion, VALIDATION_GATE } from './ruleVersion';
+import { TIME_STOP_TRADE_DAYS } from './advice';
 import { judgeSwing, dropUnclosedBar } from './judge';
 
 // 阶段二：这套判断到底有没有用。
@@ -164,11 +165,11 @@ function pickControlDates(
 }
 
 /**
- * 判一条样本的结果：顺向 2 倍波动先到，还是反向 1 倍波动先到。
- *
- * 起点**必须是信号那根收盘之后**。这里传的是完整 ISO 时刻（收盘时间），
- * 不是 `YYYY-MM-DD`——后者会被 forecast.judge 当成上海时间早上 8 点，
- * 于是信号当天整根日 K 都算进结果，等于让规则偷看当天走势。
+ * 放大考试和真实出场用同一套。
+ * 区间上沿买入的 1R 是 1.25 倍 ATR（区间 0.75 + 止损 0.5）。
+ * 达到 1R 算走出预期，跌到存档止损算失效。第 10 个交易日仍没到 1R 按时间退出。
+ * 不用 2 倍 ATR 对 1 倍 ATR。观察从信号的下一根开始，信号当天不计入。
+ * 对照是随机非信号日，和信号同一口径。
  */
 function judgeSample(
   bars: KlineBar[],
@@ -178,13 +179,10 @@ function judgeSample(
   direction: 'bottom' | 'top',
 ): { outcome: 'hit' | 'miss' | 'timeout'; target: number; invalid: number } {
   const up = direction === 'bottom';
-  const target = up
-    ? basePrice + VALIDATION_GATE.targetAtrMult * atr14
-    : basePrice - VALIDATION_GATE.targetAtrMult * atr14;
-  const invalid = up
-    ? basePrice - VALIDATION_GATE.invalidAtrMult * atr14
-    : basePrice + VALIDATION_GATE.invalidAtrMult * atr14;
-  const window = bars.slice(fromIndex + 1, fromIndex + 1 + VALIDATION_GATE.observeTradeDays);
+  const oneR = 1.25 * atr14;
+  const target = up ? basePrice + oneR : basePrice - oneR;
+  const invalid = up ? basePrice - oneR : basePrice + oneR;
+  const window = bars.slice(fromIndex + 1, fromIndex + 1 + TIME_STOP_TRADE_DAYS);
   if (window.length === 0) return { outcome: 'timeout', target, invalid };
   const since = `${bars[fromIndex].time.slice(0, 10)}T15:00:00+08:00`;
   const dueDate = window[window.length - 1].time.slice(0, 10);
@@ -385,11 +383,7 @@ export async function validateDirection(
   const sampleEnough = shortfalls.length === 0;
 
   if (sampleEnough) {
-    if (realRate < VALIDATION_GATE.minRealRatePct) {
-      shortfalls.push(
-        `信号出现后走出预期的比例 ${realRate.toFixed(0)}%，低于要求的 ${VALIDATION_GATE.minRealRatePct}%`,
-      );
-    }
+    // 45% 只说明旧考试赔率，不能单独当作试探仓有正期望。
     if (edgePoints < VALIDATION_GATE.minEdgePoints) {
       shortfalls.push(
         `比随便挑日子只强 ${edgePoints.toFixed(1)} 个百分点，要求至少 ${VALIDATION_GATE.minEdgePoints} 个`,

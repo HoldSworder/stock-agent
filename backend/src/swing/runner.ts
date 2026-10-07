@@ -179,7 +179,7 @@ export async function runSwingScan(mode: 'live' | 'replay' = 'live'): Promise<Ru
     bars: KlineBar[],
   ): typeof schema.swingSnapshots.$inferInsert => {
     // 传标的名进去：除权除息日的名字带 XD/XR/DR 前缀，那天不给结论
-    const j = judgeSwing(bars, period, t.name);
+    const j = judgeSwing(bars, period, t.name, t.code);
     const last = bars[bars.length - 1];
     if (last && (dataAsOf == null || last.time > dataAsOf)) dataAsOf = last.time;
     return {

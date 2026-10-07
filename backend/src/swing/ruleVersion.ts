@@ -87,6 +87,7 @@ export const VALIDATION_GATE = {
   /** 95% 保守下界至少领先多少个百分点 */
   minEdgeLowerPoints: 5,
   /** 真实命中率至少多少 % */
+  /** 旧考试赔率。不能单独当作试探仓有正期望，验收不再用它当通过条件。 */
   minRealRatePct: 45,
   /** 至少覆盖多少个赛道 */
   minTracks: 10,

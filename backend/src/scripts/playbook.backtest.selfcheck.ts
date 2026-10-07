@@ -70,7 +70,12 @@ const baseSpec: PlaybookSpec = {
 
 // 连续 2 根阳线
 {
-  const b = bars([{ close: 10 }, { close: 11 }, { close: 12 }, { close: 11 }]);
+  const b = bars([
+    { close: 10, open: 9 },
+    { close: 11, open: 10 },
+    { close: 12, open: 11 },
+    { close: 11, open: 12 },
+  ]);
   const s = buildSeries('600000', b, []);
   assert.equal(evalRule({ kind: 'consecutive', dir: 'up', bars: 2 }, s, 2), true);
   assert.equal(evalRule({ kind: 'consecutive', dir: 'up', bars: 2 }, s, 3), false);

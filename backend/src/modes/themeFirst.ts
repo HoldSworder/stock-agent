@@ -1,5 +1,6 @@
 import type { ThemeFirstSpec } from '@stock-agent/shared';
 import type { FactorRow } from './factors';
+import { isSealedLimit, limitRatio } from '../market/instrument';
 import { scoreOf } from './factors';
 
 // 主题优先单仓引擎（TS 移植）：对齐 mode/etf-mainline-theme-first-flat-leader 的 python run()。
@@ -75,7 +76,10 @@ export function annotateThemes(universe: UniverseSeries[], dates: string[]): voi
       const share = (f: (r: FactorRow) => boolean): number => rows.filter(f).length / n;
       const avgMom30 = avg((r) => r.mom30);
       const avgMom60 = avg((r) => r.mom60);
-      const breadthAbove120 = share((r) => r.above120);
+      const ready120 = rows.filter((r) => r.ma120 > 0);
+      const breadthAbove120 = ready120.length
+        ? ready120.filter((r) => r.above120).length / ready120.length
+        : 0;
       const avgVolRatio20 = avg((r) => r.volRatio20);
       const avgAmountRatio20 = avg((r) => r.amountRatio20);
       const breadthAmountConfirm = share((r) => r.amountRatio20 > 1.25);
@@ -228,11 +232,62 @@ export function replayThemeFirst(
   let heldSum = 0;
   /** 持仓最近一次有效收盘（停牌/数据缺口日沿用它估值） */
   let lastHoldClose = 0;
+  /** 收盘才确认。成交改到下一交易日开盘，开盘封死则继续顺延。 */
+  let pendingSell: string | null = null;
+  let pendingBuy: { code: string; family: string } | null = null;
 
   for (let idx = 0; idx < dates.length; idx++) {
     const date = dates[idx];
     const events: ReplayDay['events'] = [];
     const holdRow = hold ? byCode.get(hold)?.rows.get(date) : undefined;
+    const openOf = (code: string): number => byCode.get(code)?.rows.get(date)?.o ?? 0;
+    const sealed = (code: string, dir: 'up' | 'down'): boolean => {
+        const open = openOf(code);
+        const prevClose = idx > 0 ? byCode.get(code)?.rows.get(dates[idx - 1])?.c ?? 0 : 0;
+        const name = byCode.get(code)?.name;
+        return isSealedLimit(open, prevClose, limitRatio(code, { name }), dir);
+      };
+      if (pendingSell && hold) {
+        const open = openOf(hold);
+        if (open > 0 && !sealed(hold, 'down')) {
+        const series = byCode.get(hold);
+        const pnl = (open / entry) * (1 - buyCost) * (1 - sellCost) - 1;
+        trades.push({
+          entryDate: entryDay,
+          exitDate: date,
+          code: hold,
+          name: series?.name ?? hold,
+          family: holdFamily,
+          entryPrice: entry,
+          exitPrice: open,
+          pnl,
+          reason: pendingSell,
+        });
+        events.push({ kind: 'exit', detail: `卖出 ${series?.name ?? ''}(${hold})：${pendingSell}` });
+        cash *= (open / entry) * (1 - sellCost);
+        hold = null;
+        holdFamily = '';
+        peakPx = 0;
+        lastHoldClose = 0;
+        pendingSell = null;
+      }
+    }
+    if (pendingBuy && !hold) {
+      const open = openOf(pendingBuy.code);
+      if (open > 0 && !sealed(pendingBuy.code, 'up')) {
+        const series = byCode.get(pendingBuy.code);
+        hold = pendingBuy.code;
+        holdFamily = pendingBuy.family;
+        entry = open;
+        entryDay = date;
+        entryIdx = idx;
+        peakPx = entry;
+        lastHoldClose = entry;
+        cash *= 1 - buyCost;
+        events.push({ kind: 'enter', detail: `买入 ${series?.name ?? ''}(${hold})：主题 ${pendingBuy.family}` });
+        pendingBuy = null;
+      }
+    }
     if (holdRow) lastHoldClose = holdRow.c;
     // 持仓当日无行情（停牌、数据缺口）时沿用上一次有效估值：
     // 直接落回 cash 会让净值当天跳掉全部浮盈、次日跳回，在曲线上造出假回撤并污染 maxDrawdown
@@ -256,7 +311,7 @@ export function replayThemeFirst(
         let reason: string | null = null;
         if (holdRow && gain >= spec.protectGain && pullback <= -spec.protectDrawdown) {
           reason = `盈利保护${pct(spec.protectGain)}/${pct(spec.protectDrawdown)}`;
-        } else if (holdRow && holdRow.c < holdRow.ma[spec.exitMa]) {
+        } else if (holdRow && holdRow.ma[spec.exitMa] > 0 && holdRow.c < holdRow.ma[spec.exitMa]) {
           reason = `跌破MA${spec.exitMa}`;
         } else if (famRank < 0 && heldDays >= spec.minHoldDays) {
           reason = '主题失效';
@@ -267,43 +322,13 @@ export function replayThemeFirst(
         }
 
         if (reason) {
-          const series = byCode.get(hold);
-          const sell = series?.rows.get(date)?.c ?? entry;
-          const pnl = (sell / entry) * (1 - buyCost) * (1 - sellCost) - 1;
-          trades.push({
-            entryDate: entryDay,
-            exitDate: date,
-            code: hold,
-            name: series?.name ?? hold,
-            family: holdFamily,
-            entryPrice: entry,
-            exitPrice: sell,
-            pnl,
-            reason,
-          });
-          events.push({ kind: 'exit', detail: `卖出 ${series?.name ?? ''}(${hold})：${reason}` });
-          cash *= (sell / entry) * (1 - sellCost);
-          hold = null;
-          holdFamily = '';
-          peakPx = 0;
-          lastHoldClose = 0;
+          pendingSell = reason;
+          if (best && best.leader !== hold) pendingBuy = { code: best.leader, family: best.family };
         }
       }
 
-      if (!hold && best) {
-        const series = byCode.get(best.leader);
-        const row = series?.rows.get(date);
-        if (row) {
-          hold = best.leader;
-          holdFamily = best.family;
-          entry = row.c;
-          entryDay = date;
-          entryIdx = idx;
-          peakPx = entry;
-          lastHoldClose = entry;
-          cash *= 1 - buyCost;
-          events.push({ kind: 'enter', detail: `买入 ${series?.name ?? ''}(${hold})：主题 ${best.family}` });
-        }
+      if (!hold && !pendingSell && best) {
+        pendingBuy = { code: best.leader, family: best.family };
       }
     }
 
@@ -329,7 +354,7 @@ export function replayThemeFirst(
       family: holdFamily,
       entryPrice: entry,
       exitPrice: sell,
-      pnl: (sell / entry) * (1 - buyCost) * (1 - sellCost) - 1,
+      pnl: (sell / entry) * (1 - buyCost) - 1,
       reason: '持有中',
     });
   }
