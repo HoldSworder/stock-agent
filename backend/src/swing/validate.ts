@@ -65,12 +65,41 @@ function seeded(seed: number): () => number {
  *
  * 只收二级信号：一级只说明力道在衰减，永远只拿试探仓、不参与放大资格的判定。
  */
+/** 考试前划定的四档。考试本身不另判阶段，只消费扫描当时已经写下的这一档。 */
+export const REGIME_PHASES = ['主升', '反弹', '退潮', '震荡'] as const;
+
+/**
+ * 每个原生阶段至少要有 minEventsPerPhase 个事件。
+ * 阶段为空、或不是这四档，整次考试拦住，不能靠只写着常数放行。
+ * @param phases 已结算真实事件在考试前写下的阶段
+ */
+export function phaseGateShortfalls(phases: Array<string | null | undefined>): string[] {
+  const counts = new Map<string, number>(REGIME_PHASES.map((p) => [p, 0]));
+  let empty = 0;
+  for (const phase of phases) {
+    if (phase && counts.has(phase)) counts.set(phase, (counts.get(phase) ?? 0) + 1);
+    else empty += 1;
+  }
+  const out: string[] = [];
+  if (empty > 0) {
+    out.push(`有 ${empty} 个事件在考试前没有划定市场阶段，不能放行`);
+  }
+  const need = VALIDATION_GATE.minEventsPerPhase;
+  for (const phase of REGIME_PHASES) {
+    const n = counts.get(phase) ?? 0;
+    if (n < need) out.push(`${phase}阶段 ${n} 个事件，需要至少 ${need} 个`);
+  }
+  return out;
+}
+
 export function collectEvents(direction: 'bottom' | 'top'): Array<{
   code: string;
   tradeDate: string;
   barTime: string;
   close: number;
   atr14: number;
+  /** 扫描落快照时写下的阶段。考试不重算。 */
+  marketPhase: string | null;
 }> {
   const cur = currentRuleVersion();
   if (!cur) return [];
@@ -101,6 +130,7 @@ export function collectEvents(direction: 'bottom' | 'top'): Array<{
     barTime: string;
     close: number;
     atr14: number;
+    marketPhase: string | null;
   }> = [];
   for (const r of rows) {
     if (r.atr14 == null || !(r.atr14 > 0) || !(r.close > 0) || !r.barTime) continue;
@@ -116,6 +146,7 @@ export function collectEvents(direction: 'bottom' | 'top'): Array<{
       barTime: r.barTime,
       close: r.close,
       atr14: r.atr14,
+      marketPhase: r.marketPhase || null,
     });
   }
   return out;
@@ -246,6 +277,7 @@ export async function validateDirection(
   const tradeDates = new Set<string>();
   const blocks = new Set<string>();
   const tracks = new Set<string>();
+  const settledPhases: Array<string | null> = [];
   const codeCount = new Map<string, number>();
   let realHits = 0;
   let controlHitSum = 0;
@@ -322,7 +354,7 @@ export async function validateDirection(
       atr14: ev.atr14,
       targetPrice: real.target,
       invalidPrice: real.invalid,
-      marketPhase: null,
+      marketPhase: ev.marketPhase,
       track: '',
       outcome: real.outcome,
       settledAt: nowIso(),
@@ -336,6 +368,7 @@ export async function validateDirection(
     tradeDates.add(ev.tradeDate);
     blocks.add(block);
     codeCount.set(ev.code, (codeCount.get(ev.code) ?? 0) + 1);
+    settledPhases.push(ev.marketPhase);
   }
 
   // 落库：先清掉本版本旧样本再写，避免重复统计
@@ -374,6 +407,7 @@ export async function validateDirection(
       `信号分布在 ${blocks.size} 周，需要至少 ${VALIDATION_GATE.minBlocksPerDirection} 周`,
     );
   }
+  shortfalls.push(...phaseGateShortfalls(settledPhases));
   const maxShare = settled > 0 ? Math.max(...[...codeCount.values()]) / settled : 0;
   if (settled > 0 && maxShare > VALIDATION_GATE.maxSingleCodeSharePct / 100) {
     shortfalls.push(

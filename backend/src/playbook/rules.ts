@@ -285,12 +285,24 @@ export function evalRule(rule: PlaybookRule, s: Series, i: number, hold?: HoldCo
     }
 
     case 'consecutive': {
-      // 阳线是收盘高于开盘。连涨是收盘高于前收，不在这条规则里。
+      // 阳线是收盘高于开盘。连涨不走这里。
       if (i < rule.bars - 1) return false;
       for (let k = 0; k < rule.bars; k++) {
         const cur = bars[i - k];
         if (!(cur.open > 0)) return false;
         if (rule.dir === 'up' ? !(cur.close > cur.open) : !(cur.close < cur.open)) return false;
+      }
+      return true;
+    }
+
+    case 'closeStreak': {
+      // 连涨是收盘高于前收。不把这件事叫做阳线。
+      if (i < rule.bars) return false;
+      for (let k = 0; k < rule.bars; k++) {
+        const cur = bars[i - k];
+        const prev = bars[i - k - 1];
+        if (!prev || !(prev.close > 0)) return false;
+        if (rule.dir === 'up' ? !(cur.close > prev.close) : !(cur.close < prev.close)) return false;
       }
       return true;
     }
@@ -403,6 +415,8 @@ export function describeRule(rule: PlaybookRule): string {
       return `距近 ${rule.days} 根高点回撤 ${opText[rule.op]} ${rule.value}%`;
     case 'consecutive':
       return `连续 ${rule.bars} 根${rule.dir === 'up' ? '阳' : '阴'}线`;
+    case 'closeStreak':
+      return `连续 ${rule.bars} 根${rule.dir === 'up' ? '连涨' : '连跌'}`;
     case 'limit':
       return rule.dir === 'up' ? '当根涨停' : '当根跌停';
     case 'pnlPct':

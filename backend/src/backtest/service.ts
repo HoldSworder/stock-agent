@@ -14,7 +14,7 @@ import type { BacktestMetrics, BacktestResult, BacktestTrade } from 'tradelab';
 import { db, schema } from '../db/client';
 import { newId, nowIso } from '../util';
 import { loadCandles, msToDate, assertSupportedPeriod } from './candles';
-import { resolveCosts, toTradelabCosts, costNote } from './costs';
+import { resolveCosts, toTradelabCosts, costNote, applyClosedSellStamp } from './costs';
 import { buildSignal, resolveParams } from './signals';
 import { runSignalBacktest, runPortfolioBacktest, type PortfolioSystemArgs } from './engine';
 
@@ -119,6 +119,7 @@ async function execute(input: BacktestRunInput): Promise<{
       costs: tlCosts,
       atrTrailMult: params.atrTrailMult,
     });
+    applyClosedSellStamp(result, code);
     return {
       prepared: { scope, codes: [code], period, range: rangeOf(dates), result, systemsMetrics: [] },
       notes,
@@ -155,6 +156,8 @@ async function execute(input: BacktestRunInput): Promise<{
     });
   }
   const result = runPortfolioBacktest(equity, systems);
+  for (const sys of result.systems) applyClosedSellStamp(sys.result, sys.symbol);
+  applyClosedSellStamp(result);
   const systemsMetrics: BacktestSystemMetrics[] = result.systems.map((sys) => ({
     code: sys.symbol,
     weight: sys.weight,

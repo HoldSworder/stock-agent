@@ -431,9 +431,10 @@ export async function runPlaybookBacktest(spec: PlaybookSpec): Promise<PlaybookB
     `离场兜底：止损 ${spec.stopLossPct ?? '—'}% / 止盈 ${spec.takeProfitPct ?? '—'}% / 持有上限 ${spec.maxHoldBars ?? '—'} 根`,
     `成交价怎么算：信号收盘确认，下一根 K 线${spec.fill === 'nextClose' ? '收盘' : '开盘'}成交，买入当根不卖（T+1）`,
     `成本：佣金双边 ${costs.commissionBps}bps（最低 ${costs.minCommission} 元，按 ${NOTIONAL} 元名义本金折算费率）` +
-      ` + 过户费双边 ${costs.transferFeeBps}bps + 印花税卖出 ${costs.stampDutyBps}bps + 滑点双边 ${costs.slippageBps}bps`,
+      ` + 过户费按品种双边计 + 滑点双边 ${costs.slippageBps}bps。` +
+      `买入不含印花税；已平仓的卖出按卖出日税率整笔扣；期末仍持有的不提前扣。`,
     '组合怎么算：每只标的独立一份资金、同时最多一笔持仓，总权益按各标的等额合成',
-    '权益曲线含持仓期浮动盈亏（按收盘市值计，浮盈尚未扣卖出侧成本）；逐笔收益为已实现、已扣双边成本',
+    '权益曲线含持仓期浮动盈亏（按收盘市值计）。已平仓的卖出印花税已从这笔收益和曲线里扣除；期末仍持有的不提前扣。',
   ];
   const coverage: PlaybookCoverage = {
     requested: universe.length,
