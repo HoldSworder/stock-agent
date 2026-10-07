@@ -47,6 +47,7 @@ const ruleSchema = z.discriminatedUnion('kind', [
   }),
   z.object({ kind: z.literal('drawdown'), days, op, value: finite }),
   z.object({ kind: z.literal('consecutive'), dir: z.enum(['up', 'down']), bars: days }),
+  z.object({ kind: z.literal('closeStreak'), dir: z.enum(['up', 'down']), bars: days }),
   z.object({ kind: z.literal('limit'), dir: z.enum(['up', 'down']) }),
   z.object({ kind: z.literal('pnlPct'), op, value: finite }),
   z.object({ kind: z.literal('heldBars'), op, value: z.number().int().min(0).max(2000) }),

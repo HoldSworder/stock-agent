@@ -23,15 +23,15 @@ function makeSeries(closes: number[], dates?: string[]): Series {
   const ds =
     dates ??
     closes.map((_, i) => new Date(Date.UTC(2026, 0, 1 + i)).toISOString().slice(0, 10));
-  return { dates: ds, closes, idx: new Map(ds.map((d, i) => [d, i])) };
+  return { dates: ds, opens: closes, closes, idx: new Map(ds.map((d, i) => [d, i])) };
 }
 
 // ===== 1. 前向收益 =====
 
 const s = makeSeries([10, 11, 12, 9, 9, 9]);
 
-assert.ok(Math.abs(forwardReturnOn(s, '2026-01-01', 2)! - 0.2) < 1e-12, '10 → 12 应为 +20%');
-assert.ok(Math.abs(forwardReturnOn(s, '2026-01-02', 2)! - (9 / 11 - 1)) < 1e-12);
+assert.ok(Math.abs(forwardReturnOn(s, '2026-01-01', 2)! - (12 / 11 - 1)) < 1e-12, '次日开盘 11 持有到第 2 日收盘 12');
+assert.ok(Math.abs(forwardReturnOn(s, '2026-01-02', 2)! - (9 / 12 - 1)) < 1e-12);
 
 // 未来不足 n 根：必须 null，不能退而求其次用最后一根凑
 assert.equal(forwardReturnOn(s, '2026-01-05', 5), null, '未来不足 5 根必须判为不可判');

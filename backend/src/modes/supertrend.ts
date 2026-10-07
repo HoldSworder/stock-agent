@@ -1,19 +1,11 @@
 import type { Bar } from './factors';
 
-// Supertrend（对齐 mode/etf-mainline-offense 的既有研究口径）：
-// 真实 TR → SMA 平滑 ATR → HL2 ± mult×ATR 上下轨 → 轨道按「只收紧不放宽」滚动 →
-// 收盘与**前一根最终轨道**严格比较翻向。
+// Supertrend(10,3)：
+// 真实 TR → Wilder 平滑 ATR → HL2 ± mult×ATR 上下轨 → 轨道按「只收紧不放宽」滚动 →
+// 收盘对当根最终轨道判断翻向。
 //
-// ⚠️ 刻意的非标准变体：教科书 Supertrend 用**当根**最终轨道判翻向，这里用 finalBand[i−1]，
-// 比标准松一根 bar（上升段 finalLower 单调抬升，故离场阈值恒不高于标准值，离场只会更晚）。
-// 保留这一根滞后是为了与研究基准逐笔一致——基准来源
-// mode/etf-mainline-offense/etf-mainline-offense-research.py 的 Supertrend(10,3) 段：
-//   st[i] = 1 if closes[i] > fu[i-1] else (-1 if closes[i] < fl[i-1] else st[i-1])
-// 改成当根轨道会让站内跟踪与该研究留档的交易序列对不上，属于口径变更、必须换 MODE_ENGINE_VERSION。
-//
-// 为什么不用「close - mult×平均价差」那种简化式：旧实现把下轨定义成当根收盘减去若干倍
-// 收盘绝对差均值，再要求收盘跌破它，代入后恒等于 0 < -(mult+1)·atr，永远不成立，
-// 这道离场规则从未触发过。这里必须用真实 OHLC 的 TR 与滚动轨道，才可能真的翻空。
+// 上升段里昨天的下轨不高于今天的下轨时，不再因此把出场推迟到更晚。
+// 名称保持 Supertrend(10,3)。这套口径改变持仓，MODE_ENGINE_VERSION 已升到 v3-2026.10。
 
 /** 单根 TR：max(H-L, |H-前收|, |L-前收|)；首根无前收，退化为当根振幅 */
 function trueRanges(bars: Bar[]): number[] {
@@ -23,14 +15,22 @@ function trueRanges(bars: Bar[]): number[] {
   });
 }
 
-/** 前缀窗口 SMA（不足周期按已有长度取均值，与 python sma() 同款） */
-function smaPrefix(xs: number[], n: number): number[] {
+/**
+ * Wilder 平滑 ATR。满 period 根后按 (前值×(n-1)+当根 TR)/n 递推。
+ * 预热段用已有 TR 的均值，isSupertrendDown 在 i < period 时不认翻空。
+ * @param trs 逐根真实波幅
+ * @param period 平滑周期，Supertrend(10,3) 用 10
+ */
+function wilderAtr(trs: number[], period: number): number[] {
   const out: number[] = [];
-  let sum = 0;
-  for (let i = 0; i < xs.length; i++) {
-    sum += xs[i];
-    if (i >= n) sum -= xs[i - n];
-    out.push(sum / Math.min(i + 1, n));
+  let atr = 0;
+  for (let i = 0; i < trs.length; i += 1) {
+    if (i < period) {
+      atr = (atr * i + trs[i]) / (i + 1);
+    } else {
+      atr = (atr * (period - 1) + trs[i]) / period;
+    }
+    out.push(atr);
   }
   return out;
 }
@@ -43,7 +43,7 @@ export function supertrendDirection(bars: Bar[], period: number, mult: number): 
   const n = bars.length;
   const dir = new Array<number>(n).fill(1);
   if (!n || !(period >= 1) || !(mult > 0)) return dir;
-  const atr = smaPrefix(trueRanges(bars), period);
+  const atr = wilderAtr(trueRanges(bars), period);
 
   let prevUpper = 0;
   let prevLower = 0;
@@ -62,8 +62,8 @@ export function supertrendDirection(bars: Bar[], period: number, mult: number): 
     // 轨道只在「更紧」或价格已穿越时才更新，否则沿用上一根，形成跟随止损效果
     const upper = rawUpper < prevUpper || prevClose > prevUpper ? rawUpper : prevUpper;
     const lower = rawLower > prevLower || prevClose < prevLower ? rawLower : prevLower;
-    // 刻意用 prevUpper/prevLower（= finalBand[i−1]）而非当根 upper/lower：见文件头基准说明
-    dir[i] = b.c > prevUpper ? 1 : b.c < prevLower ? -1 : dir[i - 1];
+    // 收盘对当根最终轨道判断翻向。上升段昨天的下轨不高于今天时，不再把出场推迟到更晚。
+    dir[i] = b.c > upper ? 1 : b.c < lower ? -1 : dir[i - 1];
     prevUpper = upper;
     prevLower = lower;
   }

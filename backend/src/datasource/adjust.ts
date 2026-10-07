@@ -1,4 +1,5 @@
 import type { KlineBar, KlinePeriod } from '@stock-agent/shared';
+import { isExchangeFund, intrabarSplitRatio, splitGapRatio } from '../market/instrument';
 
 // K 线复权修正，两层：
 // 1) frontAdjustDaily：日/周/月线自身的连续性修正。名义上前复权的源也会漏除权
@@ -57,11 +58,14 @@ export const SPLIT_GAP = 0.35;
  * 真实暴跌（>23%）误判为除权，但那时序列只有两三根 bar，影响面很小。
  * 要彻底解决得接除权公告数据源按公告因子复权。
  */
-function splitGapOf(code?: string): number {
-  if (!code) return SPLIT_GAP;
-  if (/^(300|301|688|689)/.test(code)) return 0.23;
-  if (/^(43|83|87|88|92)/.test(code)) return 0.33;
-  return 0.12;
+/**
+ * 日线除权跳空门槛，与 market/instrument.splitGapRatio 同一句。
+ * 取不到代码时退回 12%（严于 ±10%）。跨境和商品关闭推断时返回 null。
+ * @param code 6 位代码
+ * @param name 简称
+ */
+function splitGapOf(code?: string, name?: string): number | null {
+  return splitGapRatio(code, name);
 }
 
 /**
@@ -72,14 +76,9 @@ function splitGapOf(code?: string): number {
  * 跨 bar 的 `open_t / close_{t-1}` 完全看不到。后果是周线波段锚点取到折算前的高点，
  * 黄金分割回撤/扩展位整套失真（实测周线高点 2.11 vs 日线 1.05）。
  *
- * 阈值比 SPLIT_GAP 更严（0.55 而非 0.65）是有物理依据的：一周 5 个交易日按 ±10%
- * 涨跌停算，理论最大周跌幅约 -41%，达不到 -45%，故 `close/open < 0.55` 只可能是除权。
- *
- * ponytail: 只抓得住 1:2 及更激进的折算（比例 ≤ 0.5）；1:1.5 这种（0.667）抓不到。
- * bar 内无法还原折算发生的具体时点，故该 bar 自身只修 open/high（它们在折算前），
- * low/close 视为折算后不动——这是近似，要精确就得接折算公告按日期切分。
+ * ±10% 保留 0.55（严于连续五个交易日跌停 0.9^5）。±20% 改为 0.30（严于 0.8^5），不用 0.55。
+ * 无涨跌幅品种关闭这条推断。月线不调用。
  */
-const INTRABAR_SPLIT_GAP = 0.45;
 
 /**
  * 日/周/月线连续性自修正：用价格自身重建复权因子，补上数据源漏掉的除权。
@@ -102,11 +101,12 @@ const INTRABAR_SPLIT_GAP = 0.45;
 export function frontAdjustDaily(
   bars: KlineBar[],
   label?: string,
-  opts: { intrabar?: boolean; code?: string } = {},
+  opts: { intrabar?: boolean; code?: string; name?: string } = {},
 ): KlineBar[] {
   if (bars.length < 2) return bars;
-  // 判据按板别收紧：跌幅超过本板涨跌幅上限就不可能是真实行情（见 splitGapOf）
-  const gap = splitGapOf(opts.code);
+  // 跳空超过该品种涨跌幅极限才进折算判断。null 表示关闭百分比推断。
+  const gap = splitGapOf(opts.code, opts.name);
+  const innerGap = opts.intrabar === true ? intrabarSplitRatio(opts.code, opts.name) : null;
 
   // 每根 bar 各自的累乘因子：除权点之前的 bar 要把它之后所有除权因子都乘上
   const factors = new Array<number>(bars.length).fill(1);
@@ -117,9 +117,9 @@ export function frontAdjustDaily(
   for (let i = bars.length - 1; i >= 0; i--) {
     const cur = bars[i];
     // 先看 bar 内：周/月线的除权多半发生在 bar 内部，跨 bar 看不到
-    if (opts.intrabar === true && cur.open > 0 && cur.close > 0) {
+    if (innerGap != null && cur.open > 0 && cur.close > 0) {
       const inner = cur.close / cur.open;
-      if (inner < 1 - INTRABAR_SPLIT_GAP) {
+      if (inner < innerGap) {
         selfFactors[i] = inner;
         acc *= inner;
         hits.push({ time: `${cur.time}(bar内)`, ratio: inner });
@@ -129,8 +129,11 @@ export function frontAdjustDaily(
     const prev = bars[i - 1];
     if (prev.close > 0 && cur.open > 0) {
       const r = cur.open / prev.close;
-      // 只修向下跳空，见 SPLIT_GAP 注释：向上的大跳空可能是新股上市初期的真实暴涨
-      if (r < 1 - gap) {
+      // 向下：超过该品种涨跌幅极限才当除权或份额折算。现金分红通常到不了这条线，不放大量。
+      const downSplit = gap != null && r < 1 - gap;
+      // 向上份额合并只认基金。股票向上大跳空可能是新股真实暴涨，不当折算。
+      const upMerge = gap != null && !!opts.code && isExchangeFund(opts.code) && r > 1 + gap;
+      if (downSplit || upMerge) {
         acc *= r;
         hits.push({ time: cur.time, ratio: r });
       }

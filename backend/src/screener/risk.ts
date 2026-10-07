@@ -1,4 +1,5 @@
 import type { ScoredRow } from './scorer';
+import { isSealedLimit, limitRatio } from '../market/instrument';
 
 // 规则风险标签 + 组合行业去集中：在 LLM 研判之外，补一层确定性的风险提示与分散约束，
 // 避免 TopN 全压同一行业 / 全是高位涨停股。纯规则、零取数。
@@ -8,11 +9,13 @@ export function ruleRiskTags(row: ScoredRow['row']): string[] {
   const tags: string[] = [];
   // 涨跌幅取不到时不贴涨跌类标签，但要说出来——
   // 没有标签会被读成「今天很平静」，而事实是这只的涨跌幅根本没取到
-  if (row.pct == null) tags.push('涨跌幅取不到');
+  if (row.pct == null || !(row.price > 0)) tags.push('涨跌幅取不到');
   else {
-    if (row.pct >= 9) tags.push('高位涨停');
+    const prevClose = row.price / (1 + row.pct / 100);
+    const ratio = limitRatio(row.code, { name: row.name });
+    if (isSealedLimit(row.price, prevClose, ratio, 'up')) tags.push('涨停');
     else if (row.pct >= 7) tags.push('当日大涨');
-    if (row.pct <= -7) tags.push('当日暴跌');
+    if (isSealedLimit(row.price, prevClose, ratio, 'down')) tags.push('暴跌');
   }
   if (row.marketCap != null && row.marketCap < 30) tags.push('微盘股');
   if (row.pe != null && row.pe <= 0) tags.push('当前亏损');

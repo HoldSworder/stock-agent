@@ -12,6 +12,7 @@ import { listPool } from '../etf/repo';
 import { listUniverse } from '../modes/universeRepo';
 import { listWatch } from '../watchlist';
 import { resolveCosts } from '../backtest/costs';
+import { sellStampBps, transferFeeBps } from '../market/instrument';
 import { buildSeries, evalGroup, describeRule, isBacktestableRule, type Series } from './rules';
 import { validatePlaybookSpec } from './validate';
 import { PLAYBOOK_RULE_CAPABILITY } from '@stock-agent/shared';
@@ -109,15 +110,12 @@ export function assertRunnableSpec(spec: PlaybookSpec | null | undefined): asser
 }
 
 /**
- * 单边成本率（bps → 小数）与固定项分离：
- * 买入 = 佣金 + 过户费 + 滑点；卖出 = 佣金 + 过户费 + 印花税 + 滑点。
+ * 单边成本率。买入不含印花税。卖出按当日税率整笔计。
+ * 场内基金印花税和过户费都是 0。股票过户费保持双边 0.1bps。
  */
-function sideCostRate(costs: BacktestCosts, side: 'buy' | 'sell'): number {
-  const bps =
-    costs.commissionBps +
-    costs.transferFeeBps +
-    costs.slippageBps +
-    (side === 'sell' ? costs.stampDutyBps : 0);
+function sideCostRate(costs: BacktestCosts, side: 'buy' | 'sell', code: string, tradeDate: string): number {
+  const stamp = side === 'sell' ? sellStampBps(code, tradeDate) : 0;
+  const bps = costs.commissionBps + transferFeeBps(code) + costs.slippageBps + stamp;
   return bps / 10000;
 }
 
@@ -127,10 +125,14 @@ function netReturnPct(
   exitPrice: number,
   costs: BacktestCosts,
   notional: number,
+  code: string,
+  entryDate: string,
+  exitDate: string,
+  chargeSellStamp: boolean,
 ): number {
   if (!(entryPrice > 0)) return 0;
-  const buyRate = sideCostRate(costs, 'buy');
-  const sellRate = sideCostRate(costs, 'sell');
+  const buyRate = sideCostRate(costs, 'buy', code, entryDate);
+  const sellRate = chargeSellStamp ? sideCostRate(costs, 'sell', code, exitDate) : sideCostRate(costs, 'buy', code, exitDate);
   const gross = exitPrice / entryPrice;
   // 最低佣金：按名义本金折算成额外费率，双边各一次
   const minFeeRate =
@@ -207,11 +209,11 @@ function runSymbol(
         entryPrice,
         exitDate: bar.time,
         exitPrice,
-        returnPct: netReturnPct(entryPrice, exitPrice, costs, notional),
+        returnPct: netReturnPct(entryPrice, exitPrice, costs, notional, s.code, bars[entryIndex].time, bar.time, true),
         holdBars: i - entryIndex,
         exitReason: pendingReason,
       });
-      equity *= 1 + netReturnPct(entryPrice, exitPrice, costs, notional) / 100;
+      equity *= 1 + netReturnPct(entryPrice, exitPrice, costs, notional, s.code, bars[entryIndex].time, bar.time, true) / 100;
       entryIndex = -1;
       entryPrice = 0;
       pending = null;
@@ -247,7 +249,8 @@ function runSymbol(
   // 数据结束仍持仓：按最后一根收盘平掉，避免把浮盈当已实现收益漏记
   if (entryIndex >= 0) {
     const last = bars[bars.length - 1];
-    const ret = netReturnPct(entryPrice, last.close, costs, notional);
+    // 期末仍持有：按收盘计价，不提前扣卖出印花税
+    const ret = netReturnPct(entryPrice, last.close, costs, notional, s.code, bars[entryIndex].time, last.time, false);
     trades.push({
       code: s.code,
       name,
@@ -428,9 +431,10 @@ export async function runPlaybookBacktest(spec: PlaybookSpec): Promise<PlaybookB
     `离场兜底：止损 ${spec.stopLossPct ?? '—'}% / 止盈 ${spec.takeProfitPct ?? '—'}% / 持有上限 ${spec.maxHoldBars ?? '—'} 根`,
     `成交价怎么算：信号收盘确认，下一根 K 线${spec.fill === 'nextClose' ? '收盘' : '开盘'}成交，买入当根不卖（T+1）`,
     `成本：佣金双边 ${costs.commissionBps}bps（最低 ${costs.minCommission} 元，按 ${NOTIONAL} 元名义本金折算费率）` +
-      ` + 过户费双边 ${costs.transferFeeBps}bps + 印花税卖出 ${costs.stampDutyBps}bps + 滑点双边 ${costs.slippageBps}bps`,
+      ` + 过户费按品种双边计 + 滑点双边 ${costs.slippageBps}bps。` +
+      `买入不含印花税；已平仓的卖出按卖出日税率整笔扣；期末仍持有的不提前扣。`,
     '组合怎么算：每只标的独立一份资金、同时最多一笔持仓，总权益按各标的等额合成',
-    '权益曲线含持仓期浮动盈亏（按收盘市值计，浮盈尚未扣卖出侧成本）；逐笔收益为已实现、已扣双边成本',
+    '权益曲线含持仓期浮动盈亏（按收盘市值计）。已平仓的卖出印花税已从这笔收益和曲线里扣除；期末仍持有的不提前扣。',
   ];
   const coverage: PlaybookCoverage = {
     requested: universe.length,

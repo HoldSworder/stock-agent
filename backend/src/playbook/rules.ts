@@ -1,4 +1,6 @@
 import { BollingerBands, EMA, MACD, RSI } from 'trading-signals';
+import { kdjTongdaxin } from '../market/kdj';
+import { isSealedLimit, limitRatio } from '../market/instrument';
 import {
   PLAYBOOK_RULE_CAPABILITY,
   type KlineBar,
@@ -76,33 +78,9 @@ function emaSeries(values: number[], period: number): Array<number | null> {
 const MACD_STABLE_BARS = 26 + 9;
 
 /** KDJ 参数（通达信默认 9,3,3） */
-const KDJ_N = 9;
-
-/**
- * 国内口径 KDJ(9,3,3)：RSV 的 K/D 用 1/3 权重递推（SMMA），初值 50。
- * 不能用 trading-signals 的 StochasticOscillator——它是国际口径，内部对 fastK 做 SMA 平滑，
- * 只有 j=3k-2d 这一步和国内一致；用户按通达信读数写的 `kAbove: 80` 会命中完全不同的点位。
- * 同文件 MACD 已明确标注 CN 口径，这里对齐。
- */
+/** 国内口径 KDJ 与 market/kdj.ts 同一句。 */
 function kdjSeriesCn(bars: KlineBar[]): Series['kdj'] {
-  const out: Series['kdj'] = [];
-  let k = 50;
-  let d = 50;
-  for (let i = 0; i < bars.length; i++) {
-    if (i < KDJ_N - 1) {
-      out.push(null);
-      continue;
-    }
-    const win = bars.slice(i - KDJ_N + 1, i + 1);
-    const hh = Math.max(...win.map((b) => b.high));
-    const ll = Math.min(...win.map((b) => b.low));
-    // 窗口内无振幅（连续一字板）时 RSV 无定义，沿用上一根 K/D，不用 0 或 100 顶替
-    const rsv = hh > ll ? ((bars[i].close - ll) / (hh - ll)) * 100 : k;
-    k = (2 / 3) * k + (1 / 3) * rsv;
-    d = (2 / 3) * d + (1 / 3) * k;
-    out.push({ k, d, j: 3 * k - 2 * d });
-  }
-  return out;
+  return kdjTongdaxin(bars);
 }
 
 /** 遍历规则收集需要预计算的均线，避免为未用到的周期做无谓计算 */
@@ -188,13 +166,6 @@ export function buildSeries(code: string, bars: KlineBar[], groups: PlaybookRule
   }
 
   return { code, bars, ma, macd, kdj, rsi, boll };
-}
-
-/** 按代码段判定涨跌停幅度（%）：创业板/科创板 20%，北交所 30%，其余主板 10% */
-function limitPct(code: string): number {
-  if (/^(30|68)/.test(code)) return 20;
-  if (/^(43|83|87|88|92)/.test(code)) return 30;
-  return 10;
 }
 
 function maAt(s: Series, maType: string, period: number, i: number): number | null {
@@ -314,11 +285,23 @@ export function evalRule(rule: PlaybookRule, s: Series, i: number, hold?: HoldCo
     }
 
     case 'consecutive': {
+      // 阳线是收盘高于开盘。连涨不走这里。
+      if (i < rule.bars - 1) return false;
+      for (let k = 0; k < rule.bars; k++) {
+        const cur = bars[i - k];
+        if (!(cur.open > 0)) return false;
+        if (rule.dir === 'up' ? !(cur.close > cur.open) : !(cur.close < cur.open)) return false;
+      }
+      return true;
+    }
+
+    case 'closeStreak': {
+      // 连涨是收盘高于前收。不把这件事叫做阳线。
       if (i < rule.bars) return false;
       for (let k = 0; k < rule.bars; k++) {
         const cur = bars[i - k];
         const prev = bars[i - k - 1];
-        if (!prev || prev.close <= 0) return false;
+        if (!prev || !(prev.close > 0)) return false;
         if (rule.dir === 'up' ? !(cur.close > prev.close) : !(cur.close < prev.close)) return false;
       }
       return true;
@@ -327,10 +310,8 @@ export function evalRule(rule: PlaybookRule, s: Series, i: number, hold?: HoldCo
     case 'limit': {
       const prev = bars[i - 1];
       if (!prev || prev.close <= 0) return false;
-      const pct = ((bar.close - prev.close) / prev.close) * 100;
-      const cap = limitPct(s.code);
-      // 涨跌停以收盘价相对昨收达到幅度上限判定（含四舍五入误差余量 0.5%）
-      return rule.dir === 'up' ? pct >= cap - 0.5 : pct <= -(cap - 0.5);
+      const ratio = limitRatio(s.code, { date: bar.time.slice(0, 10) });
+      return isSealedLimit(bar.close, prev.close, ratio, rule.dir);
     }
 
     case 'pnlPct': {
@@ -434,6 +415,8 @@ export function describeRule(rule: PlaybookRule): string {
       return `距近 ${rule.days} 根高点回撤 ${opText[rule.op]} ${rule.value}%`;
     case 'consecutive':
       return `连续 ${rule.bars} 根${rule.dir === 'up' ? '阳' : '阴'}线`;
+    case 'closeStreak':
+      return `连续 ${rule.bars} 根${rule.dir === 'up' ? '连涨' : '连跌'}`;
     case 'limit':
       return rule.dir === 'up' ? '当根涨停' : '当根跌停';
     case 'pnlPct':

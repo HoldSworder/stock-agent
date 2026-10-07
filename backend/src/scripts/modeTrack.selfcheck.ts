@@ -101,7 +101,7 @@ assert.equal(family(shortName('证券ETF')), '金融');
 const FLAT = DATES.map(() => 100);
 const ZERO = DATES.map(() => 0);
 
-// A1 选主线主题的代表标的，且买入发生在锚点当天（idx 0 即调仓日）
+// A1 选主线主题的代表标的。收盘确认，下一交易日开盘才成交。
 {
   const strong = buildSeries(
     'AAA',
@@ -113,12 +113,12 @@ const ZERO = DATES.map(() => 0);
   const r = replay(baseSpec, [strong, weak]);
   assert.equal(r.trades.length, 1, 'A1 应只有一笔（期末持有中）');
   assert.equal(r.trades[0].code, 'AAA');
-  assert.equal(r.trades[0].entryDate, DATES[0]);
+  assert.equal(r.trades[0].entryDate, DATES[1]);
   assert.equal(r.trades[0].reason, '持有中');
-  assert.deepEqual(r.days[0].events, [{ kind: 'enter', detail: '买入 芯片(AAA)：主题 芯片宽泛' }]);
+  assert.deepEqual(r.days[1].events, [{ kind: 'enter', detail: '买入 芯片(AAA)：主题 芯片宽泛' }]);
 }
 
-// A2 最短持有拦截换手：第 4 日 BBB 已追平（打平后按家族名反超），但满 8 日才允许换
+// A2 最短持有从成交日起算。第 4 日 BBB 已追平，第 8 日仍不满 8 日；第 12 日收盘确认，次日开盘换手。
 {
   const aaScore = DATES.map(() => 0.2);
   const bbScore = DATES.map((_, i) => 0.05 * i);
@@ -128,21 +128,21 @@ const ZERO = DATES.map(() => 0);
   ]);
   assert.equal(r.trades[0].code, 'AAA');
   assert.equal(r.trades[0].reason, '主线主题替换');
-  assert.equal(r.trades[0].exitDate, DATES[8], `A2 换手应发生在第 8 日，实际 ${r.trades[0].exitDate}`);
+  assert.equal(r.trades[0].exitDate, DATES[13], `A2 换手次日开盘成交，实际 ${r.trades[0].exitDate}`);
   assert.equal(r.trades[1].code, 'BBB');
-  assert.equal(r.trades[1].entryDate, DATES[8]);
+  assert.equal(r.trades[1].entryDate, DATES[13]);
 }
 
-// A3 盈利保护：浮盈超 15% 后自峰值回撤超 6%，在最近的调仓日了结
+// A3 盈利保护：浮盈超 15% 后自峰值回撤超 6%，在最近的调仓日收盘确认，次日开盘了结
 {
-  // 第 8 日冲到 +40% 见顶，随后回落到 -10%（相对峰值），第 12 日为调仓日
+  // 第 8 日冲到 +40% 见顶，随后回落到 -10%（相对峰值），第 12 日收盘确认
   const px = DATES.map((_, i) => (i <= 8 ? 100 * (1 + 0.05 * i) : 140 * 0.9));
   const r = replay(baseSpec, [
     buildSeries('AAA', '芯片', px, DATES.map(() => 0.5)),
     buildSeries('BBB', '证券', FLAT, ZERO),
   ]);
   assert.equal(r.trades[0].reason, '盈利保护15%/6%');
-  assert.equal(r.trades[0].exitDate, DATES[12], `A3 应在第 12 日了结，实际 ${r.trades[0].exitDate}`);
+  assert.equal(r.trades[0].exitDate, DATES[13], `A3 应在确认后的下一交易日开盘了结，实际 ${r.trades[0].exitDate}`);
 }
 
 // A4 除权修正：中途 1 拆 2 的价格跳变要被前复权抹平
@@ -275,19 +275,14 @@ const ZERO = DATES.map(() => 0);
   );
   assert.equal(supertrendDirection([], 3, 1).length, 0, 'A8f 空序列不应报错');
 
-  // (g) M1：翻向刻意用**前一根**最终轨道，比教科书 Supertrend 慢一根 bar。
-  //     基准 mode/etf-mainline-offense/etf-mainline-offense-research.py：
-  //     st[i] = 1 if close[i] > fu[i-1] else (-1 if close[i] < fl[i-1] else st[i-1])
-  //     这里钉住这一根滞后：改用当根轨道会让 dir[4] 提前翻空，与研究留档对不上。
+  // (g) Supertrend(10,3)：收盘对当根最终轨道判断翻向。上升段不再因昨天的下轨把出场推迟。
   const lag: Bar[] = [
     ...Array.from({ length: 4 }, (_, i) => mk(i + 1, 100 + i, 101 + i, 99 + i, 100.5 + i)),
-    // 宽幅长上影：当根 finalLower≈101.92 已在收盘价 101.6 之上，但前一根 finalLower=101 还在其下
     mk(5, 110, 112, 101.5, 101.6),
     mk(6, 110, 112, 101.5, 101.6),
   ];
   const lagDir = supertrendDirection(lag, 3, 1);
-  assert.equal(lagDir[4], 1, `A8g 用前一根轨道判向，当根不得翻空，实际 ${lagDir.join(',')}`);
-  assert.equal(lagDir[5], -1, 'A8g 滞后恰好一根：下一根才认翻空');
+  assert.equal(lagDir[4], -1, `A8g 当根收盘已在最终下轨之下，应翻空，实际 ${lagDir.join(',')}`);
 }
 
 // A8h C1：口径键必须只随**申报池**变化，不随「今天取数成功的子集」抖动。

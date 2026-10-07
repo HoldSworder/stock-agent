@@ -1,5 +1,6 @@
 import type { DataSourceRoute, KlineBar, KlinePeriod, StockQuote } from '@stock-agent/shared';
 import { QUOTE_PROVIDERS, KLINE_PROVIDERS_INTRADAY, KLINE_PROVIDERS_DAILY } from './providers';
+import { getQuotesEastmoney } from '../market/eastmoney';
 import { isSourceEnabled } from './registry';
 import { isMinutePeriod, frontAdjustDaily, frontAdjustMinute } from './adjust';
 import { getDailyCached } from './klineCache';
@@ -69,13 +70,19 @@ async function backfillNames(quotes: StockQuote[], servedBy: string): Promise<St
   return applyCache();
 }
 
-/** 批量实时报价（a-stock-data → 东财自动兜底；首选源缺名称时自动回填） */
-export async function getQuotes(codes: string[]): Promise<StockQuote[]> {
+/**
+ * 批量实时报价。
+ * liveOnly 时东财不切 push2delay。急跌、炸板、回封必须用这个开关，延迟价不能排第二继续当报价。
+ */
+export async function getQuotes(codes: string[], opts: { liveOnly?: boolean } = {}): Promise<StockQuote[]> {
   const errors: string[] = [];
   for (const p of QUOTE_PROVIDERS) {
     if (!isSourceEnabled(p.sourceId)) continue;
     try {
-      const r = await p.fn(codes);
+      const r =
+        opts.liveOnly && p.sourceId === 'eastmoney'
+          ? await getQuotesEastmoney(codes, { allowDelay: false })
+          : await p.fn(codes);
       lastServed.quote = p.sourceId;
       return await backfillNames(r, p.sourceId);
     } catch (e) {
@@ -134,13 +141,7 @@ export async function fetchDailyAdjusted(
 ): Promise<KlineBar[]> {
   const period = opts.period ?? 'day';
   const bars = await fetchKlineRaw(code, period, limit, secid);
-  // 周线额外开 bar 内检测：除权发生在周中时跳空被吸收进那根 bar 内部，跨 bar 看不到，
-  // 不补这一条周线波段锚点会取到折算前的高点，黄金分割整套失真（详见 INTRABAR_SPLIT_GAP）。
-  //
-  // 月线**不开**：INTRABAR_SPLIT_GAP=0.45 的物理依据是「一周 5 个交易日按 ±10% 算最多跌 41%，
-  // 跌破 45% 只可能是除权」，这条推理对 20 个交易日的月线完全不成立——连续跌停的个股
-  // 单月跌 45% 是真实行情。在月线上开等于把一次暴跌误判成折算，把那之前的全部历史整体缩放。
-  // 月线漏掉月中折算只影响月线图这一个视图（PLAN_PERIODS 不含月线），代价远小于污染历史。
+  // 周线按该品种自己的周内门槛（±10% 用 0.55，±20% 用 0.30）。月线不开。
   return frontAdjustDaily(bars, opts.quiet ? undefined : `${lastServed.kline ?? '未知源'} ${code}`, {
     intrabar: period === 'week',
     // 传 code 让判据按板别收紧：主板一天跌不过 10%，跌 25% 只能是除权

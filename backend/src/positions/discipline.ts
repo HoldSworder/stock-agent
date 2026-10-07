@@ -16,6 +16,7 @@ import type {
   RiskBudgetTier,
 } from '@stock-agent/shared';
 import { db, schema } from '../db/client';
+import { isExchangeFund } from '../market/instrument';
 import { getMeta, setMeta } from '../settings';
 import { fetchRealPositions } from '../realPositions';
 import { shanghaiDateStr } from '../market/calendar';
@@ -53,17 +54,12 @@ const ETF_DEFAULT_CONFIG: DisciplineConfig = {
 };
 
 /**
- * 判定是否 ETF/LOF 场内基金：深市 15xxxx 与沪市 5xxxxx，名称匹配作补充。
- * 旧写法 `5\d{4}` 只有 5 位，512880/588000/563000 这类沪市 ETF 匹配不到，
- * 名称里又不一定带「ETF/LOF」，于是被当个股套用 8% 止损（应为 12%）、单票上限从 40% 收到 30%。
- * 但 1 开头只能收到 `15\d{4}`：放宽成 `1\d{5}` 会把沪市转债 110/113、深市转债 123/127
- * 全划进 ETF 口径，可转债日内波动远大于 ETF，套 12% 止损与 40% 单票上限是在放松风控。
+ * 场内基金与代码段同一句：15、16、51、52、56、58。16 开头按基金处理，不看名称里有没有 LOF。
+ * @param code 6 位代码
  */
-export function isEtfPosition(code: string, name: string): boolean {
-  return /^(15\d{4}|5\d{5})$/.test(code) || /ETF|LOF/i.test(name);
+export function isEtfPosition(code: string, _name?: string): boolean {
+  return isExchangeFund(code);
 }
-
-/** 读取账户级默认纪律（meta JSON，缺省回退内置默认） */
 export function getDisciplineConfig(): DisciplineConfig {
   const raw = getMeta(CONFIG_META_KEY);
   if (!raw) return { ...DEFAULT_CONFIG };
@@ -288,8 +284,12 @@ function evalPosition(
     });
   }
 
-  // 止盈
-  if (holdPct >= rule.takeProfitPct) {
+  // 不再用相对成本上涨 40% 作为统一止盈。
+  // 试探仓走波段出场；已过门槛的 ETF 主线走 Supertrend(10,3)。
+  // 股票默认止盈线保留。用户单独改过 ETF 止盈线时仍按那条线提示。
+  const etfDefaultTakeProfit =
+    isEtfPosition(p.code, p.name) && rule.takeProfitPct === ETF_DEFAULT_CONFIG.takeProfitPct;
+  if (!etfDefaultTakeProfit && holdPct >= rule.takeProfitPct) {
     flags.push({
       kind: 'take_profit',
       severity: 'high',
@@ -385,6 +385,7 @@ export async function evaluateDiscipline(portfolio?: RealPortfolio): Promise<Dis
         stopDistancePct: rule.stopLossPct,
         totalEquity: pf.totalAsset,
         currentShares: p.qty,
+        code: p.code,
         bars: barsByCode.get(p.code),
         fixedCapPct: rule.singleMaxWeightPct,
       },

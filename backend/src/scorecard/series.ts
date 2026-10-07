@@ -3,9 +3,10 @@ import { sqlite } from '../db/client';
 // 判分要用的收盘价序列。从本地日线表读，不联网——判分是反复跑的事，
 // 每次联网既慢又会因为源不同导致同一批信号跑出不同分数。
 
-/** 某标的的收盘价序列（交易日升序） */
+/** 某标的的日线。成交从信号日的下一交易日开盘起。 */
 export interface Series {
   dates: string[];
+  opens: number[];
   closes: number[];
   idx: Map<string, number>;
 }
@@ -27,22 +28,22 @@ export function rollForwardDays(from: string, to: string): number {
 }
 
 /**
- * 在某交易日买入、持有 n 个交易日的收益。纯函数，不碰 DB。
- * 该日无行情（停牌/未上市）时向后顺延到第一个有行情的交易日；
- * 顺延超过上限、仍取不到、或未来不足 n 根，一律 null。
+ * 收盘确认的信号，成交从下一交易日开盘起，再持有 n 个交易日，看到那天的收盘。
+ * 信号当天的涨跌不计入。开盘取不到、或持有窗口不够，返回 null。
  */
 export function forwardReturnOn(s: Series | undefined, date: string, n: number): number | null {
-  if (!s) return null;
+  if (!s || !(n > 0)) return null;
   let i = s.idx.get(date);
   if (i == null) {
     i = s.dates.findIndex((d) => d >= date);
     if (i < 0) return null;
     if (rollForwardDays(date, s.dates[i]) > MAX_ROLL_FORWARD_DAYS) return null;
   }
-  const j = i + n;
-  if (j >= s.closes.length) return null;
-  const a = s.closes[i];
-  const b = s.closes[j];
+  const entry = i + 1;
+  const exit = i + n;
+  if (entry >= s.opens.length || exit >= s.closes.length) return null;
+  const a = s.opens[entry];
+  const b = s.closes[exit];
   if (!(a > 0) || !(b > 0)) return null;
   return b / a - 1;
 }
@@ -60,19 +61,20 @@ export function loadSeries(codes: readonly string[]): Map<string, Series> {
   const holes = codes.map(() => '?').join(',');
   const rows = sqlite
     .prepare(
-      `select code, trade_date, min(secid) as secid, close from kline_daily
+      `select code, trade_date, min(secid) as secid, open, close from kline_daily
        where provisional = 0 and code in (${holes})
        group by code, trade_date order by code, trade_date`,
     )
-    .all(...codes) as Array<{ code: string; trade_date: string; close: number }>;
+    .all(...codes) as Array<{ code: string; trade_date: string; open: number; close: number }>;
   for (const r of rows) {
     let s = out.get(r.code);
     if (!s) {
-      s = { dates: [], closes: [], idx: new Map() };
+      s = { dates: [], opens: [], closes: [], idx: new Map() };
       out.set(r.code, s);
     }
     s.idx.set(r.trade_date, s.dates.length);
     s.dates.push(r.trade_date);
+    s.opens.push(r.open);
     s.closes.push(r.close);
   }
   return out;

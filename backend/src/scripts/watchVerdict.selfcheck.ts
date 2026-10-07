@@ -254,11 +254,11 @@ const mkSignal = (
   // 按 10% 算会把北交所涨 25% 判成东财坏数据整轮跳过（rollState 也不更新），涨 10% 又误记新晋涨停
   assert.equal(limitRatioPct('830001'), 30, '北交所 8 开头为 30%');
   assert.equal(limitRatioPct('430001'), 30, '北交所 4 开头为 30%');
-  assert.equal(limitRatioPct('830001', 'ST北证'), 30, '北交所 ST 不得被主板 5% 规则改写');
+  assert.equal(limitRatioPct('830001', 'ST北证'), 5, 'ST 为 5%，不能只看代码前缀');
 
   assert.equal(approxLimitUp('688001', 100), 120, '688 涨停价按 +20% 推算');
   assert.equal(approxLimitUp('600000', 10, 'ST浦发'), 10.5, 'ST 涨停价按 +5% 推算');
-  assert.equal(approxLimitUp('830001', 100), undefined, '北交所规则不同，宁可不给涨停价也不误报');
+  assert.equal(approxLimitUp('830001', 100), 130, '北交所涨停价按 +30% 四舍五入到分');
   assert.equal(approxLimitUp('600000', 0), undefined, '无昨收不推算');
 }
 
