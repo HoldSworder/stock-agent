@@ -4,7 +4,7 @@
 
 ### Issue tracker
 
-问题与规格以 markdown 文件形式存放在本仓库 `.scratch/<feature>/` 下。见 `docs/agents/issue-tracker.md`。
+问题与规格以 markdown 文件形式存放在本机 `.scratch/<feature>/` 下，该目录不进远端。见 `docs/agents/issue-tracker.md`。
 
 ### Domain docs
 

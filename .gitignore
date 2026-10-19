@@ -20,4 +20,6 @@ mode/*/cache/
 miaoxiang/
 # 2026-08-04 误用 git reset --hard 后的变更快照，仅供本地核对
 .recovery/
+# 本地草稿：问题单、规格、回测产物只留本机，不发布到公开仓库
+.scratch/
 *.pyc

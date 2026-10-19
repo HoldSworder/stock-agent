@@ -2,6 +2,8 @@
 
 Issues and specs for this repo live as markdown files in `.scratch/`.
 
+`.scratch/` is gitignored. Files stay on this machine and are not pushed. A fresh clone will not contain them.
+
 ## Conventions
 
 - One feature per directory: `.scratch/<feature-slug>/`
