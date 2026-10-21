@@ -453,6 +453,254 @@ def _today() -> str:
     return datetime.now().strftime("%Y-%m-%d")
 
 
+def fund_nav_history(code: str, page_size: int = 20, max_pages: int = 0) -> dict:
+    """东财基金历史净值 lsjz（只读封装）。
+
+    主路径字段：date(FSRQ) / unit_nav(DWJZ) / acc_nav(LJJZ) / nav_growth_pct(JZZZL)。
+    LJJZ 累计净值作「分红再投类」总分回报候选序列；是否过研究门由 G5 复验，本端点不验收。
+    上游实际每页最多约 20 条（pageSize 请求更大也被截断）；TotalCount 在响应顶层。
+    max_pages=0 表示按 TotalCount 拉全部分页；自检请用 max_pages=1。
+    全量结果缓存到 $HOME/fund_nav/{code}.json（容器内 HOME=/data）。
+    """
+    import json
+    import time
+    from pathlib import Path as _Path
+
+    import requests
+
+    code = str(code).strip()
+    # 上游实测封顶约 20；保留参数兼容，但默认 20
+    page_size = max(1, min(int(page_size), 20))
+    max_pages = int(max_pages)
+    url = "https://api.fund.eastmoney.com/f10/lsjz"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        "Referer": "https://fundf10.eastmoney.com/",
+    }
+
+    def _f(v):
+        if v in (None, ""):
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    rows: list[dict] = []
+    total_count = None
+    page = 1
+    pages_fetched = 0
+    while True:
+        if max_pages > 0 and pages_fetched >= max_pages:
+            break
+        r = requests.get(
+            url,
+            params={"fundCode": code, "pageIndex": page, "pageSize": page_size},
+            headers=headers,
+            timeout=20,
+        )
+        r.raise_for_status()
+        payload = r.json()
+        if payload.get("ErrCode") not in (0, None):
+            raise ValueError(
+                f"eastmoney lsjz ErrCode={payload.get('ErrCode')} ErrMsg={payload.get('ErrMsg')}"
+            )
+        # TotalCount / PageSize 在响应顶层（不在 Data 内）
+        if total_count is None:
+            try:
+                total_count = int(payload.get("TotalCount") or 0)
+            except (TypeError, ValueError):
+                total_count = 0
+        data = payload.get("Data") or {}
+        batch = data.get("LSJZList") or []
+        if not batch:
+            break
+        for it in batch:
+            date = str(it.get("FSRQ") or "")[:10]
+            if not date:
+                continue
+            rows.append({
+                "date": date,
+                "unit_nav": _f(it.get("DWJZ")),
+                "acc_nav": _f(it.get("LJJZ")),
+                "nav_growth_pct": _f(it.get("JZZZL")),
+            })
+        pages_fetched += 1
+        # 去重后计数判断是否收齐
+        uniq_n = len({rec["date"] for rec in rows})
+        if max_pages == 0 and total_count and uniq_n >= total_count:
+            break
+        # 空页或明显不足一页且已无更多（无 TotalCount 时的兜底）
+        if len(batch) == 0:
+            break
+        if max_pages == 0 and (not total_count) and len(batch) < page_size:
+            break
+        page += 1
+        # 全量约 160+ 页；用短间隔，避免 EM_MIN_INTERVAL=1s 拖到数分钟
+        time.sleep(0.15)
+
+    by_date: dict[str, dict] = {}
+    for rec in rows:
+        by_date[rec["date"]] = rec
+    items = [by_date[k] for k in sorted(by_date.keys())]
+    out = {
+        "code": code,
+        "source": "eastmoney_lsjz",
+        "upstream": "https://api.fund.eastmoney.com/f10/lsjz",
+        "count": len(items),
+        "total_count_reported": total_count,
+        "earliest": items[0]["date"] if items else None,
+        "latest": items[-1]["date"] if items else None,
+        "pages_fetched": pages_fetched,
+        "fields": ["date", "unit_nav", "acc_nav", "nav_growth_pct"],
+        "note": "acc_nav=LJJZ 累计净值，作含分红再投类总分回报候选；非研究验收结论。后复权K线非本端点。",
+        "items": items,
+    }
+    if max_pages == 0 and items:
+        try:
+            cache_dir = _Path.home() / "fund_nav"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_path = cache_dir / f"{code}.json"
+            cache_path.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+            out["cache_path"] = str(cache_path)
+        except Exception as e:  # noqa
+            out["cache_error"] = str(e)[:200]
+    return out
+
+def finance_main_pit(
+    code: str,
+    page_size: int = 50,
+    max_pages: int = 1,
+    asof: str = "",
+    report_types: str = "",
+) -> dict:
+    """东财 MAINFINADATA → 规范化财务时点面板（只读封装）。
+
+    PIT 主钥匙 = notice_date（上游 NOTICE_DATE）；禁止用 report_date / update_date 当公布日。
+    asof=YYYY-MM-DD 时只返回 notice_date ≤ asof 的行；空则返回已拉取历史行供客户端自滤。
+    走 af.em_get / DATACENTER（东财限流）；分页页间依赖 em_get 闸门，勿另开裸请求。
+    本端点≠财务门过关 / ≠ READY；一期不接巨潮辅路径。
+    """
+    import json
+    from pathlib import Path as _Path
+
+    code = str(code).strip()
+    page_size = max(1, min(int(page_size), 200))
+    max_pages = int(max_pages)
+    asof = (asof or "").strip()[:10]
+    if asof and len(asof) != 10:
+        raise ValueError(f"asof 须为 YYYY-MM-DD，收到：{asof}")
+    type_set = {x.strip() for x in (report_types or "").split(",") if x.strip()}
+
+    columns = (
+        "SECURITY_CODE,SECURITY_NAME_ABBR,REPORT_DATE,REPORT_TYPE,"
+        "REPORT_DATE_NAME,NOTICE_DATE,UPDATE_DATE,EPSJB,"
+        "TOTALOPERATEREVE,PARENTNETPROFIT"
+    )
+    filter_str = f'(SECURITY_CODE="{code}")'
+    headers = {"Referer": "https://data.eastmoney.com/"}
+
+    raw_rows: list[dict] = []
+    total_reported = None
+    pages_fetched = 0
+    page = 1
+    while True:
+        if max_pages > 0 and pages_fetched >= max_pages:
+            break
+        params = {
+            "reportName": "RPT_F10_FINANCE_MAINFINADATA",
+            "columns": columns,
+            "filter": filter_str,
+            "pageNumber": str(page),
+            "pageSize": str(page_size),
+            "sortColumns": "REPORT_DATE",
+            "sortTypes": "-1",
+            "source": "WEB",
+            "client": "WEB",
+        }
+        r = af.em_get(af.DATACENTER_URL, params=params, headers=headers, timeout=25)
+        try:
+            payload = r.json()
+        except Exception as e:  # noqa
+            raise ValueError(f"eastmoney MAINFINADATA JSON 解析失败：{e}") from e
+        if not payload.get("success", True) and payload.get("result") is None:
+            raise ValueError(
+                f"eastmoney MAINFINADATA success=false message={payload.get('message')}"
+            )
+        result = payload.get("result") or {}
+        if total_reported is None:
+            try:
+                total_reported = int(result.get("count") or 0)
+            except (TypeError, ValueError):
+                total_reported = 0
+        batch = result.get("data") or []
+        if not batch:
+            break
+        raw_rows.extend(batch)
+        pages_fetched += 1
+        if max_pages == 0 and total_reported and len(raw_rows) >= total_reported:
+            break
+        if max_pages == 0 and len(batch) < page_size:
+            break
+        page += 1
+
+    items: list[dict] = []
+    for row in raw_rows:
+        notice = str(row.get("NOTICE_DATE") or "")[:10]
+        report = str(row.get("REPORT_DATE") or "")[:10]
+        if asof and notice and notice > asof:
+            continue
+        rt = row.get("REPORT_TYPE") or ""
+        if type_set and rt not in type_set:
+            continue
+        items.append({
+            "code": row.get("SECURITY_CODE"),
+            "name": row.get("SECURITY_NAME_ABBR"),
+            "report_date": report,
+            "report_type": rt,
+            "report_name": row.get("REPORT_DATE_NAME"),
+            "notice_date": notice,  # PIT 主钥匙
+            "eps": row.get("EPSJB"),
+            "revenue": row.get("TOTALOPERATEREVE"),
+            "parent_net_profit": row.get("PARENTNETPROFIT"),
+            "update_date": str(row.get("UPDATE_DATE") or "")[:10],  # 诊断用，勿当 PIT
+        })
+    items.sort(key=lambda x: (x["notice_date"] or "", x["report_date"] or ""))
+
+    notices = [x["notice_date"] for x in items if x.get("notice_date")]
+    out = {
+        "code": code,
+        "source": "eastmoney_mainfinadata",
+        "upstream": "RPT_F10_FINANCE_MAINFINADATA",
+        "asof": asof or None,
+        "report_types": report_types or None,
+        "count": len(items),
+        "total_reported": total_reported,
+        "pages_fetched": pages_fetched,
+        "earliest_notice": notices[0] if notices else None,
+        "latest_notice": notices[-1] if notices else None,
+        "fields": [
+            "code", "name", "report_date", "report_type", "report_name",
+            "notice_date", "eps", "revenue", "parent_net_profit", "update_date",
+        ],
+        "note": (
+            "PIT 用 notice_date≤asof；勿用 report_date/update_date 当公布日。"
+            "主营指标非全三表。≠财务门过关/≠READY。"
+        ),
+        "items": items,
+    }
+    # 全量且无 asof/类型过滤时可选落盘（不当事研究权威）
+    if max_pages == 0 and not asof and not type_set and items:
+        try:
+            cache_dir = _Path.home() / "finance_pit"
+            cache_dir.mkdir(parents=True, exist_ok=True)
+            cache_path = cache_dir / f"{code}.json"
+            cache_path.write_text(json.dumps(out, ensure_ascii=False), encoding="utf-8")
+            out["cache_path"] = str(cache_path)
+        except Exception as e:  # noqa
+            out["cache_error"] = str(e)[:200]
+    return out
+
 # ── 端点注册表 ────────────────────────────────────────────────────────────
 # 每项：fn / layer / params[(name,type,required,default)] / desc / sample(自检用)
 # type ∈ {str,int,float,codes(逗号列表)}
@@ -573,6 +821,10 @@ _SPEC: list[dict] = [
     {"name": "dividend_history", "fn": _af("dividend_history"), "layer": "资金面",
      "params": [("code", "str", True, None), ("page_size", "int", False, 20)],
      "desc": "分红送转历史（派息/送股/转增 + 进度）", "sample": {"code": "600519"}},
+    {"name": "fund_nav_history", "fn": fund_nav_history, "layer": "资金面",
+     "params": [("code", "str", True, None), ("page_size", "int", False, 20), ("max_pages", "int", False, 0)],
+     "desc": "东财基金历史净值 lsjz：date/unit_nav(DWJZ)/acc_nav(LJJZ累计净值)/nav_growth_pct；上游每页约20条；max_pages=0 按TotalCount拉全量。累计净值作债/基金总分回报候选（须 G5 复验，本端点不验收）；后复权非本端点",
+     "sample": {"code": "511010", "page_size": 20, "max_pages": 1}},
     {"name": "stock_fund_flow_120d", "fn": _af("stock_fund_flow_120d"), "layer": "资金面",
      "params": [("code", "str", True, None)],
      "desc": "个股资金流 120 日（日级主力/大单/中单/小单净流入）", "sample": {"code": "000858"}},
@@ -599,6 +851,17 @@ _SPEC: list[dict] = [
     {"name": "sina_financial_report", "fn": _af("sina_financial_report"), "layer": "基础数据",
      "params": [("code", "str", True, None), ("report_type", "str", False, "lrb"), ("num", "int", False, 8)],
      "desc": "新浪财报三表（lrb利润/fzb资产负债/llb现金流）", "sample": {"code": "600519", "num": 2}},
+    {"name": "finance_main_pit", "fn": finance_main_pit, "layer": "基础数据",
+     "params": [
+         ("code", "str", True, None),
+         ("page_size", "int", False, 50),
+         ("max_pages", "int", False, 1),
+         ("asof", "str", False, ""),
+         ("report_types", "str", False, ""),
+     ],
+     "desc": "东财 MAINFINADATA 财务时点：notice_date(公布日PIT键)+report_date+eps/营收/归母净利；可选 asof=YYYY-MM-DD 过滤 notice_date≤T；UPDATE_DATE 仅诊断勿当公布日。≠财务门过关。一期无巨潮辅路径",
+     "sample": {"code": "600519", "max_pages": 1}},
+    # Layer 7 公告,
     {"name": "hist_investable_universe", "fn": hist_investable_universe, "layer": "基础数据",
      "params": [
          ("asof", "str", False, ""),
