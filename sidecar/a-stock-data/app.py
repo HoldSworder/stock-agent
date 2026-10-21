@@ -32,6 +32,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 import astock_functions as af
+from hist_investable_universe import hist_investable_universe as _hiu_fn
 
 # 东财限流间隔可经环境变量覆盖（抽取出的模块默认 1.0s）
 try:
@@ -459,6 +460,40 @@ def _af(name: str) -> Callable | None:
     return getattr(af, name, None)
 
 
+def hist_investable_universe(
+    asof: str = "",
+    month: str = "",
+    exclude_st: int = 1,
+    st_mode: str = "daily",
+    miss_policy: str = "conservative_out",
+    panel_dir: str = "",
+    basic_path: str = "",
+    trade_dates_path: str = "",
+    st_daily_path: str = "",
+    st_events_path: str = "",
+    include_members: int = 1,
+) -> dict:
+    """历史可投资池（沪深A）：日频 Baostock isST 叠层。默认 daily+conservative_out。
+
+    环境变量：HIST_ISST_PANEL_DIR / HIST_STOCK_BASIC_PATH / HIST_TRADE_DATES_PATH。
+    箱侧 baostock:10030 不通；Mac panel 为 SoT。≠清B63≠冻≠开跑。
+    """
+    return _hiu_fn(
+        asof=asof,
+        month=month,
+        exclude_st=exclude_st,
+        st_mode=st_mode,
+        miss_policy=miss_policy,
+        panel_dir=panel_dir,
+        basic_path=basic_path,
+        trade_dates_path=trade_dates_path,
+        st_daily_path=st_daily_path,
+        st_events_path=st_events_path,
+        include_members=include_members,
+    )
+
+
+
 _SPEC: list[dict] = [
     # Layer 1 行情（mootdx/腾讯/百度，不封 IP 优先）
     {"name": "mootdx_kline", "fn": mootdx_kline, "layer": "行情",
@@ -564,6 +599,22 @@ _SPEC: list[dict] = [
     {"name": "sina_financial_report", "fn": _af("sina_financial_report"), "layer": "基础数据",
      "params": [("code", "str", True, None), ("report_type", "str", False, "lrb"), ("num", "int", False, 8)],
      "desc": "新浪财报三表（lrb利润/fzb资产负债/llb现金流）", "sample": {"code": "600519", "num": 2}},
+    {"name": "hist_investable_universe", "fn": hist_investable_universe, "layer": "基础数据",
+     "params": [
+         ("asof", "str", False, ""),
+         ("month", "str", False, ""),
+         ("exclude_st", "int", False, 1),
+         ("st_mode", "str", False, "daily"),
+         ("miss_policy", "str", False, "conservative_out"),
+         ("panel_dir", "str", False, ""),
+         ("basic_path", "str", False, ""),
+         ("trade_dates_path", "str", False, ""),
+         ("st_daily_path", "str", False, ""),
+         ("st_events_path", "str", False, ""),
+         ("include_members", "int", False, 1),
+     ],
+     "desc": "历史可投资沪深A池(asof)。默认 st_mode=daily + miss_policy=conservative_out + exclude_st=1；ST=Mac Baostock日频isST panel(HIST_ISST_PANEL_DIR)；禁止够用路径名称启发式；北交排除、退市当日OUT。需 HIST_STOCK_BASIC_PATH/HIST_TRADE_DATES_PATH。≠池总门过关≠清B63",
+     "sample": None},
     # Layer 7 公告
     {"name": "cninfo_announcements", "fn": _af("cninfo_announcements"), "layer": "公告",
      "params": [("code", "str", True, None), ("page_size", "int", False, 30)],
