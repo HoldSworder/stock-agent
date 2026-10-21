@@ -14,7 +14,7 @@ COPY extract.py .
 COPY vendor ./vendor
 RUN python extract.py
 
-COPY app.py .
+COPY app.py hist_investable_universe.py .
 
 # HOME 指向持久卷：mootdx 配置(~/.mootdx) 与北向自缓存(~/.tradingagents) 落盘不丢
 ENV HOME=/data
