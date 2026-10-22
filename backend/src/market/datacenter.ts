@@ -114,7 +114,7 @@ export async function getDragonTigerEntries(
  */
 export async function getDragonTiger(code: string, limit = 5): Promise<string> {
   const { name, entries } = await getDragonTigerEntries(code, limit);
-  if (!entries.length) return '近期无龙虎榜上榜记录。';
+  if (!entries.length) return '未披露。';
   const lines = entries.map(
     (e) =>
       `${e.date} 涨跌${e.pct.toFixed(2)}% ` +

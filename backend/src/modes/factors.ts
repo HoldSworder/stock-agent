@@ -1,4 +1,5 @@
 import { callAstock } from '../astock/client';
+import { isExchangeFund, splitGapRatio } from '../market/instrument';
 
 // 量价因子链（TS 移植）：与 mode/etf-mainline-factor-sweep 的 python 研究脚本同源同口径，
 // 供站内 system 跟踪引擎复算 mode/ 里已回测过的策略。取数走 a-stock-data sidecar 的
@@ -66,19 +67,27 @@ export async function fetchBars(code: string): Promise<Bar[]> {
     bars.push({ d, o, h, l, c, v, amt });
   }
   bars.sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : 0));
-  return adjustSplits(bars);
+  return adjustSplits(bars, code);
 }
 
-/** python adjust_splits()：用相邻收盘的异常跳变（<0.65 或 >1.5）反推复权因子，前复权 */
-export function adjustSplits(bars: Bar[]): Bar[] {
+/**
+ * 与日线复权同一条：跳空超过该品种涨跌幅极限才调整。
+ * 成交量只在送转、份额折算、基金向上份额合并时缩放。现金分红到不了这条线，不放大量。
+ * 股票向上大跳空不当折算。
+ * @param bars 日线
+ * @param code 6 位代码，用于按品种取门槛
+ */
+export function adjustSplits(bars: Bar[], code?: string): Bar[] {
+  const gap = splitGapRatio(code);
   const factor = bars.map(() => 1);
   for (let i = 1; i < bars.length; i++) {
-    // 两侧收盘都必须为正且比值有限为正：r 为 0 / NaN / 负数时整段历史会被乘坏，
-    // 宁可跳过这一次除权推断（顶多少复权一次），也不能污染前面所有 bar
     if (!(bars[i - 1].c > 0) || !(bars[i].c > 0)) continue;
     const r = bars[i].c / bars[i - 1].c;
-    if (!Number.isFinite(r) || r <= 0) continue;
-    if (r < 0.65 || r > 1.5) for (let j = 0; j < i; j++) factor[j] *= r;
+    if (!Number.isFinite(r) || r <= 0 || gap == null) continue;
+    const down = r < 1 - gap;
+    const upMerge = !!code && isExchangeFund(code) && r > 1 + gap;
+    if (!down && !upMerge) continue;
+    for (let j = 0; j < i; j++) factor[j] *= r;
   }
   for (let i = 0; i < bars.length; i++) {
     const f = factor[i];
@@ -92,7 +101,7 @@ export function adjustSplits(bars: Bar[]): Bar[] {
   return bars;
 }
 
-/** python sma()：不足窗口时按已有长度取均值（非 NaN 前缀） */
+/** 不满窗口就没有这根均线，返回 0。调用方用 0 表示「这根线还不存在」。 */
 function sma(xs: number[], n: number): number[] {
   const out: number[] = [];
   let s = 0;
@@ -101,7 +110,7 @@ function sma(xs: number[], n: number): number[] {
     q.push(x);
     s += x;
     if (q.length > n) s -= q.shift() as number;
-    out.push(s / q.length);
+    out.push(q.length < n ? 0 : s / n);
   }
   return out;
 }
@@ -217,8 +226,8 @@ export function computeRows(bars: Bar[], benchClose: Map<string, number>): Map<s
       ma60: ma60[i],
       ma120: ma120[i],
       ma: { 20: ma20[i], 30: ma30[i], 60: ma60[i], 120: ma120[i] },
-      above60: b.c > ma60[i],
-      above120: b.c > ma120[i],
+      above60: ma60[i] > 0 && b.c > ma60[i],
+      above120: ma120[i] > 0 && b.c > ma120[i],
       mom30: ret(30),
       mom60: ret(60),
       volRatio20: vma20[i] ? b.v / vma20[i] : 1,

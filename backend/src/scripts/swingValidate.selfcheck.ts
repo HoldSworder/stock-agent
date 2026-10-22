@@ -24,7 +24,9 @@ const { db, schema } = await import('../db/client');
 const { ensureRuleVersion, currentRuleVersion, VALIDATION_GATE } = await import(
   '../swing/ruleVersion'
 );
-const { collectEvents, latestResults, weekKey: wk } = await import('../swing/validate');
+const { collectEvents, latestResults, phaseGateShortfalls, weekKey: wk } = await import(
+  '../swing/validate'
+);
 const { newId, nowIso } = await import('../util');
 
 ensureSchema();
@@ -251,6 +253,18 @@ function main(): void {
   check(
     '顺向目标比反向失效更远（赢的时候赚得比输的时候亏得多）',
     Math.abs(upTarget - base) > Math.abs(upInvalid - base),
+  );
+
+  const four = ['主升', '反弹', '退潮', '震荡'] as const;
+  const enough = four.flatMap((p) => Array.from({ length: 10 }, () => p));
+  check('四个阶段各 10 个事件才过每阶段门槛', phaseGateShortfalls(enough).length === 0);
+  check(
+    '阶段为空必须拦住',
+    phaseGateShortfalls([...enough, null]).some((s) => s.includes('没有划定市场阶段')),
+  );
+  check(
+    '某一档不足 10 必须拦住',
+    phaseGateShortfalls(enough.filter((p) => p !== '退潮')).some((s) => s.startsWith('退潮阶段')),
   );
 
   line('');

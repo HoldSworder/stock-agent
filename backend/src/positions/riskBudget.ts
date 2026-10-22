@@ -1,4 +1,5 @@
 import type { KlineBar, MarketRegimePhase, PositionSizing, RiskBudgetTier } from '@stock-agent/shared';
+import { roundOrderQty } from '../market/instrument';
 
 // 风险预算反推仓位：不再用「单票固定 30%」这种与波动无关的死上限，而是
 //   允许权重 = min( 单笔风险预算 ÷ 有效损失距离 , 该阶段该资产的绝对上限 )
@@ -46,8 +47,6 @@ export function budgetForPhase(phase: MarketRegimePhase | null): RiskBudgetTier 
   return TIERS[phase ?? '震荡'];
 }
 
-/** ATR 距离的倍数：止损若窄于 2 倍 ATR，实际会被日常波动打掉，故取两者较大者作损失距离 */
-const ATR_MULT = 2;
 /** ATR 计算周期（14 日真实波幅均值，业界惯例） */
 const ATR_PERIOD = 14;
 /** 费用 + 滑点缓冲 %（双边佣金/印花税/冲击成本的保守合计） */
@@ -68,7 +67,7 @@ export function atr(bars: KlineBar[], period = ATR_PERIOD): number | null {
 /**
  * 近 60 日向下跳空的 P95（占前收盘的百分比）：止损挂在那里也可能被一个跳空直接跨过去，
  * 这段距离必须预先从风险预算里扣掉，否则「最多亏 2.5%」是个假承诺。
- * ETF 由一篮子成分平滑，几乎不出现整体跳空，故 ETF 分支不调用本函数（缓冲取 0）。
+ * 股票和 ETF 都用这只自己的向下跳空。跨境和商品 ETF 的缓冲不写 0。
  */
 export function downGapP95(bars: KlineBar[], lookback = 60): number {
   const slice = bars.slice(-lookback);
@@ -86,6 +85,8 @@ export function downGapP95(bars: KlineBar[], lookback = 60): number {
 
 export interface SizingInput {
   assetType: 'stock' | 'etf';
+  /** 6 位代码。有则按品种取整（科创板买入 200 股起、可转债 10 张）；没有则按 100 股 */
+  code?: string;
   /** 现价 */
   price: number;
   /** 结构止损距离 %（相对成本，来自纪律规则或 ETF 信号触发价） */
@@ -105,29 +106,34 @@ export interface SizingInput {
 
 /**
  * 风险预算反推单票允许仓位。
- * 有效损失距离 = max(结构止损距离, ATR_MULT × ATR%) + 跳空缓冲 + 费用缓冲。
- * 允许权重 = min(风险预算 ÷ 有效损失距离, 该阶段该资产绝对上限)。
+ * 有效损失 = max(这笔止损距离, 该品种自己的向下跳空, 波动) + 费用。
+ * 三段取更远的一段，费用另加，不相加。
+ * 允许权重 = min(风险预算 ÷ 有效损失, 该阶段该资产绝对上限)。
  */
 export function computeSizing(input: SizingInput, budget: RiskBudgetTier): PositionSizing | null {
-  const { assetType, price, stopDistancePct, totalEquity, currentShares, bars, fixedCapPct } = input;
+  const { assetType, price, stopDistancePct, totalEquity, currentShares, bars, fixedCapPct, code } = input;
   if (!(price > 0) || !(totalEquity > 0) || !(stopDistancePct > 0)) return null;
 
   const a = bars && bars.length > 0 ? atr(bars) : null;
-  const atrDistancePct = a != null ? (ATR_MULT * a * 100) / price : null;
-  // ETF 由一篮子成分平滑，整体跳空极少，硬套个股跳空分位只会白白吃掉仓位
-  const gapBufferPct = assetType === 'etf' || !bars ? 0 : downGapP95(bars);
+  const atrDistancePct = a != null ? (a * 100) / price : null;
+  const gapBufferPct = bars && bars.length > 1 ? downGapP95(bars) : 0;
 
   const effectiveLossPct =
-    Math.max(stopDistancePct, atrDistancePct ?? 0) + gapBufferPct + COST_BUFFER_PCT;
+    Math.max(stopDistancePct, gapBufferPct, atrDistancePct ?? 0) + COST_BUFFER_PCT;
   const riskCapPct = (budget.singleTradeRiskPct / effectiveLossPct) * 100;
   const tierCapPct = assetType === 'etf' ? budget.singleMaxEtfPct : budget.singleMaxStockPct;
   const absoluteCapPct =
     fixedCapPct != null && fixedCapPct > 0 ? Math.min(tierCapPct, fixedCapPct) : tierCapPct;
   const allowedWeightPct = Math.min(riskCapPct, absoluteCapPct);
 
-  // 向下取整到 100 股：A 股最小交易单位，给不出整手的建议等于给不出建议
-  const allowedShares = Math.floor(((allowedWeightPct / 100) * totalEquity) / price / 100) * 100;
-  const reduceShares = Math.max(0, Math.floor((currentShares - allowedShares) / 100) * 100);
+  // 股数按有效损失反推，再和金额上限取更小（allowedWeight 已经取过更小）。
+  // 有代码时按品种取整：科创板买入不足 200 不下单，可转债按 10 张，其余 100 股。
+  const rawShares = ((allowedWeightPct / 100) * totalEquity) / price;
+  const allowedShares = code
+    ? roundOrderQty(code, rawShares, 'buy')
+    : Math.floor(rawShares / 100) * 100;
+  const lot = code && /^11|^12/.test(code) ? 10 : code && /^(688|689)/.test(code) ? 1 : 100;
+  const reduceShares = Math.max(0, Math.floor((currentShares - allowedShares) / lot) * lot);
 
   const r1 = (v: number): number => Math.round(v * 10) / 10;
   return {

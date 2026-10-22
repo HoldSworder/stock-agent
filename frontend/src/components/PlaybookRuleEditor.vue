@@ -215,6 +215,23 @@ const META: Record<string, RuleMeta> = {
     ],
     make: () => ({ kind: 'consecutive', dir: 'down', bars: 3 }),
   },
+  closeStreak: {
+    label: '连涨 / 连跌',
+    fields: [
+      {
+        prop: 'dir',
+        label: '方向',
+        type: 'select',
+        options: [
+          { label: '连涨', value: 'up' },
+          { label: '连跌', value: 'down' },
+        ],
+        width: 100,
+      },
+      { prop: 'bars', label: '连续根数', type: 'number', width: 110 },
+    ],
+    make: () => ({ kind: 'closeStreak', dir: 'up', bars: 3 }),
+  },
   limit: {
     label: '涨停 / 跌停',
     fields: [

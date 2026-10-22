@@ -26,6 +26,7 @@ import {
   searchBoard,
 } from '../market/eastmoney';
 import { formatStockDragon } from '../dragon/service';
+import { roundOrderQty } from '../market/instrument';
 import { getStockCapital, formatCapitalForAgent } from '../capital/service';
 import { computeIndicators, getStockIndicators, formatIndicatorsForAgent } from '../market/indicators';
 import { indexSecidCandidates, type IndexDef } from './indices';
@@ -1074,8 +1075,7 @@ function asNum(v: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/** A 股最小交易单位（手） */
-const LOT = 100;
+/** 校验交易方案时按品种取整，不再写死 100 股 */
 
 /**
  * 校验并标注交易方案（纯校验、不动账户）：复用 getQuoteWithLimits 取实时报价，
@@ -1089,15 +1089,16 @@ async function validateTradePlan(
   price: number | null,
   held: boolean,
 ): Promise<DecisionTraderPlan> {
-  const flooredQty = Math.max(0, Math.floor((Number.isFinite(qty) ? qty : 0) / LOT) * LOT);
+  const orderSide = side === 'sell' ? 'sell' : 'buy';
+  const flooredQty = roundOrderQty(code, Number.isFinite(qty) ? qty : 0, orderSide);
   const warnings: string[] = [];
   if (side !== 'hold' && Number.isFinite(qty) && qty > 0 && flooredQty !== qty) {
-    warnings.push(`手数已向下取整到 ${LOT} 整数倍：${qty} → ${flooredQty}`);
+    warnings.push(`手数已按申报单位取整：${qty} → ${flooredQty}`);
   }
   if (side === 'hold') {
     return { side, qty: 0, price: price ?? null, warnings, note: '维持现状，无买卖动作' };
   }
-  if (flooredQty <= 0) warnings.push('拟操作股数不足 100 股，无法成交');
+  if (flooredQty <= 0) warnings.push('拟操作数量不足申报单位，无法成交');
 
   let quote: Awaited<ReturnType<typeof getQuoteWithLimits>> | null = null;
   try {

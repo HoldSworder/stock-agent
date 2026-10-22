@@ -10,6 +10,7 @@ import type {
 } from '@stock-agent/shared';
 import { db, schema } from '../db/client';
 import { getQuoteWithLimits, getQuotes } from '../market/eastmoney';
+import { orderQtyError } from '../market/instrument';
 import { newId, nowIso } from '../util';
 import { assertTradeAllowed } from '../safety/guard';
 import { broadcastWatch } from '../watch/bus';
@@ -440,7 +441,8 @@ export async function executeSimTrade(
 
   const qty = Number(input.qty);
   if (!Number.isFinite(qty) || qty <= 0) throw new StrategyError('数量需为正数');
-  if (qty % 100 !== 0) throw new StrategyError('数量必须为 100 股的整数倍');
+  const qtyError = orderQtyError(code, qty, input.side === 'sell' ? 'sell' : 'buy');
+  if (qtyError) throw new StrategyError(qtyError);
 
   const quote = await quoteFetcher(code);
   if (!(quote.price > 0)) throw new StrategyError(`未取到 ${code} 的有效现价，暂不能下单`);

@@ -25,14 +25,14 @@ assert.equal(atr(flatBars(5, 10, 0.4)), null, '不足周期应返回 null');
 // 2. 无跳空序列的向下跳空分位为 0
 assert.equal(downGapP95(bars), 0, '无跳空序列不应吃掉仓位');
 
-// 3. 主升档 ETF：结构止损 12% 主导（2×ATR=8% 更小），有效距离 12+0.2=12.2%
+// 3. 主升档 ETF：止损 12% 比这组波动更远，有效距离 12+0.2=12.2%
 //    允许权重 = 2.5 / 12.2 = 20.5%，小于绝对上限 40% → 由风险预算决定
 const bull = budgetForPhase('主升');
 const etf = computeSizing(
   { assetType: 'etf', price: 10, stopDistancePct: 12, totalEquity: 1_000_000, currentShares: 30_000, bars },
   bull,
 )!;
-assert.equal(etf.gapBufferPct, 0, 'ETF 不应计跳空缓冲');
+assert.equal(etf.gapBufferPct, 0, '这组没有向下跳空，缓冲为 0');
 assert.equal(etf.effectiveLossPct, 12.2, '有效损失距离应为 结构止损 + 费用缓冲');
 assert.equal(etf.allowedWeightPct, 20.5, '风险预算反推权重应为 2.5/12.2');
 assert.ok(etf.allowedWeightPct < etf.absoluteCapPct, '本例应由风险预算而非绝对上限决定');
@@ -47,7 +47,7 @@ const bear = computeSizing(
 assert.ok(bear.allowedWeightPct < etf.allowedWeightPct / 4, '退潮档权重应显著低于主升档');
 assert.ok(bear.reduceShares > etf.reduceShares, '退潮档应要求减更多');
 
-// 5. 高波动标的自动少买：2×ATR 超过结构止损时由 ATR 距离接管
+// 5. 波动更大的标的自动少买：三段取更远的一段，波动超过止损时由波动接管
 const wild = computeSizing(
   {
     assetType: 'stock',
@@ -55,22 +55,22 @@ const wild = computeSizing(
     stopDistancePct: 8,
     totalEquity: 1_000_000,
     currentShares: 0,
-    bars: flatBars(60, 10, 1.2), // ATR=1.2 → 2×ATR=2.4 元 = 24%
+    bars: flatBars(60, 10, 3), // ATR=3 → 占价格 30%
   },
   bull,
 )!;
-assert.equal(wild.atrDistancePct, 24, '2×ATR 占价格 24%');
-assert.equal(wild.effectiveLossPct, 24.2, 'ATR 距离大于结构止损时应由 ATR 接管');
+assert.equal(wild.atrDistancePct, 30, 'ATR 占价格 30%');
+assert.equal(wild.effectiveLossPct, 30.2, '波动大于止损和跳空时由波动接管，费用另加');
 assert.ok(wild.allowedWeightPct < 11, '高波动标的的允许仓位应被显著压低');
 
 // 6. 个股跳空缓冲会进一步吃掉仓位（同参数下个股允许权重必须小于等于无跳空情形）
 const gapped = [...flatBars(59, 10, 0.4)];
-gapped.push({ time: '2026-03-01', open: 9, high: 9.2, low: 8.8, close: 9, volume: 1000, amount: 9000 });
+gapped.push({ time: '2026-03-01', open: 7, high: 7.2, low: 6.8, close: 7, volume: 1000, amount: 7000 });
 const withGap = computeSizing(
   { assetType: 'stock', price: 10, stopDistancePct: 12, totalEquity: 1_000_000, currentShares: 0, bars: gapped },
   bull,
 )!;
-assert.ok(withGap.gapBufferPct > 0, '个股应计入向下跳空缓冲');
+assert.ok(withGap.gapBufferPct > 0, '应计入这只自己的向下跳空');
 assert.ok(withGap.allowedWeightPct < etf.allowedWeightPct, '有跳空风险的个股允许仓位应更小');
 
 // 7. 缺价格/成本等关键输入时不臆造仓位

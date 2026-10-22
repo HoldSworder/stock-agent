@@ -7491,8 +7491,10 @@ export type PlaybookRule =
   | { kind: 'boll'; pos: 'aboveUpper' | 'belowLower' | 'aboveMid' | 'belowMid' }
   /** 距近 days 根最高收盘的回撤（%，正数表示回撤幅度） */
   | { kind: 'drawdown'; days: number; op: PlaybookOp; value: number }
-  /** 连续 bars 根阳线 / 阴线 */
+  /** 连续 bars 根阳线 / 阴线。阳线是收盘高于开盘，阴线是收盘低于开盘 */
   | { kind: 'consecutive'; dir: 'up' | 'down'; bars: number }
+  /** 连续 bars 根连涨 / 连跌。连涨是收盘高于前收，连跌是收盘低于前收 */
+  | { kind: 'closeStreak'; dir: 'up' | 'down'; bars: number }
   /** 当根涨停 / 跌停（按代码段涨跌幅上限判定） */
   | { kind: 'limit'; dir: 'up' | 'down' }
   /** 持仓浮动盈亏（%），仅卖出规则可用 */
@@ -7536,6 +7538,7 @@ export const PLAYBOOK_RULE_CAPABILITY: Record<string, PlaybookRuleCapability> = 
   boll: 'backtest',
   drawdown: 'backtest',
   consecutive: 'backtest',
+  closeStreak: 'backtest',
   limit: 'backtest',
   pnlPct: 'backtest',
   heldBars: 'backtest',

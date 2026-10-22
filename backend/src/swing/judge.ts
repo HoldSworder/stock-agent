@@ -1,4 +1,5 @@
 import type { KlineBar, KlinePeriod, SwingGrade, SwingWatchLevel } from '@stock-agent/shared';
+import { isExchangeFund, splitGapRatio } from '../market/instrument';
 import { atr } from '../positions/riskBudget';
 import { isAShareTradingTime } from '../util';
 import { buildSegments, detectDivergence, type DivergenceResult } from './divergence';
@@ -96,10 +97,59 @@ export function dropUnclosedBar(bars: KlineBar[], now = new Date()): KlineBar[] 
 }
 
 /**
+ * 两个交易日之间隔了多少自然日。周线、月线的正常间隔不算停牌。
+ * @param from YYYY-MM-DD
+ * @param to YYYY-MM-DD
+ */
+function calendarGapDays(from: string, to: string): number {
+  const a = Date.parse(`${from}T00:00:00Z`);
+  const b = Date.parse(`${to}T00:00:00Z`);
+  if (!Number.isFinite(a) || !Number.isFinite(b)) return 0;
+  return Math.round((b - a) / 86_400_000);
+}
+
+/**
+ * 没有 XD/XR/DR 前缀时，当天仍不判断背驰和破位的情形：
+ * 除权除息、ETF 份额折算、份额合并、复牌缺口。
+ * 认定门槛与日线复权同一条：跳空超过该品种涨跌幅极限才进折算判断。
+ * 股票向上大跳空可能是真实暴涨，不当成份额合并；基金向上超幅度才认合并。
+ * 跨境和商品 ETF 不设涨跌幅，关闭百分比推断，只认复牌这种日历缺口。
+ * @returns 人话原因；当天可以判断时返回 null
+ */
+function corporateActionReason(
+  bars: KlineBar[],
+  period: KlinePeriod,
+  code?: string,
+  name?: string,
+): string | null {
+  if (name != null && isExDividendName(name)) {
+    return '今天除权除息，价格是断层的，等明天再看';
+  }
+  if (bars.length < 2) return null;
+  const prev = bars[bars.length - 2];
+  const cur = bars[bars.length - 1];
+  if (!(prev.close > 0) || !(cur.open > 0)) return null;
+  const openRatio = cur.open / prev.close;
+  const gap = splitGapRatio(code, name);
+  if (period === 'day' && calendarGapDays(prev.time, cur.time) >= 5 && Math.abs(openRatio - 1) > 0.01) {
+    return '今天是复牌缺口，当天不判断背驰和破位';
+  }
+  if (gap == null) return null;
+  if (openRatio < 1 - gap) {
+    return '今天跳空超过该品种涨跌幅极限，按除权或份额折算处理，当天不判断背驰和破位';
+  }
+  if (code && isExchangeFund(code) && openRatio > 1 + gap) {
+    return '今天向上跳空超过该品种幅度，按份额合并处理，当天不判断背驰和破位';
+  }
+  return null;
+}
+
+/**
  * 二级确认：力道衰减之后，价格自己走出了反转事实。
  *
- * 判据取「收盘价越过确认 K 线的极值」——确认 K 线就是极值点那根。
- * 底部：某根收盘 > 最低那根的最高价；顶部：某根收盘 < 最高那根的最低价。
+ * 底部至少收盘站上该极值之前的摆动高点。
+ * 顶部至少收盘跌破该极值之前的摆动低点。
+ * 只碰到极值当根的高点或低点，仍算一级。
  *
  * 为什么用收盘价而不是盘中价：盘中越过又收回来的太多，
  * 那属于试了一下没成，不该算反转确认。
@@ -108,9 +158,9 @@ function hasReversalConfirm(
   bars: KlineBar[],
   extremeIndex: number,
   dir: 'bottom' | 'top',
+  priorSwing: number,
 ): { ok: boolean; at: string | null; threshold: number } {
-  const pivot = bars[extremeIndex];
-  const threshold = dir === 'bottom' ? pivot.high : pivot.low;
+  const threshold = priorSwing;
   for (let i = extremeIndex + 1; i < bars.length; i += 1) {
     const c = bars[i].close;
     if (dir === 'bottom' ? c > threshold : c < threshold) {
@@ -169,11 +219,11 @@ export function judgeSwing(
   bars: KlineBar[],
   period: KlinePeriod,
   name?: string,
+  code?: string,
 ): SwingJudgement {
-  // 除权除息当天不给结论：那一根的振幅与相邻几根不可比，力道读数会失真
-  if (name != null && isExDividendName(name)) {
-    return unavailable('今天除权除息，价格是断层的，等明天再看');
-  }
+  // 除权、折算、合并、复牌当天不给结论：那一根与相邻几根不可比
+  const action = corporateActionReason(bars, period, code, name);
+  if (action) return unavailable(action);
   if (bars.length < MIN_BARS_FOR_STRUCTURE) {
     return unavailable(`只有 ${bars.length} 根K线，不够看出结构（至少要 ${MIN_BARS_FOR_STRUCTURE} 根）`);
   }
@@ -255,19 +305,23 @@ export function judgeSwing(
   if (!div.confirmed) {
     counter.push('这一段还在走，极值点尚未定下来，只能算提前提示');
   } else {
-    const conf = hasReversalConfirm(bars, anchorIndex, div.kind);
+    const priorSwing = lastSeg?.from.price;
+    const conf =
+      priorSwing != null && priorSwing > 0
+        ? hasReversalConfirm(bars, anchorIndex, div.kind, priorSwing)
+        : { ok: false, at: null, threshold: priorSwing ?? 0 };
     if (conf.ok) {
       grade = isBottom ? 'turn_confirmed_bottom' : 'turn_confirmed_top';
       rationale.push(
         isBottom
-          ? `${conf.at} 收盘站上了最低那根的高点 ${r3(conf.threshold)}，价格自己走出了转向`
-          : `${conf.at} 收盘跌破了最高那根的低点 ${r3(conf.threshold)}，价格自己走出了转向`,
+          ? `${conf.at} 收盘站上了该低点之前的摆动高点 ${r3(conf.threshold)}，价格自己走出了转向`
+          : `${conf.at} 收盘跌破了该高点之前的摆动低点 ${r3(conf.threshold)}，价格自己走出了转向`,
       );
     } else {
       counter.push(
         isBottom
-          ? `价格还没站上最低那根的高点 ${r3(conf.threshold)}，转向未被走势确认`
-          : `价格还没跌破最高那根的低点 ${r3(conf.threshold)}，转向未被走势确认`,
+          ? `价格还没站上该低点之前的摆动高点 ${r3(conf.threshold)}，只碰到最低那根的高点仍算一级`
+          : `价格还没跌破该高点之前的摆动低点 ${r3(conf.threshold)}，只碰到最高那根的低点仍算一级`,
       );
     }
   }

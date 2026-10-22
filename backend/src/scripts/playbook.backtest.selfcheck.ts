@@ -4,6 +4,7 @@
 import assert from 'node:assert/strict';
 import type { KlineBar, PlaybookSpec } from '@stock-agent/shared';
 import { combineEquity, mergeNames, runOnBars, type SymbolRun } from '../playbook/backtest';
+import { applyClosedSellStamp } from '../backtest/costs';
 import { buildSeries, evalRule } from '../playbook/rules';
 import { PlaybookSpecError, validatePlaybookSpec } from '../playbook/validate';
 
@@ -70,10 +71,29 @@ const baseSpec: PlaybookSpec = {
 
 // 连续 2 根阳线
 {
-  const b = bars([{ close: 10 }, { close: 11 }, { close: 12 }, { close: 11 }]);
+  const b = bars([
+    { close: 10, open: 9 },
+    { close: 11, open: 10 },
+    { close: 12, open: 11 },
+    { close: 11, open: 12 },
+  ]);
   const s = buildSeries('600000', b, []);
   assert.equal(evalRule({ kind: 'consecutive', dir: 'up', bars: 2 }, s, 2), true);
   assert.equal(evalRule({ kind: 'consecutive', dir: 'up', bars: 2 }, s, 3), false);
+}
+
+// 阳线看开盘，连涨看前收。收盘高于前收但低于开盘，只算连涨。
+{
+  const b = bars([
+    { close: 10, open: 10 },
+    { close: 11, open: 12 },
+    { close: 12, open: 11 },
+  ]);
+  const s = buildSeries('600000', b, []);
+  assert.equal(evalRule({ kind: 'consecutive', dir: 'up', bars: 1 }, s, 1), false);
+  assert.equal(evalRule({ kind: 'closeStreak', dir: 'up', bars: 1 }, s, 1), true);
+  assert.equal(evalRule({ kind: 'consecutive', dir: 'up', bars: 1 }, s, 2), true);
+  assert.equal(evalRule({ kind: 'closeStreak', dir: 'up', bars: 2 }, s, 2), true);
 }
 
 // 涨停：主板 10%，创业板 20%
@@ -298,6 +318,85 @@ const baseSpec: PlaybookSpec = {
   const eqHoled = combineEquity([holed, steady]);
   assert.equal(eqHoled[1].equity, 1, '停牌当日只按有数据的标的算收益，权益不动');
   assert.ok(Math.abs(eqHoled[2].equity - 1.1) < 1e-9, `跨缺口那天记一次跨缺口涨跌，实际 ${eqHoled[2].equity}`);
+}
+
+// 已平仓按卖出日税率整笔扣；基金为 0；期末仍持有的浮盈不扣。
+{
+  const exitTime = Date.parse('2024-01-15T07:00:00Z');
+  const earlyTime = Date.parse('2023-08-01T07:00:00Z');
+  const trade = {
+    symbol: '600000',
+    size: 1000,
+    exit: { price: 10, time: exitTime, reason: 'TP', pnl: 100 },
+  };
+  const open = { unrealizedPnl: 50 };
+  const curve = [
+    { time: exitTime - 86_400_000, timestamp: exitTime - 86_400_000, equity: 100_000 },
+    { time: exitTime, timestamp: exitTime, equity: 100_100 },
+  ];
+  const result = {
+    trades: [trade],
+    positions: [trade],
+    openPositions: [open],
+    eqSeries: curve,
+    metrics: {
+      finalEquity: 100_100,
+      startEquity: 100_000,
+      totalPnL: 100,
+      returnPct: 0.001,
+      winRate: 1,
+      profitFactor: 1,
+      expectancy: 100,
+      trades: 1,
+    },
+  };
+  applyClosedSellStamp(result as never, '600000');
+  assert.equal(trade.exit.pnl, 95, '2024 卖出 5bps，1000 股 × 10 元 = 5 元');
+  assert.equal(curve[0].equity, 100_000, '平仓前的权益不扣');
+  assert.equal(curve[1].equity, 100_095, '权益曲线含这笔卖出印花税');
+  assert.equal(result.metrics.finalEquity, 100_095);
+  assert.equal(open.unrealizedPnl, 50, '期末仍持有不提前扣');
+
+  const fund = { symbol: '510300', size: 1000, exit: { price: 10, time: exitTime, reason: 'TP', pnl: 20 } };
+  const fundResult = {
+    trades: [fund],
+    positions: [fund],
+    openPositions: [],
+    eqSeries: [{ time: exitTime, timestamp: exitTime, equity: 100 }],
+    metrics: {
+      finalEquity: 100,
+      startEquity: 100,
+      totalPnL: 0,
+      returnPct: 0,
+      winRate: 1,
+      profitFactor: 1,
+      expectancy: 20,
+      trades: 1,
+    },
+  };
+  applyClosedSellStamp(fundResult as never);
+  assert.equal(fund.exit.pnl, 20, '场内基金印花税为 0');
+
+  const old = { symbol: '600000', size: 100, exit: { price: 10, time: earlyTime, reason: 'TP', pnl: 0 } };
+  const oldCurve = [{ time: earlyTime, timestamp: earlyTime, equity: 1000 }];
+  applyClosedSellStamp({
+    trades: [old],
+    positions: [old],
+    openPositions: [],
+    eqSeries: oldCurve,
+    metrics: {
+      finalEquity: 1000,
+      startEquity: 1000,
+      totalPnL: 0,
+      returnPct: 0,
+      winRate: 0,
+      profitFactor: 0,
+      expectancy: 0,
+      trades: 1,
+    },
+  } as never);
+  assert.equal(old.exit.pnl, -1, '2023-08-28 之前卖出 10bps');
+  assert.equal(oldCurve[0].equity, 999);
 }
 
 console.log('✓ 战法回测引擎自检通过');

@@ -1,4 +1,8 @@
-// 竞价冠军 Top3 战法 · 小样本点验证取数（一次性研究脚本，非站内模块）。
+// 竞价冠军只覆盖本脚本。9:25 排序只用当时已有的竞价成交量和未匹配量。
+// 新浪分笔没有未匹配量，本脚本不编造，也不输出冠军名次。
+// 日线 RSI 不作为加分。开盘后的量、全天成交额、收盘价不进入 9:25 排序。
+// 主板当天买入当天不能卖，止损最早下一交易日。四锁不在这里补。
+// 当前只是逆向代理测试，其余条目保持收集态。
 //
 // 目的：在新浪分笔可回溯的窗口内（约最近 14 个交易日），为每个信号日产出
 // 「候选特征表 + 前向收益」，供任意打分公式做秒级后处理。
@@ -29,7 +33,7 @@ const arg = (name: string, dflt: number): number => {
 };
 /** 回看几个交易日作为信号日 */
 const DAYS = arg('days', 14);
-/** 每个信号日最多对多少只候选取分笔（控制耗时；按竞价涨幅接近 6% 排序优先） */
+/** 每个信号日最多对多少只候选取分笔。这不是 9:25 排序。 */
 const MAX_TICKS = arg('max-ticks', 20);
 
 /** 竞价涨幅硬口径 2%~9% */
@@ -100,17 +104,6 @@ async function bars(code: string): Promise<KlineBar[]> {
   return b;
 }
 
-/** 战法定义的 RSI6：D-1 及之前收盘序列 + D 的竞价价，取最近 6 段涨跌 */
-function rsi6(closesBeforeD: number[], auctionAdj: number): number | null {
-  const seq = [...closesBeforeD.slice(-7), auctionAdj];
-  if (seq.length < 7) return null;
-  const diffs: number[] = [];
-  for (let i = seq.length - 6; i < seq.length; i++) diffs.push(seq[i] - seq[i - 1]);
-  const up = diffs.filter((d) => d > 0).reduce((s, d) => s + d, 0);
-  const abs = diffs.reduce((s, d) => s + Math.abs(d), 0);
-  return abs > 0 ? (up / abs) * 100 : 0;
-}
-
 interface Row {
   date: string;
   code: string;
@@ -118,7 +111,6 @@ interface Row {
   auctionPct: number;
   auctionAmountWan: number;
   auctionRatio: number | null;
-  rsi6: number | null;
   prevBoards: number;
   prevBreaks: number;
   prevSealTime: string;
@@ -180,7 +172,7 @@ async function main(): Promise<void> {
     // 用前复权日线算竞价涨幅，先筛 2%~9%（便宜），再决定谁值得花分笔请求
     const screened: Array<{
       code: string; name: string; boards: number; breaks: number; sealTime: string;
-      openAdj: number; prevClose: number; pct: number; closesBefore: number[]; b: KlineBar[]; di: number;
+      openAdj: number; prevClose: number; pct: number; b: KlineBar[]; di: number;
     }> = [];
     for (const c of cands) {
       const b = await bars(c.code);
@@ -196,13 +188,12 @@ async function main(): Promise<void> {
         openAdj,
         prevClose,
         pct,
-        closesBefore: b.slice(0, i).map((x) => x.close),
         b,
         di: i,
       });
     }
-    // 战法评分里有「竞价涨幅靠近 6% 的形态分」，故按贴近 6% 优先花分笔预算
-    screened.sort((a, b2) => Math.abs(a.pct - 6) - Math.abs(b2.pct - 6));
+    // 分笔预算不是 9:25 排序。排序要用竞价成交量和未匹配量；未匹配量这源没有，不编。
+    screened.sort((a, b2) => b2.pct - a.pct);
     const picked = screened.slice(0, MAX_TICKS);
     dayLog.push(
       `${D}：${prev} 涨停主板非ST ${cands.length} 只 → 竞价涨幅 ${PCT_MIN}~${PCT_MAX}% ${screened.length} 只 → 取分笔 ${picked.length} 只（${prev} 跌停 ${dtCount} 家，Gate 不 SKIP）`,
@@ -240,7 +231,6 @@ async function main(): Promise<void> {
         auctionPct: c.pct,
         auctionAmountWan: amount / 1e4,
         auctionRatio: ratio,
-        rsi6: rsi6(c.closesBefore, c.openAdj),
         prevBoards: c.boards,
         prevBreaks: c.breaks,
         prevSealTime: c.sealTime,
@@ -258,7 +248,7 @@ async function main(): Promise<void> {
   // ---- 落盘 ----
   const r2 = (v: number | null): string => (v == null ? '' : (Math.round(v * 100) / 100).toString());
   const header = [
-    '信号日', '代码', '名称', '竞价涨幅%', '竞价额(万)', '竞价倍率', 'RSI6',
+    '信号日', '代码', '名称', '竞价涨幅%', '竞价额(万)', '竞价倍率',
     '昨连板', '昨炸板', '昨首封时间', '开盘首价溢价%',
     'T+1%(竞价基准)', 'T+2%(竞价基准)', 'T+3%(竞价基准)',
     'T+1%(可成交基准)', 'T+2%(可成交基准)', 'T+3%(可成交基准)',
@@ -267,7 +257,7 @@ async function main(): Promise<void> {
     header,
     ...rows.map((r) =>
       [
-        r.date, r.code, r.name, r2(r.auctionPct), r2(r.auctionAmountWan), r2(r.auctionRatio), r2(r.rsi6),
+        r.date, r.code, r.name, r2(r.auctionPct), r2(r.auctionAmountWan), r2(r.auctionRatio),
         r.prevBoards, r.prevBreaks, r.prevSealTime, r2(r.slipPct),
         ...r.fwd.map(r2), ...r.fwdReal.map(r2),
       ].join(','),

@@ -6,6 +6,7 @@ import { getKline } from '../datasource/scheduler';
 import { judge } from '../symbolPlans/forecast';
 import { bootstrapEdge, type PairedSample } from '../assertions/weights';
 import { currentRuleVersion, VALIDATION_GATE } from './ruleVersion';
+import { TIME_STOP_TRADE_DAYS } from './advice';
 import { judgeSwing, dropUnclosedBar } from './judge';
 
 // 阶段二：这套判断到底有没有用。
@@ -64,12 +65,41 @@ function seeded(seed: number): () => number {
  *
  * 只收二级信号：一级只说明力道在衰减，永远只拿试探仓、不参与放大资格的判定。
  */
+/** 考试前划定的四档。考试本身不另判阶段，只消费扫描当时已经写下的这一档。 */
+export const REGIME_PHASES = ['主升', '反弹', '退潮', '震荡'] as const;
+
+/**
+ * 每个原生阶段至少要有 minEventsPerPhase 个事件。
+ * 阶段为空、或不是这四档，整次考试拦住，不能靠只写着常数放行。
+ * @param phases 已结算真实事件在考试前写下的阶段
+ */
+export function phaseGateShortfalls(phases: Array<string | null | undefined>): string[] {
+  const counts = new Map<string, number>(REGIME_PHASES.map((p) => [p, 0]));
+  let empty = 0;
+  for (const phase of phases) {
+    if (phase && counts.has(phase)) counts.set(phase, (counts.get(phase) ?? 0) + 1);
+    else empty += 1;
+  }
+  const out: string[] = [];
+  if (empty > 0) {
+    out.push(`有 ${empty} 个事件在考试前没有划定市场阶段，不能放行`);
+  }
+  const need = VALIDATION_GATE.minEventsPerPhase;
+  for (const phase of REGIME_PHASES) {
+    const n = counts.get(phase) ?? 0;
+    if (n < need) out.push(`${phase}阶段 ${n} 个事件，需要至少 ${need} 个`);
+  }
+  return out;
+}
+
 export function collectEvents(direction: 'bottom' | 'top'): Array<{
   code: string;
   tradeDate: string;
   barTime: string;
   close: number;
   atr14: number;
+  /** 扫描落快照时写下的阶段。考试不重算。 */
+  marketPhase: string | null;
 }> {
   const cur = currentRuleVersion();
   if (!cur) return [];
@@ -100,6 +130,7 @@ export function collectEvents(direction: 'bottom' | 'top'): Array<{
     barTime: string;
     close: number;
     atr14: number;
+    marketPhase: string | null;
   }> = [];
   for (const r of rows) {
     if (r.atr14 == null || !(r.atr14 > 0) || !(r.close > 0) || !r.barTime) continue;
@@ -115,6 +146,7 @@ export function collectEvents(direction: 'bottom' | 'top'): Array<{
       barTime: r.barTime,
       close: r.close,
       atr14: r.atr14,
+      marketPhase: r.marketPhase || null,
     });
   }
   return out;
@@ -164,11 +196,11 @@ function pickControlDates(
 }
 
 /**
- * 判一条样本的结果：顺向 2 倍波动先到，还是反向 1 倍波动先到。
- *
- * 起点**必须是信号那根收盘之后**。这里传的是完整 ISO 时刻（收盘时间），
- * 不是 `YYYY-MM-DD`——后者会被 forecast.judge 当成上海时间早上 8 点，
- * 于是信号当天整根日 K 都算进结果，等于让规则偷看当天走势。
+ * 放大考试和真实出场用同一套。
+ * 区间上沿买入的 1R 是 1.25 倍 ATR（区间 0.75 + 止损 0.5）。
+ * 达到 1R 算走出预期，跌到存档止损算失效。第 10 个交易日仍没到 1R 按时间退出。
+ * 不用 2 倍 ATR 对 1 倍 ATR。观察从信号的下一根开始，信号当天不计入。
+ * 对照是随机非信号日，和信号同一口径。
  */
 function judgeSample(
   bars: KlineBar[],
@@ -178,13 +210,10 @@ function judgeSample(
   direction: 'bottom' | 'top',
 ): { outcome: 'hit' | 'miss' | 'timeout'; target: number; invalid: number } {
   const up = direction === 'bottom';
-  const target = up
-    ? basePrice + VALIDATION_GATE.targetAtrMult * atr14
-    : basePrice - VALIDATION_GATE.targetAtrMult * atr14;
-  const invalid = up
-    ? basePrice - VALIDATION_GATE.invalidAtrMult * atr14
-    : basePrice + VALIDATION_GATE.invalidAtrMult * atr14;
-  const window = bars.slice(fromIndex + 1, fromIndex + 1 + VALIDATION_GATE.observeTradeDays);
+  const oneR = 1.25 * atr14;
+  const target = up ? basePrice + oneR : basePrice - oneR;
+  const invalid = up ? basePrice - oneR : basePrice + oneR;
+  const window = bars.slice(fromIndex + 1, fromIndex + 1 + TIME_STOP_TRADE_DAYS);
   if (window.length === 0) return { outcome: 'timeout', target, invalid };
   const since = `${bars[fromIndex].time.slice(0, 10)}T15:00:00+08:00`;
   const dueDate = window[window.length - 1].time.slice(0, 10);
@@ -248,6 +277,7 @@ export async function validateDirection(
   const tradeDates = new Set<string>();
   const blocks = new Set<string>();
   const tracks = new Set<string>();
+  const settledPhases: Array<string | null> = [];
   const codeCount = new Map<string, number>();
   let realHits = 0;
   let controlHitSum = 0;
@@ -324,7 +354,7 @@ export async function validateDirection(
       atr14: ev.atr14,
       targetPrice: real.target,
       invalidPrice: real.invalid,
-      marketPhase: null,
+      marketPhase: ev.marketPhase,
       track: '',
       outcome: real.outcome,
       settledAt: nowIso(),
@@ -338,6 +368,7 @@ export async function validateDirection(
     tradeDates.add(ev.tradeDate);
     blocks.add(block);
     codeCount.set(ev.code, (codeCount.get(ev.code) ?? 0) + 1);
+    settledPhases.push(ev.marketPhase);
   }
 
   // 落库：先清掉本版本旧样本再写，避免重复统计
@@ -376,6 +407,7 @@ export async function validateDirection(
       `信号分布在 ${blocks.size} 周，需要至少 ${VALIDATION_GATE.minBlocksPerDirection} 周`,
     );
   }
+  shortfalls.push(...phaseGateShortfalls(settledPhases));
   const maxShare = settled > 0 ? Math.max(...[...codeCount.values()]) / settled : 0;
   if (settled > 0 && maxShare > VALIDATION_GATE.maxSingleCodeSharePct / 100) {
     shortfalls.push(
@@ -385,11 +417,7 @@ export async function validateDirection(
   const sampleEnough = shortfalls.length === 0;
 
   if (sampleEnough) {
-    if (realRate < VALIDATION_GATE.minRealRatePct) {
-      shortfalls.push(
-        `信号出现后走出预期的比例 ${realRate.toFixed(0)}%，低于要求的 ${VALIDATION_GATE.minRealRatePct}%`,
-      );
-    }
+    // 45% 只说明旧考试赔率，不能单独当作试探仓有正期望。
     if (edgePoints < VALIDATION_GATE.minEdgePoints) {
       shortfalls.push(
         `比随便挑日子只强 ${edgePoints.toFixed(1)} 个百分点，要求至少 ${VALIDATION_GATE.minEdgePoints} 个`,

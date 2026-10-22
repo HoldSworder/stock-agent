@@ -91,7 +91,7 @@ export interface EvaluateInput {
 const r3 = (n: number): number => Math.round(n * 1000) / 1000;
 const r1 = (n: number): number => Math.round(n * 10) / 10;
 
-/** 1R = 建议成本到初始止损的距离。始终按初始止损算，不随保护线上移而缩水 */
+/** 1R = 这笔成交价到存档止损的距离。区间上沿买入时这段是 1.25 倍 ATR，不另用固定 0.5 倍 ATR */
 export function oneRDistance(state: AdviceState): number {
   return state.avgCost - state.initialStop;
 }
@@ -193,7 +193,7 @@ export function evaluateAdvice(input: EvaluateInput): AdviceDecision {
     !next.firstRHit &&
     !next.layers.some((l) => l.layer === 2) &&
     layer2Pct > 0 &&
-    (grade === 'turn_confirmed_bottom' || grade === 'turn_confirmed_top');
+    grade === 'turn_confirmed_bottom';
   if (canAddLayer2) {
     if (bar.close > state.chaseGuard) {
       // 不追高：价格已经离区间太远，这时候加仓等于用最差的价格承担额外风险
