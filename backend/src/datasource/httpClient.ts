@@ -32,8 +32,17 @@ export interface RequestOptions {
   maxAttempts?: number;
   /** 退避基数（毫秒），第 N 次退避 = retryBaseMs * N，默认 500 */
   retryBaseMs?: number;
-  /** 主机兜底：url 含 from 时，失败后续尝试切到 to（如 push2 → push2delay） */
+  /**
+   * 同一条接口的多个主机，按给出的顺序换。
+   * 连续失败 2 次的主机 10 分钟内放到最后，其余保持原顺序。
+   * 网络失败和 validate 判定的空数据都算这次失败，下一次换主机。
+   * 4xx 是这只代码或参数的问题，不记到主机上。
+   */
+  hostChain?: string[];
+  /** 主机兜底：url 含 from 时，失败后续尝试切到 to。有 hostChain 时忽略 */
   hostFallback?: { from: string; to: string };
+  /** 响应体编码。gbk 用于腾讯批量现价；默认按响应头解码 */
+  encoding?: 'utf-8' | 'gbk';
   /** 哪些状态码可重试，默认 5xx */
   retryOnStatus?: (status: number) => boolean;
   /** 哪些状态码视为鉴权失效（直接抛出不重试），如 401/403 */
@@ -80,6 +89,62 @@ const CACHE_MAX_ENTRIES = 500;
 
 const cache = new Map<string, { at: number; expireAt: number; result: RunResult }>();
 
+/** 连续失败达到 2 次后，这段时间内不再优先用该主机 */
+const HOST_COOL_MS = 10 * 60_000;
+
+/** 单个主机的连续失败次数。排序只把冷却中的主机放到链尾。 */
+export interface HostHealth {
+  fails: number;
+  /** 在此时间戳之前，该主机排到链尾 */
+  coolUntil: number;
+}
+
+const hostHealth = new Map<string, HostHealth>();
+
+/**
+ * 排主机顺序。链上靠前的是主站，没进入冷却就保持原顺序。
+ * 延迟行情即使刚成功过，也不能排到仍可用的主站前面。
+ */
+export function orderHosts(
+  chain: string[],
+  now: number,
+  state: ReadonlyMap<string, HostHealth>,
+): string[] {
+  const usable: string[] = [];
+  const cooled: string[] = [];
+  for (const host of chain) {
+    const row = state.get(host);
+    if (row && row.coolUntil > now) cooled.push(host);
+    else usable.push(host);
+  }
+  return [...usable, ...cooled];
+}
+
+/** 记一次主机失败。连续 2 次后进入 10 分钟冷却 */
+export function noteHostFailure(prev: HostHealth | undefined, now: number): HostHealth {
+  const fails = (prev?.fails ?? 0) + 1;
+  return {
+    fails,
+    coolUntil: fails >= 2 ? now + HOST_COOL_MS : 0,
+  };
+}
+
+function rememberHostFailure(host: string | null): void {
+  if (!host) return;
+  hostHealth.set(host, noteHostFailure(hostHealth.get(host), Date.now()));
+}
+
+function rememberHostSuccess(host: string | null): void {
+  if (!host) return;
+  hostHealth.set(host, { fails: 0, coolUntil: 0 });
+}
+
+function withHost(raw: string, host: string): string {
+  const u = new URL(raw);
+  u.hostname = host;
+  return u.toString();
+}
+
 function cachePut(key: string, result: RunResult, ttlMs: number): void {
   const now = Date.now();
   if (cache.size >= CACHE_MAX_ENTRIES) {
@@ -104,7 +169,9 @@ async function run(opts: InternalOptions): Promise<RunResult> {
     cacheKey,
     maxAttempts = 1,
     retryBaseMs = 500,
+    hostChain,
     hostFallback,
+    encoding = 'utf-8',
     redirect = 'follow',
     retryOnStatus = (s) => s >= 500,
     isAuthFailure,
@@ -131,8 +198,22 @@ async function run(opts: InternalOptions): Promise<RunResult> {
   }
 
   let lastErr: Error | null = null;
-  let useFallback = false;
-  const canFallback = !!hostFallback && url.includes(hostFallback.from);
+  const chain =
+    hostChain && hostChain.length > 0
+      ? hostChain
+      : hostFallback && url.includes(hostFallback.from)
+        ? [hostFallback.from, hostFallback.to]
+        : null;
+  const ordered = chain ? orderHosts(chain, Date.now(), hostHealth) : null;
+  const failedHosts = new Set<string>();
+
+  /** 这次请求还没失败过的主机优先；都失败过就回到链首，次数由 maxAttempts 封顶 */
+  const nextHost = (): string | null => {
+    if (!ordered) return null;
+    const pending = ordered.filter((h) => !failedHosts.has(h));
+    if (pending.length > 0) return pending[0];
+    return ordered[failedHosts.size % ordered.length];
+  };
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     if (signal?.aborted) {
@@ -140,7 +221,17 @@ async function run(opts: InternalOptions): Promise<RunResult> {
       throw new DOMException('Aborted', 'AbortError');
     }
 
-    const reqUrl = useFallback && hostFallback ? url.replace(hostFallback.from, hostFallback.to) : url;
+    const host = nextHost();
+    const reqUrl = host ? withHost(url, host) : url;
+    /** 这次失败记到当前主机上。返回 true 表示还可以再试 */
+    const miss = (err: Error): boolean => {
+      lastErr = err;
+      if (host) {
+        failedHosts.add(host);
+        rememberHostFailure(host);
+      }
+      return attempt < maxAttempts;
+    };
     const ctrl = new AbortController();
     const onAbort = (): void => ctrl.abort();
     if (signal) signal.addEventListener('abort', onAbort, { once: true });
@@ -155,9 +246,7 @@ async function run(opts: InternalOptions): Promise<RunResult> {
         record(sourceId, { ok: false, latencyMs: Date.now() - startedAt, error: 'canceled' });
         throw e;
       }
-      lastErr = wrap(`${label}请求失败: ${e instanceof Error ? e.message : e}`);
-      if (canFallback) useFallback = true;
-      if (attempt < maxAttempts) {
+      if (miss(wrap(`${label}请求失败: ${e instanceof Error ? e.message : e}`))) {
         await sleep(retryBaseMs * attempt);
         continue;
       }
@@ -180,9 +269,8 @@ async function run(opts: InternalOptions): Promise<RunResult> {
     if (!res.ok && !isManualRedirect) {
       const e = wrap(`${label} ${res.status}`) as HttpError;
       e.status = res.status;
-      if (retryOnStatus(res.status) && attempt < maxAttempts) {
-        lastErr = e;
-        if (canFallback) useFallback = true;
+      // 5xx 由 miss 记一次主机失败。4xx 不重试，也不记主机失败，避免一只无效代码把主站打进冷却。
+      if (retryOnStatus(res.status) && miss(e)) {
         await sleep(retryBaseMs * attempt);
         continue;
       }
@@ -192,10 +280,12 @@ async function run(opts: InternalOptions): Promise<RunResult> {
 
     let text: string;
     try {
-      text = await res.text();
+      text =
+        encoding === 'gbk'
+          ? new TextDecoder('gbk').decode(await res.arrayBuffer())
+          : await res.text();
     } catch {
-      lastErr = wrap(`${label}响应读取失败`);
-      if (attempt < maxAttempts) {
+      if (miss(wrap(`${label}响应读取失败`))) {
         await sleep(retryBaseMs * attempt);
         continue;
       }
@@ -205,6 +295,7 @@ async function run(opts: InternalOptions): Promise<RunResult> {
     if (parse === 'text') {
       const result: RunResult = { status: res.status, text, location: res.headers.get('location') };
       if (cacheTtlMs > 0) cachePut(key, result, cacheTtlMs);
+      rememberHostSuccess(host);
       record(sourceId, { ok: true, latencyMs: Date.now() - startedAt });
       return result;
     }
@@ -214,8 +305,7 @@ async function run(opts: InternalOptions): Promise<RunResult> {
     try {
       json = JSON.parse(text) as Record<string, unknown>;
     } catch {
-      lastErr = wrap(`${label}响应解析失败`);
-      if (attempt < maxAttempts) {
+      if (miss(wrap(`${label}响应解析失败`))) {
         await sleep(retryBaseMs * attempt);
         continue;
       }
@@ -223,8 +313,7 @@ async function run(opts: InternalOptions): Promise<RunResult> {
     }
     const invalid = validate ? validate(json) : null;
     if (invalid) {
-      lastErr = wrap(invalid);
-      if (attempt < maxAttempts) {
+      if (miss(wrap(invalid))) {
         await sleep(retryBaseMs * attempt);
         continue;
       }
@@ -233,6 +322,7 @@ async function run(opts: InternalOptions): Promise<RunResult> {
     const result: RunResult = { status: res.status, text, json };
     // 只缓存解析后的 json：requestJson 不读 text，留着等于把同一份响应存两遍
     if (cacheTtlMs > 0) cachePut(key, { status: res.status, text: '', json }, cacheTtlMs);
+    rememberHostSuccess(host);
     record(sourceId, { ok: true, latencyMs: Date.now() - startedAt });
     return result;
   }

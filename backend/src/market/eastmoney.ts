@@ -19,6 +19,7 @@ import type {
   TurnoverTotal,
 } from '@stock-agent/shared';
 import { getTrendsTencent, getIndicesTencent } from './tencent';
+import { fetchThsUpDown } from './thsPublic';
 import { requestJson } from '../datasource/httpClient';
 import { num, numOrNull, toSecid, PUSH2_QT } from '../datasource/codes';
 import { getQuotes as scheduleQuotes, getKline as scheduleKline } from '../datasource/scheduler';
@@ -28,11 +29,14 @@ import { isTradingDay, prevTradingDay, shanghaiDateStr } from './calendar';
 // 统一 fltt=2 直接拿小数值；diff 在 full=1 时为对象，兼容对象/数组。
 
 const PUSH2 = PUSH2_QT;
-// push2 实时行情主 host 偶发被限流/封禁（连接秒级 reset，fetch failed），
-// push2delay 是同一套 API 的延迟行情镜像（schema 完全一致），作为主 host 网络失败时的兜底。
-const PUSH2_HOST = 'push2.eastmoney.com';
-const PUSH2_DELAY_HOST = 'push2delay.eastmoney.com';
+// 同一条行情接口的三个主机。主站被封或返回空数据时按这个顺序换，
+// 最近成功的主机会被提到前面（见 httpClient.hostChain）。
+// push2delay / push2delay2 是延迟行情，只能在主站不可用时顶上。
+const PUSH2_HOSTS = ['push2.eastmoney.com', 'push2delay.eastmoney.com', 'push2delay2.eastmoney.com'];
+const PUSH2HIS_HOSTS = ['push2his.eastmoney.com', 'push2delay2.eastmoney.com'];
 const PUSH2HIS = 'https://push2his.eastmoney.com/api/qt';
+/** 爱盯盘提供的东财历史 K 线备用地址，仅在直连东财全部失败后使用。 */
+const IDINGPAN_KLINE_PROXY = 'https://noisy-disk-b11f.yxbzcy.workers.dev/push2his/api/qt/stock/kline/get';
 const PUSH2EX = 'https://push2ex.eastmoney.com';
 const PUSH2EX_UT = '7eea3edcaed734bea9cbfc24409ed989';
 const UA =
@@ -116,16 +120,55 @@ export interface FetchJsonOptions {
   headers?: Record<string, string>;
   /** 错误信息前缀，默认「东财行情」 */
   label?: string;
+  /** 最大请求次数，默认按地址类型决定。 */
+  maxAttempts?: number;
   /** 校验返回 JSON 是否含有效数据；返回 false 视为可重试失败（如腾讯 schema 文档） */
   validate?: (json: Record<string, unknown>) => boolean;
+  /**
+   * 允许 data 为空。分时停牌、资金流没记录时是正常空结果，不能当成限流去换主机。
+   * 默认不放行：空 data / 空列表会换下一个主机。
+   */
+  allowEmpty?: boolean;
   /** 调用统计归属的数据源 id（东财=eastmoney，腾讯/新浪兜底各自归源），默认 eastmoney */
   sourceId?: string;
 }
 
 /**
+ * 这条东财地址该轮哪一组主机。搜索、外盘、涨停池不在这两组里，失败就失败。
+ */
+function eastmoneyHostChain(url: string): string[] | undefined {
+  if (url.includes('push2his.eastmoney.com')) return PUSH2HIS_HOSTS;
+  if (
+    url.includes('push2.eastmoney.com') ||
+    url.includes('push2delay.eastmoney.com') ||
+    url.includes('push2delay2.eastmoney.com')
+  ) {
+    return PUSH2_HOSTS;
+  }
+  return undefined;
+}
+
+/**
+ * 空 data、空列表当成这次没取到。
+ * 资金流和 K 线看 klines，报价列表看 diff，其余只要 data 对象还在就算有数据。
+ */
+function hasPayload(json: Record<string, unknown>): boolean {
+  const data = json.data;
+  if (data == null || typeof data !== 'object') return false;
+  const row = data as Record<string, unknown>;
+  if ('diff' in row) {
+    if (row.diff == null) return false;
+    if (Array.isArray(row.diff)) return row.diff.length > 0;
+    return Object.keys(row.diff as object).length > 0;
+  }
+  if ('klines' in row) return Array.isArray(row.klines) && row.klines.length > 0;
+  if ('trends' in row) return Array.isArray(row.trends) && row.trends.length > 0;
+  return true;
+}
+
+/**
  * 带缓存 + 重试 + 响应体校验的行情 JSON 拉取（统一走 datasource/httpClient）。
- * 网络错误 / 5xx / JSON 解析失败 / validate 未过 → 退避后重试；4xx 直接抛出。
- * push2 主 host 网络/5xx 失败后自动切 push2delay 延迟镜像。
+ * 网络错误 / 5xx / JSON 解析失败 / 空数据 → 换下一个主机再试；4xx 直接抛出。
  */
 export async function getJson(
   url: string,
@@ -133,17 +176,19 @@ export async function getJson(
 ): Promise<Record<string, unknown>> {
   const { headers, validate } = opts;
   const label = opts.label ?? '东财行情';
+  const chain = eastmoneyHostChain(url);
+  const check = validate ?? (chain && !opts.allowEmpty ? hasPayload : undefined);
   return requestJson({
     sourceId: opts.sourceId ?? 'eastmoney',
     url,
     headers: { 'User-Agent': UA, Referer: 'https://quote.eastmoney.com/', ...headers },
     cacheTtlMs: 15_000,
-    maxAttempts: 4,
+    maxAttempts: opts.maxAttempts ?? (chain ? Math.max(4, chain.length) : 4),
     retryBaseMs: 500,
-    hostFallback: { from: PUSH2_HOST, to: PUSH2_DELAY_HOST },
+    hostChain: chain,
     errorLabel: label,
     makeError: (msg) => new MarketError(msg),
-    validate: validate ? (json) => (validate(json) ? null : `${label}返回无有效数据`) : undefined,
+    validate: check ? (json) => (check(json) ? null : `${label}返回无有效数据`) : undefined,
   });
 }
 
@@ -527,22 +572,40 @@ export async function getKlineEastmoney(
 ): Promise<KlineBar[]> {
   const resolved = secid ?? buildKlineSecid(code);
   const klt = KLT_MAP[period] ?? 101;
-  const url = `${PUSH2HIS}/stock/kline/get?secid=${resolved}&klt=${klt}&fqt=1&end=20500101&lmt=${limit}&fields1=f1&fields2=f51,f52,f53,f54,f55,f56,f57`;
-  const json = await getJson(url);
-  const data = json.data as { klines?: string[] } | null;
-  const kl = data?.klines ?? [];
-  return kl.map((row) => {
-    const [time, open, close, high, low, volume, amount] = row.split(',');
-    return {
-      time,
-      open: num(open),
-      close: num(close),
-      high: num(high),
-      low: num(low),
-      volume: num(volume),
-      amount: num(amount),
-    } satisfies KlineBar;
-  });
+  const query = `secid=${resolved}&klt=${klt}&fqt=1&end=20500101&lmt=${limit}&fields1=f1&fields2=f51,f52,f53,f54,f55,f56,f57`;
+  const parse = (json: Record<string, unknown>): KlineBar[] => {
+    const data = json.data as { klines?: string[] } | null;
+    const kl = data?.klines ?? [];
+    return kl.map((row) => {
+      const [time, open, close, high, low, volume, amount] = row.split(',');
+      return {
+        time,
+        open: num(open),
+        close: num(close),
+        high: num(high),
+        low: num(low),
+        volume: num(volume),
+        amount: num(amount),
+      } satisfies KlineBar;
+    });
+  };
+  try {
+    return parse(await getJson(`${PUSH2HIS}/stock/kline/get?${query}`));
+  } catch (direct) {
+    try {
+      return parse(
+        await getJson(`${IDINGPAN_KLINE_PROXY}?${query}`, {
+          label: '历史 K 线备用行情',
+          maxAttempts: 1,
+          validate: hasPayload,
+        }),
+      );
+    } catch (fallback) {
+      const first = direct instanceof Error ? direct.message : String(direct);
+      const second = fallback instanceof Error ? fallback.message : String(fallback);
+      throw new MarketError(`${first}；备用地址也失败：${second}`);
+    }
+  }
 }
 
 /**
@@ -570,7 +633,7 @@ export async function getTrends(code: string, secid?: string): Promise<TrendsRes
 export async function getTrendsEastmoney(code: string, secid?: string): Promise<TrendsResult> {
   const resolved = secid ?? buildKlineSecid(code);
   const url = `${PUSH2HIS}/stock/trends2/get?secid=${resolved}&fields1=f1,f2,f3,f7,f8&fields2=f51,f52,f53,f54,f55,f56,f57,f58&iscr=0&ndays=1&fltt=2`;
-  const json = await getJson(url);
+  const json = await getJson(url, { allowEmpty: true });
   const data = json.data as { preClose?: unknown; name?: unknown; trends?: string[] } | null;
   // 无分时数据（场外基金/停牌/部分指数板块）：返回空点位由前端提示「暂不支持分时」，不抛 502
   if (!data) return { code, name: '', prevClose: 0, points: [] };
@@ -774,7 +837,7 @@ async function getFundFlowBySecid(
   // 实测普通 kline 一并被封，见 datasource/providers.ts 的记录）；
   // push2delay 延迟镜像可达但无视 lmt、只回当日一根。故优先 push2his 取全量历史，失败回退保底当日。
   const fetchFrom = async (host: string): Promise<{ name: string; rows: string[]; host: string }> => {
-    const json = await getJson(`https://${host}/api/qt/${qs}`);
+    const json = await getJson(`https://${host}/api/qt/${qs}`, { allowEmpty: true });
     const data = json.data as { name?: string; klines?: string[] } | null;
     return { name: String(data?.name ?? ''), rows: data?.klines ?? [], host };
   };
@@ -947,6 +1010,7 @@ export async function getEmotionWithDate(): Promise<{ emotion: MarketEmotion; da
   ]);
   const maxStreak = zt.pool.reduce((m, p) => Math.max(m, p.lbc ?? 0), 0);
   const denom = zt.tc + zb.tc;
+  const breadth = await fetchThsUpDown().catch(() => null);
   return {
     emotion: {
       limitUp: zt.tc,
@@ -954,6 +1018,7 @@ export async function getEmotionWithDate(): Promise<{ emotion: MarketEmotion; da
       brokenBoard: zb.tc,
       brokenRate: denom > 0 ? (zb.tc / denom) * 100 : 0,
       maxStreak,
+      ...(breadth ? { up: breadth.up, down: breadth.down, flat: breadth.flat } : {}),
     },
     date: zt.date ?? dt.date ?? zb.date,
   };

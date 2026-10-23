@@ -25,6 +25,7 @@ import { callAkshare } from '../market/akshare';
 import { pingAstock } from '../astock/client';
 import { fetchCffexRank } from '../market/cffexRank';
 import { buildUsMapping } from '../market/usMapping';
+import { pingThsMarket } from '../market/thsPublic';
 import { ping as pingCls } from '../cls/service';
 import { ping as pingWeibo } from '../kol/weibo';
 import { ping as pingXhs } from '../kol/xiaohongshu';
@@ -66,7 +67,7 @@ const SOURCES: SourceDef[] = [
     category: '行情',
     protocol: 'http-rest',
     baseUrl: 'push2.eastmoney.com',
-    description: 'A 股/指数/期货/板块实时与历史行情主源（push2/push2his/push2ex），无需鉴权，主 host 失败自动切 push2delay。报价/ K 线调度的首选源。',
+    description: 'A 股、指数、期货、板块的行情。主站连不上或没有数据时，会改试另外两个同内容的地址。历史 K 线仍失败时，再试一个备用地址。实时报价排在通达信和腾讯后面。',
     enabledKey: 'eastmoneyEnabled',
     fields: [],
     healthCheck: () => pingEastmoney(),
@@ -77,7 +78,7 @@ const SOURCES: SourceDef[] = [
     category: '行情',
     protocol: 'http-rest',
     baseUrl: 'web.ifzq.gtimg.cn',
-    description: 'K 线调度第 2 兜底源（分时/K 线/指数），需 Referer: gu.qq.com。关闭后不参与 K 线调度。',
+    description: 'K 线、分时、指数和批量现价的备用源。公开 K 线取不到时，会再试腾讯自选股。关闭后这些都不再用它。',
     enabledKey: 'tencentEnabled',
     fields: [],
     healthCheck: async () => {
@@ -182,6 +183,16 @@ const SOURCES: SourceDef[] = [
         throw new Error('美股映射取数为空（push2 无返回或 secid 全部失效）');
       }
     },
+  },
+  {
+    id: 'ths-market',
+    name: '同花顺涨跌家数',
+    category: '行情',
+    protocol: 'http-rest',
+    baseUrl: 'dq.10jqka.com.cn',
+    description: '全市场上涨、下跌、平盘各有多少家。大盘页情绪条在涨停、跌停旁边显示。不需要登录。',
+    fields: [],
+    healthCheck: () => pingThsMarket(),
   },
   {
     id: 'ths',

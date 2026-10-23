@@ -1,6 +1,6 @@
 import type { KlineBar, KlinePeriod, StockQuote } from '@stock-agent/shared';
 import { getQuotesEastmoney, getKlineEastmoney } from '../market/eastmoney';
-import { getKlineTencent } from '../market/tencent';
+import { getKlineTencent, getKlineTencentXcx, getQuotesTencent } from '../market/tencent';
 import { getKlineSina } from '../market/sina';
 import { getKlineAstock, getQuotesAstock } from '../astock/market';
 
@@ -17,9 +17,9 @@ import { getKlineAstock, getQuotesAstock } from '../astock/market';
 // 代价：mootdx 不返回个股名称与换手/量比。名称由 scheduler 回填，换手/量比缺失的消费方本就按可选处理。
 //
 // K 线顺序不变：分钟线 mootdx 首选（同样因不封 IP），日线经 fetchDailyAdjusted 统一复权修正后按数据完整度排。
-// 注：腾讯/新浪实时报价为 GBK 接口（名称需 iconv 解码），故不纳入报价 provider，仅做 K 线兜底。
+// 腾讯批量现价（qt.gtimg.cn）是实时的，排在通达信之后、东财之前：东财主站被封时会落到延迟行情。
 // a-stock-data 未配置 Base URL / sidecar 不可用时，对应 provider 会快速失败并转下一源，不影响调度。
-// 当前报价链只剩 a-stock-data → 东财。网易已退出（api.money.126.net 域名不存在），不进 QUOTE_PROVIDERS。
+// 当前报价链是 a-stock-data → 腾讯 → 东财。网易已退出（api.money.126.net 域名不存在），不进 QUOTE_PROVIDERS。
 
 export interface QuoteProvider {
   sourceId: string;
@@ -33,15 +33,18 @@ export interface KlineProvider {
 
 export const QUOTE_PROVIDERS: QuoteProvider[] = [
   { sourceId: 'astockdata', fn: getQuotesAstock },
+  { sourceId: 'tencent', fn: getQuotesTencent },
   { sourceId: 'eastmoney', fn: getQuotesEastmoney },
 ];
 
 // K 线按周期分两条链（scheduler 据 isMinutePeriod 选择）：
 // 分钟线：mootdx(通达信 TCP，不封 IP) 首选——其返回的是不复权价，但 scheduler 会以「日线前复权」为锚
-//   做前复权修正(frontAdjustMinute)，故分钟首选可用不复权源；腾讯次之，东财(31子网被封→快速失败)再次，新浪末位。
+//   做前复权修正(frontAdjustMinute)，故分钟首选可用不复权源；公开腾讯次之，腾讯自选股签名接口再补一次，
+//   东财（包含爱盯盘备用地址）随后，新浪末位。
 export const KLINE_PROVIDERS_INTRADAY: KlineProvider[] = [
   { sourceId: 'astockdata', fn: getKlineAstock },
   { sourceId: 'tencent', fn: getKlineTencent },
+  { sourceId: 'tencent', fn: getKlineTencentXcx },
   { sourceId: 'eastmoney', fn: getKlineEastmoney },
   { sourceId: 'sina', fn: getKlineSina },
 ];
@@ -59,6 +62,7 @@ export const KLINE_PROVIDERS_INTRADAY: KlineProvider[] = [
 //   - 新浪末位兜底：无成交额、也不复权，仅保证「有价可用」。
 export const KLINE_PROVIDERS_DAILY: KlineProvider[] = [
   { sourceId: 'tencent', fn: getKlineTencent },
+  { sourceId: 'tencent', fn: getKlineTencentXcx },
   { sourceId: 'eastmoney', fn: getKlineEastmoney },
   { sourceId: 'astockdata', fn: getKlineAstock },
   { sourceId: 'sina', fn: getKlineSina },
